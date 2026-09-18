@@ -143,31 +143,20 @@ class FakePhishingRepository:
 class FakePhishingService:
     """Mesma interface publica de PhishingEmailService, sem Postgres.
 
-    Reaproveita o `level_mapping` real (copiado, nao importado, para o
-    fake nao quebrar se a implementacao real mudar de assinatura) porque
-    e logica de dominio que os testes de contrato de dificuldade (#2)
-    precisam exercitar de verdade, nao so a chamada ao repositorio.
+    Espelha a validacao estrita de `create_email` (issue #2): recebe
+    `nivel` ja normalizado pelo endpoint e falha alto se nao for um dos
+    tres valores canonicos, em vez de aceitar qualquer coisa. Um fake
+    mais permissivo que a implementacao real deixaria passar batido
+    exatamente o tipo de regressao que os testes de contrato de
+    dificuldade existem para pegar.
     """
 
     def __init__(self):
         self.repository = FakePhishingRepository()
-        self.level_mapping = {
-            "facil": "facil",
-            "medio": "medio",
-            "dificil": "dificil",
-            "fácil": "facil",
-            "médio": "medio",
-            "difícil": "dificil",
-            "easy": "facil",
-            "medium": "medio",
-            "hard": "dificil",
-        }
 
     async def create_email(self, email: PhishingEmail):
-        normalized = self.level_mapping.get(email.nivel.lower().strip())
-        if normalized is None:
-            normalized = "medio"
-        email.nivel = normalized
+        if email.nivel not in ("facil", "medio", "dificil"):
+            raise ValueError(f"nivel invalido chegou ao fake: '{email.nivel}'")
         return await self.repository.create(email)
 
     async def get_email_by_id(self, email_id):

@@ -129,20 +129,23 @@ class ResponseGenerator:
     async def generate_response(self, difficulty: str, context: str, relevant_docs):
         """
         Gera um email de phishing baseado no contexto, dificuldade e documentos relevantes.
-        
+
         Args:
-            difficulty: Nível de dificuldade ('fácil', 'médio', 'difícil')
+            difficulty: Nível de dificuldade, já validado e normalizado
+                pelo chamador -- um dos três valores canônicos
+                ('facil', 'medio', 'dificil'; ver
+                app.domain.models.difficulty.Difficulty). Esta função
+                não valida nem normaliza mais: antes, um valor fora do
+                vocabulário caía num fallback silencioso para 'médio',
+                o que escondia o contrato quebrado corrigido na issue
+                #2 em vez de expor o problema.
             context: Contexto específico do cenário
             relevant_docs: Documentos acadêmicos relevantes
         """
         try:
-            difficulty_normalized = difficulty.lower().strip()
-            if difficulty_normalized not in ['fácil', 'médio', 'difícil', 'facil', 'medio', 'dificil']:
-                difficulty_normalized = 'médio'
-            
             return await self.chain.ainvoke({
                 "context": context,
-                "difficulty": difficulty_normalized,
+                "difficulty": difficulty,
                 "relevant_docs": relevant_docs
             })
         except Exception as e:

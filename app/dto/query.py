@@ -1,8 +1,10 @@
 from pydantic import BaseModel, Field
 
+from app.domain.models.difficulty import Difficulty
+
 
 class QueryRequest(BaseModel):
-    difficulty: str
+    difficulty: Difficulty
     user_context: str = Field(alias="context")
 
     class Config:
