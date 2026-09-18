@@ -6,6 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Qu
 from ragas.embeddings import BaseRagasEmbeddings
 from ragas.llms import BaseRagasLLM
 
+from app.core.config import settings
 from app.core.container import Container
 # TODO(#8): importado mas nunca chamado no corpo de generate() — decidir
 # entre ligar via background_tasks ou remover, junto com os parametros
@@ -63,7 +64,7 @@ async def generate(
     # 3. Retrieve (Busca Inicial)
     try:
         candidate_docs = retriever.vector_store.query(
-            collection_name="phishing_articles", query_text=hyde_context, top_k=20
+            collection_name=settings.COLLECTION_NAME, query_text=hyde_context, top_k=20
         )
     except Exception as e:
         raise HTTPException(
@@ -134,7 +135,7 @@ async def generate_batch(
 
     try:
         relevant_docs = retriever.vector_store.query(
-            collection_name="phishing_articles", query_text=context, top_k=80
+            collection_name=settings.COLLECTION_NAME, query_text=context, top_k=80
         )
     except Exception as e:
         raise HTTPException(

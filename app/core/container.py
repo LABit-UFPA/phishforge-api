@@ -7,7 +7,6 @@ from ragas.llms import LangchainLLMWrapper
 
 from app.core.config import settings
 from app.domain.services.document_processor import DocumentProcessor
-from app.domain.services.embedding_service import EmbeddingService
 from app.domain.services.openai.embedding_client import OpenAIEmbeddingClient
 from app.domain.services.phishing_service import PhishingEmailService
 from app.domain.services.pipeline import IngestionPipeline
@@ -15,9 +14,6 @@ from app.domain.services.prompt_normalizer import PromptNormalizer
 from app.domain.services.reranker import ReRanker
 from app.domain.services.response_generator import ResponseGenerator
 from app.domain.services.retriever import DocumentRetriever
-from app.domain.services.sentence_transformers.embedding_client import (
-    SentenceTransformersEmbeddingClient,
-)
 from app.domain.services.user_answer_evaluator import UserAnswerEvaluator
 from app.infra.database.connection import DatabaseConnection, get_db_pool
 from app.infra.database.repositories.analytics_repository import AnalyticsRepository
@@ -52,24 +48,34 @@ class Container(containers.DeclarativeContainer):
         url=config.QDRANT_URL,
     )
 
-    embedding_client_st = providers.Singleton(
-        SentenceTransformersEmbeddingClient,
-        model_name=config.MODEL_NAME_EMBEDDING
-    )
-
     embedding_client_openai = providers.Singleton(
         OpenAIEmbeddingClient,
         api_key=config.OPENAI_API_KEY,
         model="text-embedding-3-small"
     )
 
+    # ATENCAO: o modelo de embedding acima e a dimensao configurada em
+    # EMBEDDING_DIMENSION (app/core/config.py) tem que ser o MESMO par
+    # usado para ingerir a colecao Qdrant existente. Trocar o modelo
+    # muda o espaco vetorial inteiro -- nao e uma troca de config, e uma
+    # reingestao completa (apagar a colecao e rodar
+    # script/run_ingestion.py de novo). O app valida isso no start (ver
+    # main.py) e recusa subir se a dimensao da colecao existente nao
+    # bater com EMBEDDING_DIMENSION -- ver issue #12.
     qdrant_store = providers.Singleton(
         QdrantVectorStore,
         client=qdrant_client,
-        embedding_client=embedding_client_openai,  # ou troca por embedding_client_st se quiser
+        embedding_client=embedding_client_openai,
     )
-    
-    reranker = providers.Factory(
+
+    # Singleton: o cross-encoder e um modelo de ML carregado do disco no
+    # __init__ de ReRanker. Como Factory, cada resolucao (ou seja, cada
+    # request que injeta este provider) recarregava o modelo do zero --
+    # ver issue #12. CrossEncoder.predict() e chamado de forma sincrona
+    # dentro de handlers async, nunca em thread separada, entao chamadas
+    # concorrentes ja sao serializadas pelo proprio event loop; nao ha
+    # necessidade de lock adicional para o uso atual.
+    reranker = providers.Singleton(
         ReRanker
     )
 
@@ -88,25 +94,22 @@ class Container(containers.DeclarativeContainer):
         db_pool=db_pool
     )
 
-
-    embedding_service = providers.Factory(
-        EmbeddingService,
-        embedding_client=embedding_client_st  # ou embedding_client_openai
-    )
-
-    response_generator = providers.Factory(
+    # Singleton pelo mesmo motivo do reranker: o construtor monta um
+    # cliente ChatOpenAI (e, no caso do response_generator, os prompts e
+    # as chains) uma vez, em vez de recriar tudo isso a cada request.
+    response_generator = providers.Singleton(
         ResponseGenerator,
         api_key=config.OPENAI_API_KEY,
         model_name=config.MODEL_NAME_LLM,
     )
-    
-    prompt_normalizer = providers.Factory(
+
+    prompt_normalizer = providers.Singleton(
         PromptNormalizer,
         api_key=config.OPENAI_API_KEY
         # O model_name "gpt-4o-mini" será usado como default da própria classe
     )
 
-    user_answer_evaluator = providers.Factory(
+    user_answer_evaluator = providers.Singleton(
         UserAnswerEvaluator,
         api_key=config.OPENAI_API_KEY
     )
