@@ -74,7 +74,7 @@ class FakeResponseGenerator:
         return "contexto fundido fake"
 
     async def generate_response(
-        self, difficulty: str, context: str, relevant_docs
+        self, difficulty: str, context: str, relevant_docs, is_malicious: bool = True
     ) -> GeneratedItemDraft:
         self.calls.append(
             {
@@ -82,6 +82,7 @@ class FakeResponseGenerator:
                 "difficulty": difficulty,
                 "context": context,
                 "relevant_docs": relevant_docs,
+                "is_malicious": is_malicious,
             }
         )
         # Sem `nivel`: o draft nunca inclui dificuldade (issue #11) --
@@ -186,6 +187,39 @@ class FakePhishingService:
 
     async def get_email_by_id(self, email_id):
         return await self.repository.get_by_id(email_id)
+
+
+class FakeUserAnswerScore:
+    """Espelha app.domain.services.user_answer_evaluator.UserAnswerScore."""
+
+    def __init__(self, score=3, feedback="feedback fake", strengths=None, improvements=None, acerto_por_sorte=False):
+        self.score = score
+        self.feedback = feedback
+        self.strengths = strengths or ["ponto forte fake"]
+        self.improvements = improvements or ["ponto de melhoria fake"]
+        self.acerto_por_sorte = acerto_por_sorte
+
+
+class FakeUserAnswerEvaluator:
+    """Substitui UserAnswerEvaluator sem chamar nenhum LLM. Registra os
+    argumentos recebidos -- e o que os testes de contrato da #4 usam
+    para provar que is_malicious/user_verdict chegam corretamente do
+    endpoint, sem depender do LLM realmente distinguir os 4 casos.
+    """
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def evaluate(self, item_content, is_malicious, user_verdict, user_justification):
+        self.calls.append(
+            {
+                "item_content": item_content,
+                "is_malicious": is_malicious,
+                "user_verdict": user_verdict,
+                "user_justification": user_justification,
+            }
+        )
+        return FakeUserAnswerScore()
 
 
 class FakeDbConnection:

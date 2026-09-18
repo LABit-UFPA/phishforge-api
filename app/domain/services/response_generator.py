@@ -32,7 +32,15 @@ class ResponseGenerator:
                 "## 3. ESPECIFICAÇÃO DA TAREFA\n"
                 "**Nível de Dificuldade:** {difficulty}\n"
                 "**Cenário Específico:** {context}\n\n"
-                
+
+                "### VARIEDADE ESTRUTURAL (OBRIGATÓRIO)\n"
+                "Nem todo phishing tem link: peça de dados por resposta direta, por anexo, "
+                "ou peça uma ligação para um número informado no próprio email, variando entre "
+                "os itens gerados. Um golpe que sempre depende de clicar em um link é menos "
+                "realista e, em um corpus de pesquisa, cria um atalho estrutural (presença de "
+                "link prevendo o rótulo) que permite ao participante acertar sem ler o "
+                "conteúdo -- isso invalida a medição.\n\n"
+
                 "### CARACTERÍSTICAS DOS NÍVEIS DE DIFICULDADE\n\n"
                 
                 "**FÁCIL:**\n"
@@ -111,24 +119,108 @@ class ResponseGenerator:
             )
         )
         
+        # Prompt SEPARADO para item legitimo (issue #3) -- nao e o
+        # prompt de phishing com uma flag. O objetivo muda de
+        # "construir isca convincente" para "construir comunicacao
+        # real plausivel", entao o raciocinio, os criterios de
+        # validacao e o que conta como "bom resultado" sao outros.
+        self.legitimate_prompt_template = PromptTemplate(
+            input_variables=["context", "difficulty", "relevant_docs"],
+            template=(
+                "## 1. INSTRUÇÃO DE SISTEMA\n"
+                "Você é um especialista em comunicação corporativa e segurança da informação, "
+                "encarregado de escrever uma comunicação LEGÍTIMA e REAL (não um golpe) para um "
+                "instrumento de pesquisa sobre detecção de phishing. Este item é o lado "
+                "'controle' do experimento: precisa ser indistinguível, em qualidade e forma, de "
+                "uma comunicação genuína que a organização mandaria.\n\n"
+
+                "## 2. CONTEXTO RECUPERADO\n"
+                "**CONHECIMENTO ACADÊMICO DA BASE VETORIAL (sinais de PHISHING a EVITAR):**\n"
+                "{relevant_docs}\n\n"
+                "Use este material apenas como lista negativa: identifique as táticas descritas "
+                "e garanta que NENHUMA delas apareça no item que você vai gerar.\n\n"
+
+                "## 3. ESPECIFICAÇÃO DA TAREFA\n"
+                "**Nível de Dificuldade:** {difficulty}\n"
+                "**Cenário Específico:** {context}\n\n"
+
+                "### O QUE TORNA O ITEM LEGÍTIMO (OBRIGATÓRIO)\n"
+                "- Domínio do remetente coerente e plausível para a organização do cenário\n"
+                "- NUNCA pede senha, código de verificação, dados de cartão ou qualquer credencial\n"
+                "- Se houver uma ação a tomar, direciona a um canal PRÓPRIO e já conhecido "
+                "('abra o aplicativo oficial', 'acesse o portal interno pelo link que você já usa'), "
+                "nunca a um link novo e desconhecido\n"
+                "- Oferece um canal alternativo verificável para dúvidas (ramal, telefone "
+                "institucional, e-mail de suporte já conhecido)\n"
+                "- Pode incluir um aviso de segurança real ('nós nunca pedimos sua senha por "
+                "e-mail ou telefone')\n"
+                "- Tom institucional, sem urgência artificial nem ameaça\n\n"
+
+                "### VARIEDADE ESTRUTURAL (OBRIGATÓRIO)\n"
+                "Item legítimo PODE ter link (portal interno, aplicativo do banco, área do "
+                "cliente) -- links.isEmpty não pode ser o que diferencia phishing de item "
+                "legítimo. Varie entre os itens: alguns com link para canal próprio, outros "
+                "só com instrução textual ('abra o app') ou telefone.\n\n"
+
+                "### CARACTERÍSTICAS DOS NÍVEIS DE DIFICULDADE (para o item legítimo)\n"
+                "Aqui, dificuldade não é 'quão convincente é o golpe' -- é 'quão fácil é o "
+                "participante desconfiar sem motivo real' (o risco de falso alarme que este "
+                "item testa):\n\n"
+
+                "**FÁCIL:** sinais de confiança óbvios e numerosos -- domínio claramente "
+                "oficial, saudação personalizada, nenhuma urgência, aviso de segurança explícito.\n\n"
+
+                "**MÉDIO:** legítimo mas com algum elemento que poderia gerar dúvida à primeira "
+                "vista (ex.: um prazo real e razoável, ou um assunto pouco comum mas verdadeiro), "
+                "sem nunca cruzar para pedido de credencial ou link suspeito.\n\n"
+
+                "**DIFÍCIL:** legítimo mas com elementos que SUPERFICIALMENTE lembram phishing "
+                "(prazo apertado real, remetente de um setor incomum, assunto que soa urgente) "
+                "-- o participante precisa checar os sinais de verdade (domínio, ausência de "
+                "pedido de credencial, canal alternativo) para não cair em falso alarme.\n\n"
+
+                "## 4. CHAIN OF THOUGHT\n"
+                "**ETAPA 1 - ANÁLISE:** Qual comunicação real essa organização mandaria neste "
+                "cenário? Que rotina ela reflete?\n"
+                "**ETAPA 2 - SINAIS DE LEGITIMIDADE:** Quais dos sinais obrigatórios acima fazem "
+                "sentido aqui? Qual canal alternativo é plausível?\n"
+                "**ETAPA 3 - CONSTRUÇÃO:** Escreva o item aplicando o nível '{difficulty}' aos "
+                "sinais de confiança (não a técnicas de engenharia social -- este item não usa "
+                "nenhuma).\n"
+                "**ETAPA 4 - VALIDAÇÃO:** Confirme que nada no texto pede credencial, nenhum "
+                "link leva a domínio externo desconhecido, e não há tática de phishing da lista "
+                "negativa presente.\n\n"
+
+                "## FORMATO DE RESPOSTA\n"
+                "Gere APENAS o objeto JSON com os campos solicitados (receptor, remetente, "
+                "assunto, conteudo, explicacao, categoria, links).\n"
+                "O campo `explicacao` deve explicar POR QUE o item é confiável, listando os "
+                "sinais de legitimidade presentes -- NUNCA invente um defeito ou indicador de "
+                "phishing que não existe só para preencher o campo."
+            )
+        )
+
         self.hyde_prompt_template = PromptTemplate(
             input_variables=["query"],
             template=(
                 "Como especialista em cibersegurança, gere uma resposta técnica e específica para a consulta do usuário. "
                 "Esta resposta deve incluir terminologia precisa, conceitos técnicos e detalhes específicos que um documento acadêmico sobre o tópico conteria.\n\n"
-                
+
                 "**Consulta:** {query}\n\n"
-                
+
                 "**Resposta técnica (inclua métodos específicos, terminologia acadêmica e conceitos detalhados):**\n"
             )
         )
-        
+
         self.chain = self.prompt_template | self.llm
+        self.legitimate_chain = self.legitimate_prompt_template | self.llm
         self.hyde_chain = self.hyde_prompt_template | self.text_llm
 
-    async def generate_response(self, difficulty: str, context: str, relevant_docs) -> GeneratedItemDraft:
+    async def generate_response(
+        self, difficulty: str, context: str, relevant_docs, is_malicious: bool = True
+    ) -> GeneratedItemDraft:
         """
-        Gera um email de phishing baseado no contexto, dificuldade e documentos relevantes.
+        Gera um item (phishing ou legítimo) baseado no contexto, dificuldade e documentos relevantes.
 
         Args:
             difficulty: Nível de dificuldade, já validado e normalizado
@@ -141,15 +233,22 @@ class ResponseGenerator:
                 #2 em vez de expor o problema.
             context: Contexto específico do cenário
             relevant_docs: Documentos acadêmicos relevantes
+            is_malicious: True gera phishing (comportamento histórico,
+                default para não quebrar chamador antigo); False gera
+                item legítimo -- issue #3. NÃO é uma flag no mesmo
+                prompt: são duas chains com objetivos opostos ("montar
+                isca convincente" vs. "montar comunicação real
+                plausível"), como o item legítimo deixa explícito.
 
         Returns:
-            GeneratedItemDraft: NÃO inclui `nivel` (ver issue #11 --
-            dificuldade é entrada da geração, não saída do LLM). Quem
-            chama esta função monta o `PhishingEmail` final combinando
-            o draft com o `difficulty` acima.
+            GeneratedItemDraft: NÃO inclui `nivel` nem `is_malicious`
+            (ver issue #11 -- ambos são entrada da geração, não saída
+            do LLM). Quem chama esta função monta o `PhishingEmail`
+            final combinando o draft com os dois.
         """
+        chain = self.chain if is_malicious else self.legitimate_chain
         try:
-            return await self.chain.ainvoke({
+            return await chain.ainvoke({
                 "context": context,
                 "difficulty": difficulty,
                 "relevant_docs": relevant_docs

@@ -84,8 +84,13 @@ async def generate(
             difficulty=request.difficulty.value,
             context=built.generation_context,
             relevant_docs=built.fused_context,
+            is_malicious=request.is_malicious,
         )
-        phishing_example = PhishingEmail(**draft.model_dump(), nivel=request.difficulty.value)
+        phishing_example = PhishingEmail(
+            **draft.model_dump(),
+            nivel=request.difficulty.value,
+            is_malicious=request.is_malicious,
+        )
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error generating response: {str(e)}"
@@ -105,6 +110,9 @@ async def generate_batch(
     context: str = Body(..., embed=True),
     difficulties: list[Difficulty] = Body(..., embed=True),
     total: int = Body(default=10, embed=True),
+    # Default 1.0 preserva o comportamento historico de quem ja chama
+    # o lote sem esse campo (issue #3): 100% phishing.
+    malicious_ratio: float = Body(default=1.0, embed=True),
     pipeline: GenerationPipeline = Depends(Provide[Container.generation_pipeline]),
     response_generator: ResponseGenerator = Depends(
         Provide[Container.response_generator]
@@ -121,6 +129,10 @@ async def generate_batch(
         raise HTTPException(status_code=400, detail="O total deve ser maior que 0")
     if total > 100:
         raise HTTPException(status_code=400, detail="O total máximo permitido é 100")
+    if not 0.0 <= malicious_ratio <= 1.0:
+        raise HTTPException(
+            status_code=400, detail="malicious_ratio deve estar entre 0.0 e 1.0"
+        )
 
     # Normalizacao, HyDE, retrieve, rerank e fusao dependem so do
     # `context`, nao da dificuldade de cada item -- rodam UMA vez para
@@ -139,6 +151,9 @@ async def generate_batch(
             status_code=500, detail=f"Erro ao montar contexto: {str(e)}"
         )
 
+    # Distribuicao entre dificuldades: nao mexer nesta logica (issue
+    # #11 pede explicitamente para preserva-la). O resto nas primeiras
+    # dificuldades da lista.
     base, extra = divmod(total, len(difficulties))
     distribution = {d: base for d in difficulties}
     for i in range(extra):
@@ -151,14 +166,30 @@ async def generate_batch(
         # para o PromptTemplate (via .format()) ou embuti-lo numa
         # f-string produziria "Difficulty.FACIL" em vez de "facil".
         difficulty_value = difficulty.value
-        for _ in range(count):
+
+        # A proporcao malicioso/legitimo compoe com a distribuicao de
+        # dificuldades ja existente (issue #3): dentro de cada
+        # dificuldade, `count` itens se dividem em malicioso/legitimo
+        # segundo malicious_ratio. round() aqui e suficiente -- ao
+        # contrario da distribuicao entre dificuldades, a issue nao
+        # exige uma regra de desempate especifica para esta divisao.
+        n_malicious = round(count * malicious_ratio)
+        n_legitimate = count - n_malicious
+        itens_do_nivel = [True] * n_malicious + [False] * n_legitimate
+
+        for is_malicious in itens_do_nivel:
             try:
                 draft = await response_generator.generate_response(
                     difficulty=difficulty_value,
                     context=built.generation_context,
                     relevant_docs=built.fused_context,
+                    is_malicious=is_malicious,
                 )
-                phishing_example = PhishingEmail(**draft.model_dump(), nivel=difficulty_value)
+                phishing_example = PhishingEmail(
+                    **draft.model_dump(),
+                    nivel=difficulty_value,
+                    is_malicious=is_malicious,
+                )
                 email_id = await phishing_service.create_email(phishing_example)
                 result = phishing_example.dict()
                 result["id"] = str(email_id)
@@ -278,21 +309,26 @@ async def evaluate_user_answer(
     evaluator: UserAnswerEvaluator = Depends(Provide[Container.user_answer_evaluator]),
 ):
     """
-    Avalia a justificativa do usuário sobre identificação de phishing.
+    Avalia a qualidade do raciocínio do usuário sobre um item (malicioso ou legítimo).
 
     Recebe:
-    - phishing_example: O exemplo de phishing que foi apresentado ao usuário
-    - user_justification: A justificativa do usuário explicando por que é phishing
+    - item_content: O item que foi apresentado ao usuário
+    - is_malicious: Rótulo verdadeiro do item (True = phishing, False = legítimo)
+    - user_verdict: O que o usuário respondeu (True = "é phishing", False = "é legítimo")
+    - user_justification: A justificativa do usuário para o veredito
 
     Retorna:
-    - score: Nota de 0 a 5
+    - score: Nota de 0 a 5 pela qualidade do raciocínio
     - feedback: Feedback detalhado explicando a nota
     - strengths: Pontos fortes identificados na justificativa
     - improvements: Pontos que podem ser melhorados
+    - acerto_por_sorte: True se a conclusão bateu mas o argumento não a sustenta
     """
     try:
         result = await evaluator.evaluate(
-            phishing_example=request.phishing_example,
+            item_content=request.item_content,
+            is_malicious=request.is_malicious,
+            user_verdict=request.user_verdict,
             user_justification=request.user_justification,
         )
         return UserAnswerEvaluationResponse(
@@ -300,6 +336,7 @@ async def evaluate_user_answer(
             feedback=result.feedback,
             strengths=result.strengths,
             improvements=result.improvements,
+            acerto_por_sorte=result.acerto_por_sorte,
         )
     except Exception as e:
         raise HTTPException(

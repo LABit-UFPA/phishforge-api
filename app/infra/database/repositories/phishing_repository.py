@@ -14,9 +14,9 @@ class PhishingEmailRepository:
         """Cria um novo email de phishing no banco"""
         async with self.db.get_connection() as conn:
             query = """
-                INSERT INTO phishing_emails 
-                (receptor, remetente, assunto, conteudo, explicacao, nivel, categoria, links)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                INSERT INTO phishing_emails
+                (receptor, remetente, assunto, conteudo, explicacao, nivel, categoria, links, is_malicious)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 RETURNING id
             """
             return await conn.fetchval(
@@ -29,14 +29,15 @@ class PhishingEmailRepository:
                 email.nivel,
                 email.categoria,
                 json.dumps(email.links) if email.links else "[]",
+                email.is_malicious,
             )
 
     async def get_by_id(self, email_id: UUID) -> Optional[PhishingEmail]:
         async with self.db.get_connection() as conn:
             query = """
-                SELECT id, receptor, remetente, assunto, conteudo, explicacao, 
-                       nivel, categoria, links, created_at, updated_at
-                FROM phishing_emails 
+                SELECT id, receptor, remetente, assunto, conteudo, explicacao,
+                       nivel, categoria, links, is_malicious, created_at, updated_at
+                FROM phishing_emails
                 WHERE id = $1
             """
             row = await conn.fetchrow(query, email_id)
@@ -148,6 +149,7 @@ class PhishingEmailRepository:
             nivel=row["nivel"],
             categoria=row["categoria"],
             links=json.loads(row["links"]) if row["links"] else [],
+            is_malicious=row["is_malicious"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )

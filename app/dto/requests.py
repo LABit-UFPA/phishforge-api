@@ -30,10 +30,24 @@ class EmailSearchRequest(BaseModel):
 
 
 class UserAnswerEvaluationRequest(BaseModel):
-    """Request DTO para avaliação da justificativa do usuário"""
-    phishing_example: str = Field(
-        description="O exemplo de phishing que foi apresentado ao usuário"
+    """Request DTO para avaliação da justificativa do usuário.
+
+    Issue #4: o campo `phishing_example` carregava a premissa de que o
+    item é sempre phishing no próprio nome -- renomeado para
+    `item_content`. `is_malicious` (rótulo verdadeiro) e `user_verdict`
+    (o que o usuário respondeu) são novos: sem eles, o avaliador não
+    tinha como saber se o usuário acertou, nem em qual dos quatro casos
+    (malicioso/legítimo x acertou/errou) a avaliação cai.
+    """
+    item_content: str = Field(
+        description="O item (malicioso ou legítimo) que foi apresentado ao usuário"
+    )
+    is_malicious: bool = Field(
+        description="Rótulo verdadeiro do item: True se é phishing, False se é legítimo"
+    )
+    user_verdict: bool = Field(
+        description="O que o usuário respondeu: True para 'é phishing', False para 'é legítimo'"
     )
     user_justification: str = Field(
-        description="A justificativa do usuário explicando por que o exemplo é phishing"
+        description="A justificativa do usuário para o veredito acima"
     )

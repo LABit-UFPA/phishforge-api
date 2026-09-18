@@ -4,7 +4,12 @@ from pydantic import BaseModel, Field
 
 
 class PhishingEmailResponse(BaseModel):
-    """Response DTO para geração de email de phishing individual"""
+    """Response DTO para geração de email de phishing individual.
+
+    Ainda não usado como `response_model` pelos endpoints reais (que
+    devolvem dict solto -- mesmo caso das outras DTOs mortas cobertas
+    na issue #8). Mantido consistente com o shape real mesmo assim.
+    """
     id: str
     receptor: str
     remetente: str
@@ -14,6 +19,7 @@ class PhishingEmailResponse(BaseModel):
     nivel: str
     categoria: str
     links: List[str]
+    is_malicious: bool
 
 
 class BatchGenerationResponse(BaseModel):
@@ -58,7 +64,13 @@ class ErrorResponse(BaseModel):
 
 class UserAnswerEvaluationResponse(BaseModel):
     """Response DTO para avaliação da justificativa do usuário"""
-    score: int = Field(ge=0, le=5, description="Nota de 0 a 5 para a justificativa")
+    score: int = Field(ge=0, le=5, description="Nota de 0 a 5 para a qualidade do raciocínio")
     feedback: str = Field(description="Feedback detalhado explicando a nota")
     strengths: List[str] = Field(description="Pontos fortes identificados")
     improvements: List[str] = Field(description="Pontos que podem ser melhorados")
+    # Aditivo (issue #4): quem ja consome so score/feedback/strengths/
+    # improvements continua funcionando sem mudanca nenhuma.
+    acerto_por_sorte: bool = Field(
+        default=False,
+        description="True se o veredito bateu com o rótulo verdadeiro mas a justificativa não sustenta a conclusão",
+    )
