@@ -142,8 +142,9 @@ class FakeVectorStore:
 
 class FakePhishingRepository:
     """Repositorio em memoria. Mesma interface publica usada pelos
-    endpoints (create, get_by_id, get_stats) -- suficiente para os
-    testes de contrato que nao precisam de Postgres real.
+    endpoints (create, get_by_id, get_stats, listagem/busca) --
+    suficiente para os testes de contrato que nao precisam de Postgres
+    real.
     """
 
     def __init__(self):
@@ -164,6 +165,20 @@ class FakePhishingRepository:
             "by_category": {},
             "recent_count": 0,
         }
+
+    async def get_all(self, limit: int = 100, offset: int = 0):
+        items = list(self.storage.values())
+        return items[offset : offset + limit]
+
+    async def get_by_categoria(self, categoria: str, limit: int = 50):
+        return [e for e in self.storage.values() if e.categoria == categoria][:limit]
+
+    async def get_by_nivel(self, nivel: str, limit: int = 50):
+        return [e for e in self.storage.values() if e.nivel == nivel][:limit]
+
+    async def search_content(self, search_term: str, limit: int = 50):
+        termo = search_term.lower()
+        return [e for e in self.storage.values() if termo in e.conteudo.lower()][:limit]
 
 
 class FakePhishingService:
@@ -187,6 +202,18 @@ class FakePhishingService:
 
     async def get_email_by_id(self, email_id):
         return await self.repository.get_by_id(email_id)
+
+    async def get_all_emails(self, limit: int = 100, offset: int = 0):
+        return await self.repository.get_all(limit, offset)
+
+    async def get_emails_by_categoria(self, categoria: str, limit: int = 50):
+        return await self.repository.get_by_categoria(categoria, limit)
+
+    async def get_emails_by_nivel(self, nivel: str, limit: int = 50):
+        return await self.repository.get_by_nivel(nivel, limit)
+
+    async def search_emails(self, search_term: str, limit: int = 50):
+        return await self.repository.search_content(search_term, limit)
 
 
 class FakeUserAnswerScore:

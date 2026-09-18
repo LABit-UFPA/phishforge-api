@@ -87,50 +87,48 @@ class PhishingEmailRepository:
             return [self._row_to_model(row) for row in rows]
 
     async def get_stats(self) -> dict:
-        """Retorna estatísticas dos emails no formato correto com validação robusta"""
-        try:
-            async with self.db.get_connection() as conn:
-                # total
-                total_row = await conn.fetchrow("SELECT COUNT(*) as total FROM phishing_emails")
-                total = int(total_row["total"]) if total_row else 0
+        """Retorna estatísticas dos emails no formato correto com validação robusta.
 
-                # por dificuldade
-                by_difficulty = {"facil": 0, "medio": 0, "dificil": 0}
-                diff_rows = await conn.fetch(
-                    "SELECT nivel, COUNT(*) as count FROM phishing_emails GROUP BY nivel"
-                )
-                for row in diff_rows:
-                    if row["nivel"] in by_difficulty:
-                        by_difficulty[row["nivel"]] = int(row["count"])
+        Issue #8: antes, uma excecao aqui (banco fora do ar, por
+        exemplo) era engolida e devolvia estatistica ZERADA -- o mesmo
+        formato de "nenhum email cadastrado ainda". Os dois estados sao
+        completamente diferentes e nao podem ter a mesma resposta.
+        Deixa a excecao propagar; o endpoint decide o codigo HTTP.
+        """
+        async with self.db.get_connection() as conn:
+            # total
+            total_row = await conn.fetchrow("SELECT COUNT(*) as total FROM phishing_emails")
+            total = int(total_row["total"]) if total_row else 0
 
-                # por categoria
-                by_category = {}
-                cat_rows = await conn.fetch(
-                    "SELECT categoria, COUNT(*) as count FROM phishing_emails GROUP BY categoria"
-                )
-                for row in cat_rows:
-                    if row["categoria"]:
-                        by_category[row["categoria"]] = int(row["count"])
+            # por dificuldade
+            by_difficulty = {"facil": 0, "medio": 0, "dificil": 0}
+            diff_rows = await conn.fetch(
+                "SELECT nivel, COUNT(*) as count FROM phishing_emails GROUP BY nivel"
+            )
+            for row in diff_rows:
+                if row["nivel"] in by_difficulty:
+                    by_difficulty[row["nivel"]] = int(row["count"])
 
-                # últimos 7 dias
-                recent_row = await conn.fetchrow(
-                    "SELECT COUNT(*) as recent_count FROM phishing_emails WHERE created_at >= NOW() - INTERVAL '7 days'"
-                )
-                recent_count = int(recent_row["recent_count"]) if recent_row else 0
+            # por categoria
+            by_category = {}
+            cat_rows = await conn.fetch(
+                "SELECT categoria, COUNT(*) as count FROM phishing_emails GROUP BY categoria"
+            )
+            for row in cat_rows:
+                if row["categoria"]:
+                    by_category[row["categoria"]] = int(row["count"])
 
-                return {
-                    "total": total,
-                    "by_difficulty": by_difficulty,
-                    "by_category": by_category,
-                    "recent_count": recent_count,
-                }
-        except Exception as e:
-            print(f"Erro em get_stats: {e}")
+            # últimos 7 dias
+            recent_row = await conn.fetchrow(
+                "SELECT COUNT(*) as recent_count FROM phishing_emails WHERE created_at >= NOW() - INTERVAL '7 days'"
+            )
+            recent_count = int(recent_row["recent_count"]) if recent_row else 0
+
             return {
-                "total": 0,
-                "by_difficulty": {"facil": 0, "medio": 0, "dificil": 0},
-                "by_category": {},
-                "recent_count": 0,
+                "total": total,
+                "by_difficulty": by_difficulty,
+                "by_category": by_category,
+                "recent_count": recent_count,
             }
 
     async def delete(self, email_id: UUID) -> bool:

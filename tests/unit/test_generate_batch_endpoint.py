@@ -67,15 +67,25 @@ async def test_dificuldade_invalida_no_lote_da_422(client):
 
 
 async def test_lista_de_dificuldades_vazia_e_rejeitada(client):
+    """422, nao mais 400 (issue #8): a checagem virou Field(min_length=1)
+    em BatchGenerationRequest, em vez de um `if` manual no endpoint --
+    era esse `if` duplicado que tinha divergido do limite do DTO sem
+    ninguem notar.
+    """
     response = await client.post(
         "/api/v1/generate/batch",
         json={"context": "cobranca de fatura", "difficulties": [], "total": 5},
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 422
 
 
 async def test_total_acima_do_limite_e_rejeitado(client):
+    """422, nao mais 400 (issue #8): validado por Field(le=100) no DTO.
+    100 e o limite canonico agora -- antes havia tres valores
+    diferentes no projeto (DTO dizia 10, endpoint validava >100, doc
+    dizia "max: 10").
+    """
     response = await client.post(
         "/api/v1/generate/batch",
         json={
@@ -85,4 +95,4 @@ async def test_total_acima_do_limite_e_rejeitado(client):
         },
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 422

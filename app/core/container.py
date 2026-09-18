@@ -1,9 +1,5 @@
 from dependency_injector import containers, providers
-from langchain_openai import ChatOpenAI
-from openai import OpenAI
 from qdrant_client import QdrantClient
-from ragas.embeddings import embedding_factory
-from ragas.llms import LangchainLLMWrapper
 
 from app.core.config import settings
 from app.domain.services.document_processor import DocumentProcessor
@@ -92,6 +88,15 @@ class Container(containers.DeclarativeContainer):
         db=db_connection
     )
 
+    # Achado adjacente ao trabalho da #8, nao resolvido aqui: este
+    # provider tambem nao tem nenhum consumidor hoje (a cadeia
+    # evaluation_llm/evaluation_embeddings/chat_openai_model/
+    # openai_client que a #8 removeu era so para os parametros mortos
+    # de generate(); EvaluationRepository e um caso separado --
+    # backend das tabelas ragas_evaluations/evaluation_sessions
+    # (migration V20251106120000), que parece um recurso mais amplo
+    # nunca terminado. Decidir se remove ou termina de ligar e escopo
+    # maior do que #8 pede, fica para issue propria.
     evaluation_repository = providers.Factory(
         EvaluationRepository,
         db_pool=db_pool
@@ -142,27 +147,4 @@ class Container(containers.DeclarativeContainer):
         IngestionPipeline,
         processor=providers.Factory(DocumentProcessor),
         vector_store=qdrant_store
-    )
-    
-    chat_openai_model = providers.Factory(
-        ChatOpenAI,
-        model="gpt-4o-mini", 
-        api_key=config.OPENAI_API_KEY
-    )
-
-    openai_client = providers.Singleton(
-        OpenAI,
-        api_key=config.OPENAI_API_KEY
-    )
-    
-    evaluation_llm = providers.Singleton(
-        LangchainLLMWrapper,
-        langchain_llm=chat_openai_model,
-    )
-
-    evaluation_embeddings = providers.Singleton(
-        embedding_factory,
-        "openai",
-        model="text-embedding-3-large",
-        client=openai_client,
     )

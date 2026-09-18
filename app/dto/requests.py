@@ -6,22 +6,38 @@ from app.domain.models.difficulty import Difficulty
 
 
 class BatchGenerationRequest(BaseModel):
-    """Request DTO para geração em lote de emails de phishing.
+    """Request DTO para geração em lote de itens.
 
-    Ainda não usado por `POST /api/v1/generate/batch` (o endpoint
-    recebe `Body(..., embed=True)` solto -- ver issue #8, item 4).
-    O tipo de `difficulties` é corrigido aqui mesmo assim, e o
-    endpoint tipa o parâmetro solto com `list[Difficulty]`
-    diretamente, para as duas formas ficarem consistentes até o
-    endpoint passar a usar este DTO de fato.
+    Issue #8: antes, o endpoint recebia `Body(..., embed=True)` solto e
+    revalidava total > 100 na mão -- o DTO existia mas não era usado, e
+    o projeto acabou com três limites diferentes para o mesmo campo
+    (aqui `le=10`, no endpoint `>100`, na documentação "máx: 10").
+    Canônico agora é 100 (o que o endpoint já aplicava de fato), com o
+    `Field` fazendo a validação em vez de um `if` manual -- mesma
+    filosofia da issue #2 para `difficulty`: erro de entrada vira 422
+    do Pydantic, não uma checagem duplicada que pode divergir de novo.
     """
-    context: str = Field(description="Contexto para geração dos emails")
-    difficulties: List[Difficulty] = Field(description="Lista de dificuldades desejadas")
-    total: int = Field(default=10, ge=1, le=10, description="Total de emails a serem gerados")
+    context: str = Field(description="Contexto para geração dos itens")
+    difficulties: List[Difficulty] = Field(
+        min_length=1, description="Lista de dificuldades desejadas (não pode ser vazia)"
+    )
+    total: int = Field(default=10, ge=1, le=100, description="Total de itens a serem gerados")
+    malicious_ratio: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Proporção de itens maliciosos (1.0 = todos phishing, 0.0 = todos legítimos)",
+    )
 
 
 class EmailSearchRequest(BaseModel):
-    """Request DTO para busca de emails"""
+    """Request DTO para busca de emails.
+
+    Issue #8: passa a ser usado por `GET /api/v1/emails` via
+    `Depends()` -- FastAPI trata cada campo como um query param
+    independente, mesmo contrato de URL que os parâmetros soltos que
+    existiam antes.
+    """
     categoria: str | None = Field(None, description="Filtrar por categoria")
     nivel: str | None = Field(None, description="Filtrar por nível de dificuldade")
     search: str | None = Field(None, description="Termo de busca")
