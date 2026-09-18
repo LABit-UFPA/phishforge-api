@@ -2,12 +2,12 @@
 HyDE, retrieve, rerank, fusao, geracao, persistencia) substituido por
 fakes -- nenhuma chamada de rede, nenhum modelo de ML carregado.
 
-Isto e o esqueleto que a issue #8 pede; nao cobre ainda as regressoes
-especificas de #2 (contrato de dificuldade), #4 (avaliador) ou #11
-(paridade dos dois fluxos de geracao) -- essas entram junto com a
-implementacao de cada issue, para o teste nascer com a correcao que ele
-cobre em vez de ser escrito contra um comportamento que ainda vai
-mudar.
+Cobre o contrato de dificuldade (#2) na parte rapida, sem banco: 422
+para valor invalido e sinonimo aceito na borda. A parte que exige
+"consultar o banco, nao so a resposta" (criterio de aceite da #2) esta
+em tests/integration/test_difficulty_persistence.py, com Postgres
+real. As regressoes de #4 (avaliador) e #11 (paridade dos dois fluxos
+de geracao) ainda nao tem teste aqui -- entram junto com cada issue.
 """
 
 
@@ -42,3 +42,38 @@ async def test_generate_com_contexto_vazio_ainda_gera(client):
     )
 
     assert response.status_code == 200
+
+
+async def test_difficulty_invalido_da_422_nao_500(client):
+    """O encadeamento que a issue #2 documenta -- fallback silencioso
+    -> nivel cru sobrescrito -> CHECK do banco estourando em 500 -- nao
+    deve mais existir. Um valor fora do vocabulario (canonico ou
+    sinonimo) e rejeitado pelo Pydantic antes de tocar em qualquer
+    pipeline.
+    """
+    response = await client.post(
+        "/api/v1/generate",
+        json={"context": "cobranca de fatura", "difficulty": "nivel_inventado"},
+    )
+
+    assert response.status_code == 422
+
+
+async def test_sinonimo_em_ingles_e_aceito_e_normalizado(client, fakes):
+    """Retrocompatibilidade com quem ja chama a API em ingles (issue
+    #2): 'easy' funciona e o valor que chega ao gerador e o canonico
+    'facil', nao o sinonimo cru.
+    """
+    response = await client.post(
+        "/api/v1/generate",
+        json={"context": "cobranca de fatura", "difficulty": "easy"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["nivel"] == "facil"
+
+    generate_call = next(
+        c for c in fakes["response_generator"].calls if c["step"] == "generate_response"
+    )
+    assert generate_call["difficulty"] == "facil"

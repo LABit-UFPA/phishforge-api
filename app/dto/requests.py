@@ -2,11 +2,21 @@ from typing import List
 
 from pydantic import BaseModel, Field
 
+from app.domain.models.difficulty import Difficulty
+
 
 class BatchGenerationRequest(BaseModel):
-    """Request DTO para geração em lote de emails de phishing"""
+    """Request DTO para geração em lote de emails de phishing.
+
+    Ainda não usado por `POST /api/v1/generate/batch` (o endpoint
+    recebe `Body(..., embed=True)` solto -- ver issue #8, item 4).
+    O tipo de `difficulties` é corrigido aqui mesmo assim, e o
+    endpoint tipa o parâmetro solto com `list[Difficulty]`
+    diretamente, para as duas formas ficarem consistentes até o
+    endpoint passar a usar este DTO de fato.
+    """
     context: str = Field(description="Contexto para geração dos emails")
-    difficulties: List[str] = Field(description="Lista de dificuldades desejadas")
+    difficulties: List[Difficulty] = Field(description="Lista de dificuldades desejadas")
     total: int = Field(default=10, ge=1, le=10, description="Total de emails a serem gerados")
 
 

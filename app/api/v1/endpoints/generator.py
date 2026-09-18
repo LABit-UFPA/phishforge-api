@@ -8,6 +8,7 @@ from ragas.llms import BaseRagasLLM
 
 from app.core.config import settings
 from app.core.container import Container
+from app.domain.models.difficulty import Difficulty
 # TODO(#8): importado mas nunca chamado no corpo de generate() — decidir
 # entre ligar via background_tasks ou remover, junto com os parametros
 # eval_llm/eval_embeddings/background_tasks do endpoint.
@@ -90,13 +91,23 @@ async def generate(
     )
 
     # 6. Geração Final
+    #
+    # request.difficulty ja foi validado e normalizado pelo Pydantic
+    # (QueryRequest.difficulty: Difficulty -- ver issue #2). Usamos
+    # sempre `.value` (str puro), nunca o membro do Enum diretamente:
+    # `Difficulty(str, Enum)` tem __str__ sobrescrito pelo proprio
+    # Enum (a partir do Python 3.11), entao `str(request.difficulty)`
+    # ou uma f-string dariam "Difficulty.FACIL" em vez de "facil" --
+    # confirmado experimentalmente. O PromptTemplate do
+    # response_generator usa .format() por baixo, que cairia
+    # exatamente nessa armadilha.
     try:
         phishing_example = await response_generator.generate_response(
-            difficulty=request.difficulty,
+            difficulty=request.difficulty.value,
             context=generation_context,
             relevant_docs=fused_context,
         )
-        phishing_example.nivel = request.difficulty
+        phishing_example.nivel = request.difficulty.value
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error generating response: {str(e)}"
@@ -114,7 +125,7 @@ async def generate(
 @inject
 async def generate_batch(
     context: str = Body(..., embed=True),
-    difficulties: list[str] = Body(..., embed=True),
+    difficulties: list[Difficulty] = Body(..., embed=True),
     total: int = Body(default=10, embed=True),
     response_generator: ResponseGenerator = Depends(
         Provide[Container.response_generator]
@@ -152,19 +163,24 @@ async def generate_batch(
 
     results = []
     for difficulty, count in distribution.items():
+        # .value pelo mesmo motivo do endpoint /generate: Difficulty
+        # tem __str__ sobrescrito pelo Enum, entao passar o membro cru
+        # para o PromptTemplate (via .format()) ou embuti-lo numa
+        # f-string produziria "Difficulty.FACIL" em vez de "facil".
+        difficulty_value = difficulty.value
         for _ in range(count):
             try:
                 phishing_example = await response_generator.generate_response(
-                    difficulty=difficulty, context=context, relevant_docs=docs_text
+                    difficulty=difficulty_value, context=context, relevant_docs=docs_text
                 )
-                phishing_example.nivel = difficulty
+                phishing_example.nivel = difficulty_value
                 email_id = await phishing_service.create_email(phishing_example)
                 result = phishing_example.dict()
                 result["id"] = str(email_id)
                 results.append(result)
             except Exception as e:
                 results.append(
-                    {"error": f"Falha ao gerar exemplo {difficulty}: {str(e)}"}
+                    {"error": f"Falha ao gerar exemplo {difficulty_value}: {str(e)}"}
                 )
 
     return {

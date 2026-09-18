@@ -50,14 +50,14 @@ Gera um único exemplo de email de phishing personalizado usando um pipeline RAG
 ```json
 {
   "user_context": "Funcionário de banco que recebeu email sobre atualização de dados",
-  "difficulty": "medium"
+  "difficulty": "medio"
 }
 ```
 
 | Campo | Tipo | Obrigatório | Descrição |
 |-------|------|-------------|-----------|
 | `user_context` | string | Sim | Contexto/cenário para geração do phishing |
-| `difficulty` | string | Sim | Nível: `easy`, `medium` ou `hard` |
+| `difficulty` | string | Sim | Nível: `facil`, `medio` ou `dificil` (ver [Vocabulário de dificuldade](#vocabulário-de-dificuldade)) |
 
 **Response (200 OK):**
 
@@ -69,7 +69,7 @@ Gera um único exemplo de email de phishing personalizado usando um pipeline RAG
   "assunto": "URGENTE: Atualização de Dados Cadastrais",
   "conteudo": "Prezado(a) Cliente...",
   "explicacao": "Este email utiliza táticas de urgência e personificação...",
-  "nivel": "medium",
+  "nivel": "medio",
   "categoria": "financeiro",
   "links": ["http://banc0-brasil.com.phishing-site.net/atualizar"]
 }
@@ -84,7 +84,7 @@ Gera múltiplos exemplos de phishing em lote.
 ```json
 {
   "context": "Ambiente corporativo de tecnologia",
-  "difficulties": ["easy", "medium", "hard"],
+  "difficulties": ["facil", "medio", "dificil"],
   "total": 9
 }
 ```
@@ -92,7 +92,7 @@ Gera múltiplos exemplos de phishing em lote.
 | Campo | Tipo | Obrigatório | Descrição |
 |-------|------|-------------|-----------|
 | `context` | string | Sim | Contexto geral para geração |
-| `difficulties` | array | Sim | Lista de dificuldades desejadas |
+| `difficulties` | array | Sim | Lista de dificuldades desejadas (ver [Vocabulário de dificuldade](#vocabulário-de-dificuldade)) |
 | `total` | integer | Não | Total de emails (máx: 10, padrão: 10) |
 
 **Response (200 OK):**
@@ -102,9 +102,9 @@ Gera múltiplos exemplos de phishing em lote.
   "total_requested": 9,
   "total_generated": 9,
   "distribution": {
-    "easy": 3,
-    "medium": 3,
-    "hard": 3
+    "facil": 3,
+    "medio": 3,
+    "dificil": 3
   },
   "examples": [
     {
@@ -114,12 +114,40 @@ Gera múltiplos exemplos de phishing em lote.
       "assunto": "...",
       "conteudo": "...",
       "explicacao": "...",
-      "nivel": "easy",
+      "nivel": "facil",
       "categoria": "...",
       "links": [...]
     }
   ]
 }
+```
+
+#### Vocabulário de dificuldade
+
+O valor **canônico** — o que é persistido no banco e o que aparece em qualquer resposta da API — é sempre um destes três:
+
+| Valor canônico |
+|----------------|
+| `facil` |
+| `medio` |
+| `dificil` |
+
+Para retrocompatibilidade com quem já integra em inglês, os seguintes sinônimos também são aceitos em `difficulty`/`difficulties` e normalizados automaticamente para o canônico correspondente **antes** de qualquer processamento:
+
+| Sinônimo aceito | Normaliza para |
+|------------------|-----------------|
+| `easy`, `fácil` | `facil` |
+| `medium`, `médio` | `medio` |
+| `hard`, `difícil` | `dificil` |
+
+Qualquer outro valor (`"muito_dificil"`, `"low"`, etc.) é rejeitado com **422 Unprocessable Entity** — a request não chega a gerar nada. Isso vale tanto para `POST /api/v1/generate` quanto para `POST /api/v1/generate/batch` (uma única dificuldade inválida na lista rejeita a lista inteira).
+
+```bash
+# 422 — nao 500, e nao gera nada
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8000/api/v1/generate \
+  -H "Content-Type: application/json" \
+  -d '{"context": "cobranca de fatura", "difficulty": "nivel_inventado"}'
+# -> 422
 ```
 
 ---
@@ -293,7 +321,7 @@ if __name__ == "__main__":
     # Gerar phishing
     phishing = generate_phishing(
         context="Funcionário de RH recebendo email sobre folha de pagamento",
-        difficulty="medium"
+        difficulty="medio"
     )
     print(f"Email gerado: {phishing['assunto']}")
     
@@ -378,7 +406,7 @@ async function runTraining() {
   // Gerar phishing
   const phishing = await generatePhishing(
     "Ambiente corporativo de tecnologia",
-    "hard"
+    "dificil"
   );
   
   // Criar texto completo do email
@@ -408,7 +436,7 @@ curl -X POST "http://localhost:8000/api/v1/generate" \
   -H "Content-Type: application/json" \
   -d '{
     "user_context": "Email para funcionário do departamento financeiro",
-    "difficulty": "medium"
+    "difficulty": "medio"
   }'
 
 # Avaliar resposta do usuário
@@ -431,6 +459,7 @@ curl -X POST "http://localhost:8000/api/v1/evaluate/user-answer" \
 | 200 | Sucesso |
 | 400 | Requisição inválida (parâmetros faltando ou incorretos) |
 | 404 | Recurso não encontrado |
+| 422 | Corpo da requisição não passa na validação (ex.: `difficulty` fora do [vocabulário aceito](#vocabulário-de-dificuldade)) |
 | 500 | Erro interno do servidor |
 
 ### Formato de Erro
