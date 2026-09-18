@@ -2,10 +2,18 @@
 
 Nenhum teste aqui abre conexao real com Postgres, Qdrant ou a OpenAI:
 os providers pesados do container (reranker, response_generator,
-prompt_normalizer, retriever, phishing_service, db_connection) sao
+prompt_normalizer, qdrant_store, phishing_service, db_connection) sao
 substituidos por fakes (tests/fakes.py) via `container.<provider>.
 override(...)`. E o que garante que o CI passe sem OPENAI_API_KEY
 configurada e sem baixar nenhum modelo de ML -- ver issues #8 e #12.
+
+`generation_pipeline` (issue #11) nao e overrideado diretamente: ele e
+composto, na definicao do container, a partir de prompt_normalizer,
+response_generator, qdrant_store e reranker -- overrideando esses
+quatro, a pipeline resolvida automaticamente usa os fakes tambem, sem
+precisar de um FakeGenerationPipeline. Isso deixa a orquestracao real
+(extracao de parent_content, ordem das etapas) exercitada de verdade
+nos testes, nao substituida por atalho.
 
 tests/integration/conftest.py e separado e usa Postgres de verdade.
 """
@@ -32,7 +40,7 @@ from tests.fakes import (
     FakePromptNormalizer,
     FakeReRanker,
     FakeResponseGenerator,
-    FakeRetriever,
+    FakeVectorStore,
 )
 
 
@@ -51,7 +59,7 @@ def _build_app_with_fakes():
         "prompt_normalizer": FakePromptNormalizer(),
         "response_generator": FakeResponseGenerator(),
         "reranker": FakeReRanker(),
-        "retriever": FakeRetriever(),
+        "qdrant_store": FakeVectorStore(),
         "phishing_service": FakePhishingService(),
     }
     for name, fake in fakes.items():
