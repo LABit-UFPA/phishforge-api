@@ -66,6 +66,9 @@ class Container(containers.DeclarativeContainer):
         QdrantVectorStore,
         client=qdrant_client,
         embedding_client=embedding_client_openai,
+        # issue #13: dimensao vem de configuracao, nao inferida do
+        # primeiro embedding calculado na ingestao.
+        expected_dimension=config.EMBEDDING_DIMENSION,
     )
 
     # Singleton: o cross-encoder e um modelo de ML carregado do disco no
