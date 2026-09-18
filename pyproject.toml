@@ -28,7 +28,45 @@ datasets = "^4.1.1"
 tracing-lib = {git = "https://github.com/GoLogann/tracing-lib.git"}
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.4"
+pytest-asyncio = "^1.4.0"
+httpx = "^0.28.1"
+ruff = "^0.16.8"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+# Restringe a coleta a tests/. Sem isso o pytest tambem coleta
+# test_o4_mini.py e test_ragas_fix.py (scripts de experimento na raiz,
+# movidos para script/experiments/), que nao sao testes automatizados
+# e quebram a coleta por pedir fixtures inexistentes.
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+# app/ e tests/ sao o codigo mantido sob teste. Os scripts de
+# experimento/analise na raiz (evaluate_*.py, experiment1_*.py,
+# script/) nunca passaram por um linter e reformata-los em massa aqui
+# seria um diff enorme e sem relacao com a issue #8. Ficam de fora ate
+# terem sua propria limpeza.
+extend-exclude = [
+    "evaluate_*.py",
+    "experiment1_*.py",
+    "upload_book.py",
+    "script/",
+    "migrate/",
+]
+
+[tool.ruff.lint]
+# Conjunto minimo e de alto sinal: erros de sintaxe, imports mortos,
+# nomes indefinidos e variaveis nao usadas (Pyflakes) mais os erros
+# pycodestyle mais graves. Nao inclui pyupgrade/import-sort/etc, que
+# reformatariam o app inteiro sem relacao com nenhuma issue aberta.
+select = ["E9", "F"]
+ignore = []
+# Duas violacoes em app/api/v1/endpoints/generator.py (import morto do
+# RAGAS e excecao engolida em get_statistics) ficam com `# noqa` inline
+# em vez de silenciadas aqui: sao o proprio assunto da issue #8, e o
+# noqa junto do codigo deixa isso visivel a quem le o arquivo.

@@ -1,0 +1,161 @@
+name: CI (PR e main)
+
+# Nao existia nenhum workflow de CI antes desta issue (#8): nada
+# impedia uma regressao como a da #2 (seguir a documentacao gera 500)
+# de ser mergeada. Espelha a estrutura do workflow_pr_ci.yml do
+# phishing-quest-api (issue #31 la): 3 jobs, rodando em todo PR e em
+# todo push para main, com Postgres efemero + as MESMAS migrations do
+# flyway usadas em producao.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancela execucoes antigas do mesmo PR quando um novo commit chega,
+# para nao gastar runner com codigo ja superado.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  POETRY_VERSION: "2.1.1" # mesma versao fixada no Dockerfile
+  PYTHON_VERSION: "3.11" # mesma versao base do Dockerfile
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # So ruff, sem poetry install: o linter nao precisa importar o
+      # codigo (nao executa nada do projeto), entao nao precisa de
+      # torch/sentence-transformers/etc instalados. Evita minutos de
+      # download so para checar sintaxe e imports mortos.
+      - name: Instalar ruff
+        run: pip install "ruff==0.16.8" # mesma versao de pyproject.toml [tool.poetry.group.dev]
+
+      # Regra e escopo documentados em pyproject.toml [tool.ruff]: so
+      # app/ e tests/, so E9+F (sintaxe, imports mortos, nomes
+      # indefinidos). Os scripts de experimento na raiz nunca passaram
+      # por linter e ficam fora ate terem limpeza propria.
+      - name: ruff check
+        run: ruff check app tests
+
+  unit-tests:
+    name: Testes unitarios (LLM e ML mockados)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Instalar Poetry
+        run: pipx install poetry==${{ env.POETRY_VERSION }}
+
+      - name: Cache das dependencias do Poetry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pypoetry
+          key: poetry-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
+          restore-keys: |
+            poetry-${{ runner.os }}-
+
+      - name: Instalar dependencias
+        run: poetry install --no-interaction --no-ansi --no-root
+
+      # Nenhum teste em tests/unit deve fazer chamada de rede: o LLM,
+      # o cross-encoder e a base vetorial sao substituidos por fakes
+      # via override do container (tests/fakes.py, tests/conftest.py).
+      # Rodar sem OPENAI_API_KEY no ambiente e a prova disso -- se
+      # algum teste depender de uma chave real, ele falha aqui em vez
+      # de vazar isso silenciosamente.
+      - name: Rodar testes unitarios
+        run: poetry run pytest tests/unit -v
+
+  integration-tests:
+    name: Testes de integracao (Postgres efemero)
+    runs-on: ubuntu-latest
+
+    # Banco de teste efemero: sobe junto com o job e morre com ele, sem
+    # estado compartilhado entre execucoes. Mesmas credenciais do
+    # docker-compose.yml, para o comportamento local e o do CI nao
+    # divergirem.
+    services:
+      postgres:
+        image: postgres:16.4
+        env:
+          POSTGRES_DB: phishforge
+          POSTGRES_USER: phishforge
+          POSTGRES_PASSWORD: phishforge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U phishforge -d phishforge"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DB_HOST: localhost
+      DB_PORT: 5432
+      DB_USER: phishforge
+      DB_PASSWORD: phishforge
+      DB_NAME: phishforge
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Instalar Poetry
+        run: pipx install poetry==${{ env.POETRY_VERSION }}
+
+      - name: Cache das dependencias do Poetry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pypoetry
+          key: poetry-${{ runner.os }}-${{ hashFiles('poetry.lock') }}
+          restore-keys: |
+            poetry-${{ runner.os }}-
+
+      - name: Instalar dependencias
+        run: poetry install --no-interaction --no-ansi --no-root
+
+      # Usa a MESMA imagem e os MESMOS changelogs do docker-compose e
+      # do ambiente real (migrate/changelogs), entao uma migration
+      # quebrada reprova o CI em vez de so aparecer em producao -- o
+      # mesmo raciocinio do workflow espelhado no phishing-quest-api.
+      - name: Aplicar migrations (flyway)
+        run: |
+          docker run --rm --network host \
+            -v "${{ github.workspace }}/migrate/changelogs:/flyway/sql" \
+            flyway/flyway:7.0.2 \
+            -url=jdbc:postgresql://localhost:5432/phishforge \
+            -user=phishforge \
+            -password=phishforge \
+            -schemas=phishforge \
+            -locations=filesystem:/flyway/sql \
+            -connectRetries=30 \
+            migrate
+
+      - name: Rodar testes de integracao
+        run: poetry run pytest tests/integration -v

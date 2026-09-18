@@ -4,6 +4,8 @@
 __pycache__/
 *.py[cod]
 *.pyo
+.pytest_cache/
+.ruff_cache/
 *.pyd
 *.pkl
 *.egg
@@ -28,7 +30,12 @@ ENV/
 venv/
 env/
 pip-wheel-metadata/
-poetry.lock
+# poetry.lock e' versionado de proposito (builds reprodutiveis) e ja
+# esta rastreado -- a entrada aqui nunca desfez isso, mas bloquearia um
+# `git add poetry.lock` do zero (ex.: apos um `git rm --cached`
+# acidental) sem `-f`. poetry.toml continua ignorado: guarda config
+# local do ambiente de cada dev (ex.: virtualenvs.create), nao decisao
+# do projeto.
 poetry.toml
 
 # =========================================

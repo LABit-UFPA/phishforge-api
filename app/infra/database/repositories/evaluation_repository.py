@@ -1,9 +1,7 @@
 from datetime import datetime
-from decimal import Decimal
 from typing import Dict, List, Optional
 from uuid import UUID
 
-import asyncpg
 from asyncpg import Pool
 
 from app.domain.models.evaluation import (EvaluationMetricsSummary,
