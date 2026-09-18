@@ -21,7 +21,14 @@ QDRANT_URL = settings.QDRANT_URL
 
 qdrant_client = QdrantClient(url=QDRANT_URL)
 embedding_client = OpenAIEmbeddingClient(api_key=OPENAI_API_KEY)
-vector_store = QdrantVectorStore(client=qdrant_client, embedding_client=embedding_client)
+# expected_dimension (issue #13): mesma dimensao configurada que o
+# container usa, para este script standalone ter a mesma protecao
+# contra criar/alimentar uma colecao com dimensao errada.
+vector_store = QdrantVectorStore(
+    client=qdrant_client,
+    embedding_client=embedding_client,
+    expected_dimension=settings.EMBEDDING_DIMENSION,
+)
 processor = DocumentProcessor(chunk_size=1024, chunk_overlap=256)
 
 def delete_articles_collection():
