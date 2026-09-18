@@ -10,7 +10,18 @@ class Settings(BaseSettings):
     
     QDRANT_URL: str = "http://localhost:6333"
     COLLECTION_NAME: str = "phishing_articles"
-    
+
+    # Dimensao do vetor produzido pelo cliente de embedding realmente
+    # usado na colecao (embedding_client_openai no container, modelo
+    # "text-embedding-3-small" -> 1536). NAO e derivada automaticamente:
+    # trocar o modelo de embedding muda o espaco vetorial inteiro e
+    # exige reingerir a base do zero, entao o numero fica explicito aqui
+    # em vez de inferido do primeiro embedding calculado na ingestao
+    # (que e o que a issue #13 corrige em QdrantVectorStore.save). O
+    # app valida este valor contra a colecao Qdrant existente no start
+    # (ver main.py) -- issue #12.
+    EMBEDDING_DIMENSION: int = 1536
+
     OPENAI_API_KEY: str = ""
     
     CHUNK_SIZE: int = 1024

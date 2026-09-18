@@ -19,6 +19,21 @@ class QdrantVectorStore:
             )
 
 
+    def get_collection_dimension(self, collection_name: str) -> int | None:
+        """Dimensao configurada da colecao, ou None se ela ainda nao existir.
+
+        Usado para validar no start (ver main.py) que o cliente de
+        embedding configurado bate com a colecao ja ingerida -- ver
+        issue #12. Nao mexe em `save`/`create_collection`: a inferencia
+        de dimensao a partir do primeiro embedding calculado na
+        ingestao e um problema separado, corrigido na issue #13.
+        """
+        if not self.client.collection_exists(collection_name):
+            return None
+        info = self.client.get_collection(collection_name)
+        return info.config.params.vectors.size
+
+
     def save(self, collection_name: str, chunks: List[dict]):
         child_texts = [c["child_text"] for c in chunks]
         embeddings = self.embedding_client.embed_batch(child_texts)
