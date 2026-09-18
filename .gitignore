@@ -16,6 +16,8 @@ venv/
 ENV/
 *.env
 *.env.*
+# O template de variaveis e versionado de proposito (nao contem segredo).
+!.env.example
 *.db
 *.sqlite3
 

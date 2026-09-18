@@ -8,53 +8,56 @@ PhishForge é uma ferramenta educacional que gera exemplos de e-mails de phishin
 - **Qdrant** - Base vetorial utilizada para armazenamento e busca semântica.
 - **FastAPI** - Framework para exposição da API.
 - **Poetry** - Gerenciador de dependências do projeto.
-- **Docker Compose** - Para gestão do container do Qdrant.
+- **Docker Compose** - Orquestração de Postgres, Qdrant, migrations, API e frontend.
 
 ## Instalação e Configuração
 
 1. Clone este repositório:
 
    ```bash
-   git clone https://github.com/GoLogann/phishforge.git
-   cd phishforge
+   git clone https://github.com/LABit-UFPA/phishforge-api.git
+   cd phishforge-api
    ```
 
-2. Instale as dependências utilizando Poetry:
+2. Configure as variáveis de ambiente:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   Preencha `OPENAI_API_KEY` no `.env`. É a única variável obrigatória —
+   as demais têm default adequado para desenvolvimento local, e o
+   `.env` é ignorado pelo git.
+
+   > Nunca coloque a chave em `app/core/config.py`. Os defaults ali são
+   > para o código funcionar sem `.env`; uma chave escrita no arquivo vai
+   > para o repositório no próximo commit.
+
+3. Suba a infraestrutura com Docker Compose:
+
+   ```bash
+   docker compose up -d
+   ```
+
+   Isso sobe Postgres, Qdrant, as migrations (flyway), a API e o frontend
+   de curadoria. A porta do Postgres não é publicada no host, de propósito:
+   o `phishing-quest-api` também usa 5432 e os dois stacks precisam subir
+   juntos. Para inspecionar o banco:
+
+   ```bash
+   docker exec -it phishforge-postgresql psql -U phishforge -d phishforge
+   ```
+
+4. Para rodar a API fora do compose, instale as dependências e suba o
+   servidor:
 
    ```bash
    poetry install
+   poetry run uvicorn main:app --reload
    ```
 
-3. Inicie o container do Qdrant com Docker Compose:
-
-   ```bash
-   docker-compose up -d
-   ```
-
-4. Certifique-se de ter um token da API da OpenAI para usar o GPT:
-   
-   Defina-o no arquivo `core/config.py` dentro da classe `Settings`:
-
-   ```python
-   from pydantic_settings import BaseSettings
-
-   class Settings(BaseSettings):
-       MODEL_NAME_EMBEDDING: str = "all-MiniLM-L6-v2"
-       MODEL_NAME_LLM: str = "gpt-4o"
-       QDRANT_URL: str = "http://localhost:6333"
-       OPENAI_API_KEY: str = "sua-chave-aqui"
-       CHUNK_SIZE: int = 1000
-       CHUNK_OVERLAP: int = 200
-       TOP_K_DOCUMENTS: int = 4
-
-   settings = Settings()
-   ```
-
-6. Execute a API com FastAPI:
-
-   ```bash
-   poetry run uvicorn app.main:app --reload
-   ```
+   Nesse modo, Postgres e Qdrant precisam estar acessíveis nos endereços
+   do `.env` (por padrão, `localhost`).
 
 ## Uso
 
