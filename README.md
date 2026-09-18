@@ -59,6 +59,46 @@ PhishForge é uma ferramenta educacional que gera exemplos de e-mails de phishin
    Nesse modo, Postgres e Qdrant precisam estar acessíveis nos endereços
    do `.env` (por padrão, `localhost`).
 
+## Testes
+
+A suite fica em `tests/`, separada em duas camadas:
+
+- `tests/unit/` — contrato dos endpoints com o pipeline inteiro (LLM,
+  cross-encoder, base vetorial) substituido por fakes (`tests/fakes.py`).
+  Nao faz chamada de rede nem precisa de banco.
+- `tests/integration/` — usa Postgres de verdade, com o schema aplicado
+  pelas MESMAS migrations do flyway usadas em producao.
+
+A porta do Postgres nao e publicada por padrao (ver seção de
+instalação), entao os testes de integração fora do compose
+precisam de um `docker-compose.override.yml` local (nunca
+versionado) publicando-a:
+
+```yaml
+services:
+  phishforge-postgresql:
+    ports:
+      - "5432:5432"
+```
+
+```bash
+# so os unitarios, sem infra nenhuma
+poetry run pytest tests/unit -v
+
+# integracao: com o override acima aplicado
+docker compose up -d phishforge-postgresql phishforge-flyway
+poetry run pytest tests/integration -v
+```
+
+Lint (`ruff`), escopo restrito a `app/` e `tests/`:
+
+```bash
+poetry run ruff check app tests
+```
+
+O CI (`.github/workflows/pr_ci.yml`) roda os tres em todo PR e todo push
+para `main`, cada um em um job separado.
+
 ## Uso
 
 A API disponibiliza endpoints para gerar e-mails de phishing educacionais. Para testar, acesse:

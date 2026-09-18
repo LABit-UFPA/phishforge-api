@@ -7,7 +7,10 @@ from ragas.embeddings import BaseRagasEmbeddings
 from ragas.llms import BaseRagasLLM
 
 from app.core.container import Container
-from app.domain.services.evaluation import run_and_log_ragas_evaluation
+# TODO(#8): importado mas nunca chamado no corpo de generate() — decidir
+# entre ligar via background_tasks ou remover, junto com os parametros
+# eval_llm/eval_embeddings/background_tasks do endpoint.
+from app.domain.services.evaluation import run_and_log_ragas_evaluation  # noqa: F401
 from app.domain.services.phishing_service import PhishingEmailService
 from app.domain.services.prompt_normalizer import PromptNormalizer
 from app.domain.services.reranker import ReRanker
@@ -181,7 +184,7 @@ async def get_statistics(
     try:
         raw_stats = await phishing_service.repository.get_stats()
         return EmailStatistics(**raw_stats)
-    except Exception as e:
+    except Exception as e:  # noqa: F841 -- ver #8: deveria propagar 500, nao engolir
         return EmailStatistics()
 
 
