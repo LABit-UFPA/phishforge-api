@@ -7,13 +7,13 @@ from ragas.llms import LangchainLLMWrapper
 
 from app.core.config import settings
 from app.domain.services.document_processor import DocumentProcessor
+from app.domain.services.generation_pipeline import GenerationPipeline
 from app.domain.services.openai.embedding_client import OpenAIEmbeddingClient
 from app.domain.services.phishing_service import PhishingEmailService
 from app.domain.services.pipeline import IngestionPipeline
 from app.domain.services.prompt_normalizer import PromptNormalizer
 from app.domain.services.reranker import ReRanker
 from app.domain.services.response_generator import ResponseGenerator
-from app.domain.services.retriever import DocumentRetriever
 from app.domain.services.user_answer_evaluator import UserAnswerEvaluator
 from app.infra.database.connection import DatabaseConnection, get_db_pool
 from app.infra.database.repositories.analytics_repository import AnalyticsRepository
@@ -114,9 +114,19 @@ class Container(containers.DeclarativeContainer):
         api_key=config.OPENAI_API_KEY
     )
 
-    retriever = providers.Factory(
-        DocumentRetriever,
-        vector_store=qdrant_store
+    # Substitui o antigo `retriever` (DocumentRetriever): aquela classe
+    # so encapsulava `.vector_store` e tinha um metodo
+    # (retrieve_relevant_documents) nunca chamado -- os endpoints ja
+    # atravessavam direto para `.vector_store.query(...)` (ver issue
+    # #12, item 4, resolvido aqui como #11a combinou). GenerationPipeline
+    # depende do QdrantVectorStore diretamente, sem indirecao.
+    generation_pipeline = providers.Factory(
+        GenerationPipeline,
+        normalizer=prompt_normalizer,
+        response_generator=response_generator,
+        vector_store=qdrant_store,
+        reranker=reranker,
+        collection_name=config.COLLECTION_NAME,
     )
 
     phishing_service = providers.Factory(

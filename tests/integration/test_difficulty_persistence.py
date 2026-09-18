@@ -5,7 +5,7 @@ resposta)".
 Diferente do resto de tests/integration/ (que chama o repositório
 direto), aqui sobe a app inteira via HTTP -- para exercitar a
 validação do Pydantic de ponta a ponta -- mas com o LLM/reranker/
-retriever substituídos por fakes (como em tests/unit): o único
+base vetorial substituídos por fakes (como em tests/unit): o único
 componente real é o Postgres, porque é exatamente ele que este teste
 audita. Nenhuma chamada paga.
 """
@@ -21,12 +21,17 @@ from dependency_injector import providers
 
 import main as main_module
 from app.infra.database.connection import DatabaseConnection
-from tests.fakes import FakePromptNormalizer, FakeReRanker, FakeResponseGenerator, FakeRetriever
+from tests.fakes import (
+    FakePromptNormalizer,
+    FakeReRanker,
+    FakeResponseGenerator,
+    FakeVectorStore,
+)
 
 
 @pytest_asyncio.fixture
 async def client_com_postgres_real():
-    """App com LLM/reranker/retriever fakes, mas phishing_service e
+    """App com LLM/reranker/base vetorial fakes, mas phishing_service e
     db_connection REAIS -- para o INSERT ir de fato para o Postgres do
     job de integracao.
     """
@@ -45,10 +50,12 @@ async def client_com_postgres_real():
     container.prompt_normalizer.override(providers.Object(FakePromptNormalizer()))
     container.response_generator.override(providers.Object(FakeResponseGenerator()))
     container.reranker.override(providers.Object(FakeReRanker()))
-    container.retriever.override(providers.Object(FakeRetriever()))
-    # phishing_service e phishing_repository NAO sao sobrescritos: o
-    # container resolve as versoes reais, usando o db_connection real
-    # acima.
+    container.qdrant_store.override(providers.Object(FakeVectorStore()))
+    # generation_pipeline nao e overrideado direto: e composto a partir
+    # dos quatro providers acima, entao resolve automaticamente com os
+    # fakes (ver comentario em tests/conftest.py). phishing_service e
+    # phishing_repository tambem NAO sao sobrescritos: o container
+    # resolve as versoes reais, usando o db_connection real acima.
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:

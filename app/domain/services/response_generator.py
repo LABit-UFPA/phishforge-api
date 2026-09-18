@@ -2,7 +2,7 @@
 
 import logging
 from langchain_core.prompts import PromptTemplate
-from app.domain.models.phishing_email import PhishingEmail
+from app.domain.models.generated_item_draft import GeneratedItemDraft
 from langchain_openai import ChatOpenAI
 
 class ResponseGenerator:
@@ -11,7 +11,7 @@ class ResponseGenerator:
             model_name=model_name,
             api_key=api_key,
             temperature=0.7
-        ).with_structured_output(PhishingEmail)
+        ).with_structured_output(GeneratedItemDraft)
 
         self.text_llm = ChatOpenAI(
             model_name=model_name,
@@ -102,7 +102,7 @@ class ResponseGenerator:
                 "- ✓ Coerência entre cenário + táticas + nível?\n\n"
                 
                 "## FORMATO DE RESPOSTA\n"
-                "Gere APENAS o objeto JSON no formato PhishingEmail.\n"
+                "Gere APENAS o objeto JSON com os campos solicitados (receptor, remetente, assunto, conteudo, explicacao, categoria, links).\n"
                 "Não mostre explicitamente os passos de raciocínio, mas seu resultado deve demonstrar que você seguiu o processo Chain-of-Thought, implementando:\n"
                 "- As características específicas do nível '{difficulty}'\n"
                 "- As táticas acadêmicas do conhecimento técnico\n"
@@ -126,7 +126,7 @@ class ResponseGenerator:
         self.chain = self.prompt_template | self.llm
         self.hyde_chain = self.hyde_prompt_template | self.text_llm
 
-    async def generate_response(self, difficulty: str, context: str, relevant_docs):
+    async def generate_response(self, difficulty: str, context: str, relevant_docs) -> GeneratedItemDraft:
         """
         Gera um email de phishing baseado no contexto, dificuldade e documentos relevantes.
 
@@ -141,6 +141,12 @@ class ResponseGenerator:
                 #2 em vez de expor o problema.
             context: Contexto específico do cenário
             relevant_docs: Documentos acadêmicos relevantes
+
+        Returns:
+            GeneratedItemDraft: NÃO inclui `nivel` (ver issue #11 --
+            dificuldade é entrada da geração, não saída do LLM). Quem
+            chama esta função monta o `PhishingEmail` final combinando
+            o draft com o `difficulty` acima.
         """
         try:
             return await self.chain.ainvoke({
@@ -150,7 +156,7 @@ class ResponseGenerator:
             })
         except Exception as e:
             logging.error(f"Error generating response: {e}")
-            raise e 
+            raise e
 
     async def generate_hypothetical_answer(self, query: str) -> str:
         """

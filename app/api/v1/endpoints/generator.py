@@ -6,18 +6,16 @@ from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Qu
 from ragas.embeddings import BaseRagasEmbeddings
 from ragas.llms import BaseRagasLLM
 
-from app.core.config import settings
 from app.core.container import Container
 from app.domain.models.difficulty import Difficulty
+from app.domain.models.phishing_email import PhishingEmail
 # TODO(#8): importado mas nunca chamado no corpo de generate() — decidir
 # entre ligar via background_tasks ou remover, junto com os parametros
 # eval_llm/eval_embeddings/background_tasks do endpoint.
 from app.domain.services.evaluation import run_and_log_ragas_evaluation  # noqa: F401
+from app.domain.services.generation_pipeline import GenerationPipeline
 from app.domain.services.phishing_service import PhishingEmailService
-from app.domain.services.prompt_normalizer import PromptNormalizer
-from app.domain.services.reranker import ReRanker
 from app.domain.services.response_generator import ResponseGenerator
-from app.domain.services.retriever import DocumentRetriever
 from app.domain.services.user_answer_evaluator import UserAnswerEvaluator
 from app.dto.estatistica import EmailStatistics
 from app.dto.query import QueryRequest
@@ -32,15 +30,13 @@ app = APIRouter()
 async def generate(
     request: QueryRequest,
     background_tasks: BackgroundTasks,
+    pipeline: GenerationPipeline = Depends(Provide[Container.generation_pipeline]),
     response_generator: ResponseGenerator = Depends(
         Provide[Container.response_generator]
     ),
-    normalizer: PromptNormalizer = Depends(Provide[Container.prompt_normalizer]),
-    retriever: DocumentRetriever = Depends(Provide[Container.retriever]),
     phishing_service: PhishingEmailService = Depends(
         Provide[Container.phishing_service]
     ),
-    reranker: ReRanker = Depends(Provide[Container.reranker]),
     eval_llm: BaseRagasLLM = Depends(Provide[Container.evaluation_llm]),
     eval_embeddings: BaseRagasEmbeddings = Depends(
         Provide[Container.evaluation_embeddings]
@@ -49,46 +45,23 @@ async def generate(
     """
     Gera um exemplo de phishing com um pipeline RAG avançado.
     """
-    # 1. Normaliza o input do usuário
-    normalized_data = await normalizer.normalize(request.user_context)
-    search_query = normalized_data.search_query
-    generation_context = normalized_data.generation_context
-
-    # 2. HyDE (Query Transformation)
+    # 1-5. Normalizacao, HyDE, retrieve, rerank e fusao -- ver
+    # GenerationPipeline. Extraido nesta issue (#11a) porque a mesma
+    # sequencia, escrita a mao aqui dentro, era exatamente o que
+    # impedia o /generate/batch de reaproveita-la.
+    #
+    # A mensagem cobre a pipeline inteira, nao so o retrieve: com as
+    # etapas consolidadas, uma falha de normalizacao ou de fusao
+    # tambem passa por aqui, e "Error retrieving documents" seria
+    # enganoso para essas -- confirmado na pratica ao testar contra um
+    # servidor real com chave da OpenAI invalida, onde a falha real
+    # era na normalizacao (a primeira chamada de LLM da pipeline).
     try:
-        hyde_context = await response_generator.generate_hypothetical_answer(
-            search_query
-        )
-    except Exception:
-        hyde_context = search_query
-
-    # 3. Retrieve (Busca Inicial)
-    try:
-        candidate_docs = retriever.vector_store.query(
-            collection_name=settings.COLLECTION_NAME, query_text=hyde_context, top_k=20
-        )
+        built = await pipeline.build_context(request.user_context)
     except Exception as e:
         raise HTTPException(
-            status_code=500, detail=f"Error retrieving documents: {str(e)}"
+            status_code=500, detail=f"Error building context: {str(e)}"
         )
-
-    # 4. Re-rank (Refinamento da Busca)
-    reranked_docs = reranker.rerank(search_query, candidate_docs)
-
-    # 5. Extração e Fusão do Contexto
-    if reranked_docs:
-        top_docs_payloads = [doc.payload for doc in reranked_docs[:3]]
-        final_contexts = [
-            payload["parent_content"]
-            for payload in top_docs_payloads
-            if "parent_content" in payload
-        ]
-    else:
-        final_contexts = []
-
-    fused_context = await response_generator.fuse_and_summarize_context(
-        generation_context=generation_context, contexts=final_contexts
-    )
 
     # 6. Geração Final
     #
@@ -101,13 +74,18 @@ async def generate(
     # confirmado experimentalmente. O PromptTemplate do
     # response_generator usa .format() por baixo, que cairia
     # exatamente nessa armadilha.
+    #
+    # generate_response devolve um GeneratedItemDraft, SEM `nivel` --
+    # dificuldade e entrada da geracao, nao saida do LLM (issue #11).
+    # O PhishingEmail final e montado aqui, combinando o draft com o
+    # nivel ja validado.
     try:
-        phishing_example = await response_generator.generate_response(
+        draft = await response_generator.generate_response(
             difficulty=request.difficulty.value,
-            context=generation_context,
-            relevant_docs=fused_context,
+            context=built.generation_context,
+            relevant_docs=built.fused_context,
         )
-        phishing_example.nivel = request.difficulty.value
+        phishing_example = PhishingEmail(**draft.model_dump(), nivel=request.difficulty.value)
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error generating response: {str(e)}"
@@ -127,10 +105,10 @@ async def generate_batch(
     context: str = Body(..., embed=True),
     difficulties: list[Difficulty] = Body(..., embed=True),
     total: int = Body(default=10, embed=True),
+    pipeline: GenerationPipeline = Depends(Provide[Container.generation_pipeline]),
     response_generator: ResponseGenerator = Depends(
         Provide[Container.response_generator]
     ),
-    retriever: DocumentRetriever = Depends(Provide[Container.retriever]),
     phishing_service: PhishingEmailService = Depends(
         Provide[Container.phishing_service]
     ),
@@ -144,17 +122,22 @@ async def generate_batch(
     if total > 100:
         raise HTTPException(status_code=400, detail="O total máximo permitido é 100")
 
+    # Normalizacao, HyDE, retrieve, rerank e fusao dependem so do
+    # `context`, nao da dificuldade de cada item -- rodam UMA vez para
+    # o lote inteiro e sao reaproveitados entre todos os itens (issue
+    # #11, passo 3). Antes desta issue, o lote nao rodava nenhuma
+    # dessas etapas e usava o chunk de busca (child_text) em vez do
+    # bloco completo (parent_content) como contexto academico; agora
+    # usa o mesmo pipeline do /generate, so que uma vez em vez de N.
     try:
-        relevant_docs = retriever.vector_store.query(
-            collection_name=settings.COLLECTION_NAME, query_text=context, top_k=80
-        )
+        built = await pipeline.build_context(context)
     except Exception as e:
+        # Mesma ressalva do /generate: a mensagem cobre a pipeline
+        # inteira (normalizacao, HyDE, retrieve, rerank, fusao), nao
+        # so o retrieve.
         raise HTTPException(
-            status_code=500, detail=f"Erro ao recuperar documentos: {str(e)}"
+            status_code=500, detail=f"Erro ao montar contexto: {str(e)}"
         )
-
-    docs_texts = [doc.text for doc in relevant_docs[:3]] if relevant_docs else []
-    docs_text = "\n\n".join(docs_texts) if docs_texts else "Sem documentos relevantes."
 
     base, extra = divmod(total, len(difficulties))
     distribution = {d: base for d in difficulties}
@@ -170,10 +153,12 @@ async def generate_batch(
         difficulty_value = difficulty.value
         for _ in range(count):
             try:
-                phishing_example = await response_generator.generate_response(
-                    difficulty=difficulty_value, context=context, relevant_docs=docs_text
+                draft = await response_generator.generate_response(
+                    difficulty=difficulty_value,
+                    context=built.generation_context,
+                    relevant_docs=built.fused_context,
                 )
-                phishing_example.nivel = difficulty_value
+                phishing_example = PhishingEmail(**draft.model_dump(), nivel=difficulty_value)
                 email_id = await phishing_service.create_email(phishing_example)
                 result = phishing_example.dict()
                 result["id"] = str(email_id)
