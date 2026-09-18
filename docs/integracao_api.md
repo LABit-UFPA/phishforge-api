@@ -114,7 +114,7 @@ Gera múltiplos exemplos de phishing em lote.
 |-------|------|-------------|-----------|
 | `context` | string | Sim | Contexto geral para geração |
 | `difficulties` | array | Sim | Lista de dificuldades desejadas (ver [Vocabulário de dificuldade](#vocabulário-de-dificuldade)) |
-| `total` | integer | Não | Total de itens (máx: 10, padrão: 10) |
+| `total` | integer | Não | Total de itens (máx: 100, padrão: 10) |
 | `malicious_ratio` | float (0.0-1.0) | Não (default `1.0`) | Proporção de itens maliciosos vs. legítimos. Compõe com `difficulties`: dentro de cada nível, a fração `malicious_ratio` do total daquele nível é gerada como phishing e o restante como item legítimo |
 
 **Response (200 OK):**

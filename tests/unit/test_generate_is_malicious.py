@@ -74,7 +74,11 @@ async def test_lote_com_malicious_ratio_compoe_com_a_distribuicao(client):
     assert len(legitimos) == 5
 
 
-async def test_lote_malicious_ratio_fora_do_intervalo_da_400(client):
+async def test_lote_malicious_ratio_fora_do_intervalo_da_422(client):
+    """422, nao mais 400 (issue #8): validado por Field(ge=0.0, le=1.0)
+    em BatchGenerationRequest, no lugar do `if` manual que existia so
+    para este campo.
+    """
     response = await client.post(
         "/api/v1/generate/batch",
         json={
@@ -85,4 +89,4 @@ async def test_lote_malicious_ratio_fora_do_intervalo_da_400(client):
         },
     )
 
-    assert response.status_code == 400
+    assert response.status_code == 422
