@@ -10,8 +10,10 @@ services:
       POSTGRES_HOST_AUTH_METHOD: md5
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+    # A porta NAO e publicada no host de proposito: o phishing-quest-api
+    # tambem usa 5432 e os dois stacks precisam subir juntos para
+    # desenvolver a integracao. O acesso e pela rede do compose; para
+    # inspecionar o banco, use `docker exec -it phishforge-postgresql psql -U phishforge`.
     networks:
       - phishforge_network
     healthcheck:
@@ -68,7 +70,7 @@ services:
       DB_USER: phishforge
       DB_PASSWORD: phishforge
       DB_NAME: phishforge
-      OPENAI_API_KEY: OPENAI_API_KEY=${OPENAI_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
     networks:
       - phishforge_network
     depends_on:
