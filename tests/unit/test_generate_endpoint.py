@@ -6,8 +6,9 @@ Cobre o contrato de dificuldade (#2) na parte rapida, sem banco: 422
 para valor invalido e sinonimo aceito na borda. A parte que exige
 "consultar o banco, nao so a resposta" (criterio de aceite da #2) esta
 em tests/integration/test_difficulty_persistence.py, com Postgres
-real. As regressoes de #4 (avaliador) e #11 (paridade dos dois fluxos
-de geracao) ainda nao tem teste aqui -- entram junto com cada issue.
+real. `is_malicious` (#3) tem seu proprio arquivo,
+test_generate_is_malicious.py. A regressao de #4 (avaliador) ainda nao
+tem teste aqui -- entra junto com a propria issue.
 """
 
 

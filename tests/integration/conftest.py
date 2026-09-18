@@ -9,16 +9,30 @@ variaveis DB_* apontam para ele. Fora do CI, suba
 `docker compose up -d phishforge-postgresql phishforge-flyway` antes
 de rodar `pytest tests/integration`.
 
-Estes testes NAO usam os fakes de tests/fakes.py -- a persistencia real
-e exatamente o que estao testando.
+`db_connection`/`phishing_repository` sao para ler direto do banco (a
+"consulta ao banco, nao so a resposta" que varios criterios de aceite
+pedem). `client_com_postgres_real` sobe a app inteira via HTTP, com
+LLM/reranker/base vetorial fakes mas Postgres real -- para os testes
+que precisam validar o contrato HTTP E a persistencia juntos (#2, #3).
 """
 
 import os
 
+import httpx
 import pytest_asyncio
+from dependency_injector import providers
 
+import main as main_module
 from app.infra.database.connection import DatabaseConnection
 from app.infra.database.repositories.phishing_repository import PhishingEmailRepository
+from tests.fakes import (
+    FakePromptNormalizer,
+    FakeReRanker,
+    FakeResponseGenerator,
+    FakeVectorStore,
+)
+
+os.environ.setdefault("OPENAI_API_KEY", "sk-test-nao-usada-em-nenhuma-chamada-real")
 
 
 @pytest_asyncio.fixture
@@ -38,3 +52,40 @@ async def db_connection():
 @pytest_asyncio.fixture
 async def phishing_repository(db_connection):
     return PhishingEmailRepository(db=db_connection)
+
+
+@pytest_asyncio.fixture
+async def client_com_postgres_real():
+    """App com LLM/reranker/base vetorial fakes, mas phishing_service e
+    db_connection REAIS -- para o INSERT ir de fato para o Postgres do
+    job de integracao. Usa uma conexao PROPRIA, independente da do
+    fixture `db_connection` acima -- ambas apontam para o mesmo banco,
+    entao um teste pode escrever por aqui e ler pelo `phishing_repository`.
+    """
+    app = main_module.create_app()
+    container = app.container
+
+    real_db_connection = DatabaseConnection(
+        host=os.environ.get("DB_HOST", "localhost"),
+        port=int(os.environ.get("DB_PORT", "5432")),
+        user=os.environ.get("DB_USER", "phishforge"),
+        password=os.environ.get("DB_PASSWORD", "phishforge"),
+        database=os.environ.get("DB_NAME", "phishforge"),
+    )
+
+    container.db_connection.override(providers.Object(real_db_connection))
+    container.prompt_normalizer.override(providers.Object(FakePromptNormalizer()))
+    container.response_generator.override(providers.Object(FakeResponseGenerator()))
+    container.reranker.override(providers.Object(FakeReRanker()))
+    container.qdrant_store.override(providers.Object(FakeVectorStore()))
+    # generation_pipeline nao e overrideado direto: e composto a partir
+    # dos quatro providers acima, entao resolve automaticamente com os
+    # fakes (ver comentario em tests/conftest.py). phishing_service e
+    # phishing_repository tambem NAO sao sobrescritos: o container
+    # resolve as versoes reais, usando o db_connection real acima.
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+    await real_db_connection.close_pool()

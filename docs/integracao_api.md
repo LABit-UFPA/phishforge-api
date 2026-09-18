@@ -50,14 +50,16 @@ Gera um único exemplo de email de phishing personalizado usando um pipeline RAG
 ```json
 {
   "user_context": "Funcionário de banco que recebeu email sobre atualização de dados",
-  "difficulty": "medio"
+  "difficulty": "medio",
+  "is_malicious": true
 }
 ```
 
 | Campo | Tipo | Obrigatório | Descrição |
 |-------|------|-------------|-----------|
-| `user_context` | string | Sim | Contexto/cenário para geração do phishing |
+| `user_context` | string | Sim | Contexto/cenário para geração do item |
 | `difficulty` | string | Sim | Nível: `facil`, `medio` ou `dificil` (ver [Vocabulário de dificuldade](#vocabulário-de-dificuldade)) |
+| `is_malicious` | boolean | Não (default `true`) | `true` gera phishing; `false` gera item **legítimo** (comunicação real, sem pedido de credencial nem link malicioso -- necessário para medir taxa de falso alarme e d-prime) |
 
 **Response (200 OK):**
 
@@ -71,7 +73,25 @@ Gera um único exemplo de email de phishing personalizado usando um pipeline RAG
   "explicacao": "Este email utiliza táticas de urgência e personificação...",
   "nivel": "medio",
   "categoria": "financeiro",
-  "links": ["http://banc0-brasil.com.phishing-site.net/atualizar"]
+  "links": ["http://banc0-brasil.com.phishing-site.net/atualizar"],
+  "is_malicious": true
+}
+```
+
+Exemplo de item **legítimo** (`is_malicious: false`) para o mesmo contexto:
+
+```json
+{
+  "id": "660f9511-f3ac-52e5-b827-557766551111",
+  "receptor": "joao.silva@empresa.com.br",
+  "remetente": "suporte@bancodobrasil.com.br",
+  "assunto": "Confirmação de atualização de dados cadastrais",
+  "conteudo": "Prezado João, confirmamos que seus dados cadastrais foram atualizados com sucesso. Se você não reconhece esta solicitação, acesse o aplicativo oficial do banco ou ligue para o SAC pelo número no verso do seu cartão. Nunca pedimos sua senha por e-mail ou telefone.",
+  "explicacao": "Item confiável: domínio oficial do remetente, ausência de pedido de credencial, direcionamento ao aplicativo oficial e canal alternativo verificável (SAC).",
+  "nivel": "facil",
+  "categoria": "financeiro",
+  "links": [],
+  "is_malicious": false
 }
 ```
 
@@ -85,7 +105,8 @@ Gera múltiplos exemplos de phishing em lote.
 {
   "context": "Ambiente corporativo de tecnologia",
   "difficulties": ["facil", "medio", "dificil"],
-  "total": 9
+  "total": 9,
+  "malicious_ratio": 0.7
 }
 ```
 
@@ -93,7 +114,8 @@ Gera múltiplos exemplos de phishing em lote.
 |-------|------|-------------|-----------|
 | `context` | string | Sim | Contexto geral para geração |
 | `difficulties` | array | Sim | Lista de dificuldades desejadas (ver [Vocabulário de dificuldade](#vocabulário-de-dificuldade)) |
-| `total` | integer | Não | Total de emails (máx: 10, padrão: 10) |
+| `total` | integer | Não | Total de itens (máx: 10, padrão: 10) |
+| `malicious_ratio` | float (0.0-1.0) | Não (default `1.0`) | Proporção de itens maliciosos vs. legítimos. Compõe com `difficulties`: dentro de cada nível, a fração `malicious_ratio` do total daquele nível é gerada como phishing e o restante como item legítimo |
 
 **Response (200 OK):**
 
@@ -116,7 +138,8 @@ Gera múltiplos exemplos de phishing em lote.
       "explicacao": "...",
       "nivel": "facil",
       "categoria": "...",
-      "links": [...]
+      "links": [...],
+      "is_malicious": true
     }
   ]
 }
@@ -156,21 +179,31 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8000/api/v1/ge
 
 #### POST `/api/v1/evaluate/user-answer`
 
-Avalia a justificativa do usuário sobre por que um exemplo é phishing, retornando uma nota de 0 a 5.
+Avalia a **qualidade do raciocínio** do usuário sobre um item que pode ser phishing ou uma
+comunicação legítima, retornando uma nota de 0 a 5.
+
+> Antes da issue #4, este endpoint assumia que o item apresentado era sempre phishing --
+> um usuário que acertasse um item legítimo seria avaliado contra o critério errado e zerado.
+> Agora a avaliação depende do rótulo verdadeiro (`is_malicious`) e do veredito do usuário
+> (`user_verdict`), cobrindo as quatro combinações possíveis.
 
 **Request Body:**
 
 ```json
 {
-  "phishing_example": "De: suporte@banc0-brasil.com\nAssunto: URGENTE: Atualização de Dados\n\nPrezado Cliente,\n\nIdentificamos uma inconsistência em seus dados cadastrais. Para evitar o bloqueio de sua conta, acesse o link abaixo e atualize suas informações em até 24 horas.\n\nhttp://banc0-brasil.com.phishing-site.net/atualizar\n\nAtenciosamente,\nSuporte Banco Brasil",
+  "item_content": "De: suporte@banc0-brasil.com\nAssunto: URGENTE: Atualização de Dados\n\nPrezado Cliente,\n\nIdentificamos uma inconsistência em seus dados cadastrais. Para evitar o bloqueio de sua conta, acesse o link abaixo e atualize suas informações em até 24 horas.\n\nhttp://banc0-brasil.com.phishing-site.net/atualizar\n\nAtenciosamente,\nSuporte Banco Brasil",
+  "is_malicious": true,
+  "user_verdict": true,
   "user_justification": "Acredito que é phishing porque o remetente usa 'banc0' com zero no lugar do 'o', o tom é muito urgente tentando me pressionar, e o link parece suspeito pois não é do domínio oficial do banco."
 }
 ```
 
 | Campo | Tipo | Obrigatório | Descrição |
 |-------|------|-------------|-----------|
-| `phishing_example` | string | Sim | O email de phishing apresentado ao usuário |
-| `user_justification` | string | Sim | A justificativa do usuário sobre identificação |
+| `item_content` | string | Sim | O item (malicioso ou legítimo) apresentado ao usuário |
+| `is_malicious` | boolean | Sim | Rótulo **verdadeiro** do item: `true` se é phishing, `false` se é legítimo |
+| `user_verdict` | boolean | Sim | O que o usuário respondeu: `true` para "é phishing", `false` para "é legítimo" |
+| `user_justification` | string | Sim | A justificativa do usuário para o veredito acima |
 
 **Response (200 OK):**
 
@@ -187,20 +220,54 @@ Avalia a justificativa do usuário sobre por que um exemplo é phishing, retorna
     "Mencionar a solicitação implícita de dados sensíveis",
     "Identificar o gatilho psicológico de medo (ameaça de bloqueio)",
     "Analisar a falta de personalização no email"
-  ]
+  ],
+  "acerto_por_sorte": false
 }
 ```
 
-**Escala de Notas:**
+**Exemplo com item LEGÍTIMO** (`is_malicious: false`) -- este é o caso que, antes da issue #4,
+seria zerado mesmo com raciocínio correto:
+
+```bash
+curl -s -X POST localhost:8000/api/v1/evaluate/user-answer \
+  -H "Content-Type: application/json" \
+  -d '{
+    "item_content": "De: rh@empresa.com.br\nAssunto: Avaliacao de desempenho\n\nAcesse o portal interno. Duvidas: ramal 4500.",
+    "is_malicious": false,
+    "user_verdict": false,
+    "user_justification": "E legitimo: dominio oficial da empresa, nao pede senha e da um ramal para confirmar."
+  }' | jq '{score, feedback}'
+```
+
+```json
+{
+  "score": 5,
+  "feedback": "Excelente! Você identificou corretamente os sinais de legitimidade: domínio oficial da empresa, ausência de pedido de credencial e um canal alternativo verificável (o ramal) para confirmar a autenticidade."
+}
+```
+
+**Escala de Notas** (mede qualidade da argumentação, aplicável às quatro combinações
+rótulo × veredito):
 
 | Nota | Classificação | Descrição |
 |------|---------------|-----------|
-| 0 | Incorreto | Justificativa errada ou sem relação com phishing |
-| 1 | Muito Fraco | Apenas um ponto superficial mencionado |
-| 2 | Fraco | Poucos indicadores identificados vagamente |
-| 3 | Satisfatório | Alguns indicadores corretos, argumentação básica |
-| 4 | Bom | Múltiplos indicadores, boa articulação |
-| 5 | Excelente | Análise completa e bem estruturada |
+| 0 | Incorreto | Justificativa sem relação com o item apresentado |
+| 1 | Muito Fraco | Apenas um ponto superficial mencionado, sem embasar no item real |
+| 2 | Fraco | Poucos elementos identificados vagamente |
+| 3 | Satisfatório | Alguns elementos corretos (pistas de phishing OU sinais de legitimidade), argumentação básica |
+| 4 | Bom | Múltiplos elementos corretos, boa articulação |
+| 5 | Excelente | Análise completa e bem estruturada, cobrindo os elementos relevantes do item |
+
+**Sobre `acerto_por_sorte`:** `true` quando o veredito do usuário bate com o rótulo verdadeiro,
+mas a justificativa não sustenta essa conclusão (ex.: disse "é phishing" corretamente, mas por um
+motivo genérico que não corresponde a nada realmente presente no item). É diferente de errar: é
+acertar a conclusão por um argumento que não a sustenta -- sempre `false` quando o veredito do
+usuário não bateu com o rótulo verdadeiro.
+
+**Restrição importante:** quando o item é legítimo, o `feedback` nunca afirma que existe um
+indicador de phishing, typosquatting ou qualquer técnica de engenharia social -- porque nenhuma
+delas existe ali. Um feedback que inventasse esse indicador ensinaria exatamente o viés de falso
+alarme que este endpoint existe para não reforçar.
 
 ---
 
@@ -305,11 +372,13 @@ def generate_phishing(context: str, difficulty: str) -> dict:
     return response.json()
 
 # 2. Avaliar resposta do usuário
-def evaluate_answer(phishing_example: str, user_justification: str) -> dict:
+def evaluate_answer(item_content: str, is_malicious: bool, user_verdict: bool, user_justification: str) -> dict:
     response = requests.post(
         f"{BASE_URL}/api/v1/evaluate/user-answer",
         json={
-            "phishing_example": phishing_example,
+            "item_content": item_content,
+            "is_malicious": is_malicious,
+            "user_verdict": user_verdict,
             "user_justification": user_justification
         }
     )
@@ -335,8 +404,13 @@ if __name__ == "__main__":
     
     justificativa = "O email é suspeito porque pede informações urgentes e tem um link estranho"
     
-    # Avaliar resposta
-    avaliacao = evaluate_answer(email_completo, justificativa)
+    # Avaliar resposta (o usuário identificou corretamente o item malicioso)
+    avaliacao = evaluate_answer(
+        item_content=email_completo,
+        is_malicious=phishing["is_malicious"],
+        user_verdict=True,
+        user_justification=justificativa,
+    )
     print(f"Nota: {avaliacao['score']}/5")
     print(f"Feedback: {avaliacao['feedback']}")
 ```
@@ -356,6 +430,7 @@ interface PhishingEmail {
   nivel: string;
   categoria: string;
   links: string[];
+  is_malicious: boolean;
 }
 
 interface EvaluationResult {
@@ -363,6 +438,7 @@ interface EvaluationResult {
   feedback: string;
   strengths: string[];
   improvements: string[];
+  acerto_por_sorte: boolean;
 }
 
 // Gerar exemplo de phishing
@@ -385,14 +461,18 @@ async function generatePhishing(
 
 // Avaliar resposta do usuário
 async function evaluateAnswer(
-  phishingExample: string, 
+  itemContent: string,
+  isMalicious: boolean,
+  userVerdict: boolean,
   userJustification: string
 ): Promise<EvaluationResult> {
   const response = await fetch(`${BASE_URL}/api/v1/evaluate/user-answer`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      phishing_example: phishingExample,
+      item_content: itemContent,
+      is_malicious: isMalicious,
+      user_verdict: userVerdict,
       user_justification: userJustification
     })
   });
@@ -417,9 +497,11 @@ async function runTraining() {
     ${phishing.conteudo}
   `;
   
-  // Avaliar justificativa do usuário
+  // Avaliar justificativa do usuário (identificou corretamente o item malicioso)
   const avaliacao = await evaluateAnswer(
     emailCompleto,
+    phishing.is_malicious,
+    true,
     "O domínio do remetente parece falso e o email pede ações urgentes"
   );
   
@@ -443,7 +525,9 @@ curl -X POST "http://localhost:8000/api/v1/generate" \
 curl -X POST "http://localhost:8000/api/v1/evaluate/user-answer" \
   -H "Content-Type: application/json" \
   -d '{
-    "phishing_example": "De: financeiro@empresa-falsa.com\nAssunto: Pagamento Urgente\n\nPrecisamos que você autorize o pagamento anexo.",
+    "item_content": "De: financeiro@empresa-falsa.com\nAssunto: Pagamento Urgente\n\nPrecisamos que você autorize o pagamento anexo.",
+    "is_malicious": true,
+    "user_verdict": true,
     "user_justification": "O email parece suspeito porque pede autorização urgente e o domínio não é oficial."
   }'
 ```

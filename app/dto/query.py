@@ -6,6 +6,9 @@ from app.domain.models.difficulty import Difficulty
 class QueryRequest(BaseModel):
     difficulty: Difficulty
     user_context: str = Field(alias="context")
+    # Default True preserva o comportamento historico de quem ja chama
+    # /generate sem esse campo (issue #3): continua gerando phishing.
+    is_malicious: bool = True
 
     class Config:
         populate_by_name = True

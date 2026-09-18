@@ -40,6 +40,7 @@ from tests.fakes import (
     FakePromptNormalizer,
     FakeReRanker,
     FakeResponseGenerator,
+    FakeUserAnswerEvaluator,
     FakeVectorStore,
 )
 
@@ -61,6 +62,7 @@ def _build_app_with_fakes():
         "reranker": FakeReRanker(),
         "qdrant_store": FakeVectorStore(),
         "phishing_service": FakePhishingService(),
+        "user_answer_evaluator": FakeUserAnswerEvaluator(),
     }
     for name, fake in fakes.items():
         getattr(container, name).override(providers.Object(fake))

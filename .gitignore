@@ -69,6 +69,15 @@ nohup.out
 Thumbs.db
 
 # =========================================
+# Docker Compose local override
+# =========================================
+# Convencao padrao do compose: override e por-desenvolvedor (ex.:
+# republicar a porta do Postgres para depurar localmente -- o
+# docker-compose.yml principal nao publica de proposito, ver #7).
+# Nunca deveria ser versionado; nao tinha entrada aqui ate agora.
+docker-compose.override.yml
+
+# =========================================
 # Pulumi
 # =========================================
 # Pulumi creates local state + config files
