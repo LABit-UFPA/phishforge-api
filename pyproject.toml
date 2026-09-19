@@ -26,6 +26,7 @@ dependency-injector = "^4.48.2"
 ragas = "^0.3.5"
 datasets = "^4.1.1"
 tracing-lib = {git = "https://github.com/GoLogann/tracing-lib.git"}
+slowapi = "^0.1.9"
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.4"
 pytest-asyncio = "^1.4.0"

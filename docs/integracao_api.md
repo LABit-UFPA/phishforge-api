@@ -33,7 +33,24 @@ http://seu-servidor:8000
 
 ## Autenticação
 
-Atualmente a API não requer autenticação. Em ambientes de produção, recomenda-se implementar autenticação via API Key ou OAuth2.
+Toda rota sob `/api/v1` -- geração, avaliação **e leitura** (listagem, detalhe, estatísticas)
+-- exige o header `X-API-Key` (issue #7). O único cliente legítimo hoje é o backend Go,
+chamando servidor-a-servidor; não há OAuth nem sessão de usuário.
+
+```bash
+curl -s http://seu-servidor:8000/api/v1/emails \
+  -H "X-API-Key: sua-chave-aqui"
+```
+
+| Situação | Resposta |
+|----------|----------|
+| Header ausente ou chave incorreta | **401 Unauthorized** |
+| `API_KEY` não configurada no servidor | **503 Service Unavailable** -- falha fechado, nunca equivalente a "sem autenticação" |
+| Chave correta | segue normalmente |
+
+Configuração via variável de ambiente `API_KEY` (ver `.env.example`). Não há endpoint de
+emissão de chave nem rotação automática -- é um segredo compartilhado, distribuído fora de
+banda entre os operadores dos dois serviços.
 
 ---
 
@@ -704,9 +721,12 @@ curl -X POST "http://localhost:8000/api/v1/evaluate/user-answer" \
 | 200 | Sucesso |
 | 202 | Job de geração em lote aceito (`POST /api/v1/generate/batch`) -- resultado por polling em `GET /api/v1/generate/batch/{job_id}` |
 | 400 | Requisição inválida (parâmetros faltando ou incorretos) |
+| 401 | `X-API-Key` ausente ou incorreta (ver [Autenticação](#autenticação)) |
 | 404 | Recurso não encontrado (inclui `job_id` inexistente em `GET /api/v1/generate/batch/{job_id}`) |
 | 422 | Corpo da requisição não passa na validação (ex.: `difficulty` fora do [vocabulário aceito](#vocabulário-de-dificuldade)) |
+| 429 | Limite de requisições excedido em `/generate`/`/generate/batch` (`GENERATION_RATE_LIMIT`, default 20/minuto por IP) |
 | 500 | Erro interno do servidor |
+| 503 | `API_KEY` não configurada no servidor -- toda rota fica indisponível até isso ser corrigido |
 
 ### Formato de Erro
 

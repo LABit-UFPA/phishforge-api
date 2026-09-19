@@ -17,6 +17,7 @@ from uuid import uuid4
 import httpx
 from dependency_injector import providers
 
+from tests.conftest import TEST_API_KEY
 from tests.fakes import FakeResponseGenerator
 from tests.unit._batch_helpers import post_batch_and_get_job
 
@@ -66,7 +67,10 @@ async def _client_com_override(app_and_fakes, provider_name: str, fake):
     app, fakes = app_and_fakes
     getattr(app.container, provider_name).override(providers.Object(fake))
     transport = httpx.ASGITransport(app=app)
-    return httpx.AsyncClient(transport=transport, base_url="http://test"), fakes
+    client = httpx.AsyncClient(
+        transport=transport, base_url="http://test", headers={"X-API-Key": TEST_API_KEY}
+    )
+    return client, fakes
 
 
 async def test_dedup_descarta_item_quase_identico_sem_contar_como_falha(app_and_fakes):

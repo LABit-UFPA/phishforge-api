@@ -42,7 +42,29 @@ class Settings(BaseSettings):
     DB_USER: str = "phishforge"
     DB_PASSWORD: str = "phishforge"
     DB_NAME: str = "phishforge"
-    
+
+    # Autenticacao entre servicos (issue #7). Vazio por default para a
+    # suite de testes nao precisar configurar nada -- mas
+    # `require_api_key` (app/core/security.py) falha FECHADO (503)
+    # quando vazio, entao "vazio" nunca significa "sem autenticacao"
+    # em produção, so em ambiente que nao configurou nada de proposito
+    # (dev local sem chamar os endpoints protegidos).
+    API_KEY: str = ""
+
+    # Lista de origens separadas por virgula (ex.:
+    # "https://curadoria.exemplo.com,https://outra.exemplo.com").
+    # Vazio = sem CORSMiddleware nenhum -- a API e chamada servidor-a-
+    # servidor pelo backend Go, entao CORS aberto nunca foi necessario
+    # (issue #7); so configurar se algum navegador precisar chamar a
+    # API diretamente.
+    CORS_ALLOWED_ORIGINS: str = ""
+
+    # Limite de requisicoes por IP nos endpoints de geracao (issue #7):
+    # protege contra abuso da chave da OpenAI e contra loop acidental
+    # de um frontend de curadoria disparando geracoes em sequencia.
+    # Sintaxe da lib `limits` (usada pelo slowapi): "<numero>/<unidade>".
+    GENERATION_RATE_LIMIT: str = "20/minute"
+
     class Config:
         env_file = ".env"
 
