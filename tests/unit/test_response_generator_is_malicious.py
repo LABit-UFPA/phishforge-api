@@ -9,6 +9,7 @@ isso, so testar via HTTP com FakeResponseGenerator nao provaria nada
 sobre a selecao de chain, porque o fake reimplementa o metodo inteiro.
 """
 
+from app.domain.models.generated_item_draft import GeneratedItemDraft
 from app.domain.services.response_generator import ResponseGenerator
 
 
@@ -19,7 +20,18 @@ class _ChainEspiao:
 
     async def ainvoke(self, args):
         self.invocado_com = args
-        return "resultado fake"
+        # generate_response acessa draft.conteudo/draft.cues (issue #5,
+        # _validar_cues) -- precisa de um GeneratedItemDraft de
+        # verdade, nao uma string crua.
+        return GeneratedItemDraft(
+            receptor="a@b.com",
+            remetente="c@d.com",
+            assunto="assunto fake",
+            conteudo="conteudo fake",
+            explicacao="explicacao fake",
+            categoria="teste",
+            links=[],
+        )
 
 
 def _build_generator_com_chains_espias():

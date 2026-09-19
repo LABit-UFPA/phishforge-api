@@ -1,9 +1,30 @@
 # app/domain/services/response_generator.py
 
 import logging
+from typing import List
+
 from langchain_core.prompts import PromptTemplate
+from app.domain.models.cue import Cue
 from app.domain.models.generated_item_draft import GeneratedItemDraft
 from langchain_openai import ChatOpenAI
+
+# Descricao curta de cada codigo, injetada nos dois prompts (issue #5,
+# passo 3): sem isso, o `Enum` do structured output so impede o modelo
+# de INVENTAR um codigo fora da taxonomia -- nao ajuda o modelo a
+# ESCOLHER o codigo certo para o que ele mesmo esta escrevendo.
+_TAXONOMIA_DE_PISTAS = (
+    "- sender_domain_mismatch: dominio do remetente nao corresponde a organizacao\n"
+    "- typosquat: dominio com erro de digitacao proposital (ex.: empres4.net)\n"
+    "- homoglyph: caractere visualmente parecido usado para enganar\n"
+    "- urgency: apelo a urgencia ou prazo curto\n"
+    "- authority: apelo a autoridade (banco, governo, chefia)\n"
+    "- generic_greeting: saudacao generica, sem personalizacao\n"
+    "- credential_request: solicitacao direta de senha ou dado sensivel\n"
+    "- link_text_mismatch: texto do link diferente do destino real\n"
+    "- unexpected_attachment: anexo inesperado ou fora do contexto\n"
+    "- scarcity: apelo a escassez ou oferta por tempo limitado"
+)
+
 
 class ResponseGenerator:
     def __init__(self, api_key: str, model_name: str = "gpt-4o-mini"):
@@ -75,7 +96,22 @@ class ResponseGenerator:
                 "- Identidade visual perfeita (logos, assinaturas, layout)\n"
                 "- Contexto temporal relevante (eventos atuais, datas importantes)\n"
                 "- Engenharia social sofisticada (psicologia, autoridade, reciprocidade)\n\n"
-                
+
+                "## 3.5 TAXONOMIA DE PISTAS (cues) -- ISSUE #5\n"
+                "Alem do texto, anote em `cues` QUAIS das pistas abaixo estao de fato "
+                "presentes no email que voce esta escrevendo. Use SOMENTE estes 10 codigos "
+                "(nunca invente um novo):\n"
+                f"{_TAXONOMIA_DE_PISTAS}\n\n"
+                "Para cada pista, informe `evidencia`: o TRECHO LITERAL do `conteudo` que "
+                "comprova a pista (copie exatamente, nao parafraseie -- isso sera conferido). "
+                "Quando conseguir localizar esse trecho com precisao, informe tambem "
+                "`span_start`/`span_end` (posicao inicial/final do trecho dentro de "
+                "`conteudo`); se nao tiver certeza da posicao exata, deixe os dois como "
+                "null -- e melhor omitir a posicao do que informar uma errada. So anote "
+                "pistas REALMENTE presentes: uma lista vazia e melhor que uma pista forcada. "
+                "`generic_greeting` so se aplica quando a saudacao for de fato generica "
+                "('Prezado cliente'), nao quando houver qualquer personalizacao.\n\n"
+
                 "## 4. EXEMPLOS DE REFERÊNCIA (FEW-SHOT LEARNING)\n"
                 "Analise as táticas, métodos e gatilhos psicológicos descritos nos documentos de pesquisa para garantir consistência com padrões acadêmicos estabelecidos.\n\n"
                 
@@ -107,10 +143,11 @@ class ResponseGenerator:
                 "- ✓ Call-to-action claro?\n"
                 "- ✓ Técnicas acadêmicas implementadas?\n"
                 "- ✓ Nível de dificuldade respeitado?\n"
-                "- ✓ Coerência entre cenário + táticas + nível?\n\n"
-                
+                "- ✓ Coerência entre cenário + táticas + nível?\n"
+                "- ✓ `cues` lista exatamente as pistas realmente presentes, com evidência literal?\n\n"
+
                 "## FORMATO DE RESPOSTA\n"
-                "Gere APENAS o objeto JSON com os campos solicitados (receptor, remetente, assunto, conteudo, explicacao, categoria, links).\n"
+                "Gere APENAS o objeto JSON com os campos solicitados (receptor, remetente, assunto, conteudo, explicacao, categoria, links, cues).\n"
                 "Não mostre explicitamente os passos de raciocínio, mas seu resultado deve demonstrar que você seguiu o processo Chain-of-Thought, implementando:\n"
                 "- As características específicas do nível '{difficulty}'\n"
                 "- As táticas acadêmicas do conhecimento técnico\n"
@@ -191,12 +228,19 @@ class ResponseGenerator:
                 "link leva a domínio externo desconhecido, e não há tática de phishing da lista "
                 "negativa presente.\n\n"
 
+                "## TAXONOMIA DE PISTAS (cues) -- ISSUE #5\n"
+                "Este item é LEGÍTIMO: o campo `cues` deve ser SEMPRE uma lista vazia `[]`. "
+                "As pistas abaixo descrevem indicadores de PHISHING, e nenhuma delas pode "
+                "estar presente aqui -- é exatamente isso que torna o item confiável:\n"
+                f"{_TAXONOMIA_DE_PISTAS}\n\n"
+
                 "## FORMATO DE RESPOSTA\n"
                 "Gere APENAS o objeto JSON com os campos solicitados (receptor, remetente, "
-                "assunto, conteudo, explicacao, categoria, links).\n"
+                "assunto, conteudo, explicacao, categoria, links, cues).\n"
                 "O campo `explicacao` deve explicar POR QUE o item é confiável, listando os "
                 "sinais de legitimidade presentes -- NUNCA invente um defeito ou indicador de "
-                "phishing que não existe só para preencher o campo."
+                "phishing que não existe só para preencher o campo. O campo `cues` deve vir "
+                "vazio: `[]`."
             )
         )
 
@@ -243,12 +287,13 @@ class ResponseGenerator:
         Returns:
             GeneratedItemDraft: NÃO inclui `nivel` nem `is_malicious`
             (ver issue #11 -- ambos são entrada da geração, não saída
-            do LLM). Quem chama esta função monta o `PhishingEmail`
-            final combinando o draft com os dois.
+            do LLM). `cues` já vem validado por `_validar_cues` (issue
+            #5, passos 5 e 9) -- span incoerente é descartado (mantendo
+            a pista) e item legítimo nunca sai daqui com pista alguma.
         """
         chain = self.chain if is_malicious else self.legitimate_chain
         try:
-            return await chain.ainvoke({
+            draft = await chain.ainvoke({
                 "context": context,
                 "difficulty": difficulty,
                 "relevant_docs": relevant_docs
@@ -256,6 +301,52 @@ class ResponseGenerator:
         except Exception as e:
             logging.error(f"Error generating response: {e}")
             raise e
+
+        draft.cues = self._validar_cues(draft.conteudo, draft.cues, is_malicious)
+        return draft
+
+    def _validar_cues(
+        self, conteudo: str, cues: List[Cue], is_malicious: bool
+    ) -> List[Cue]:
+        """Aplica os passos 5 e 9 da issue #5 depois da geracao.
+
+        Passo 9: item legitimo nunca deve ter pista de golpe. O prompt
+        legitimo ja instrui `cues: []`, mas isso e disciplina de
+        prompt, nao garantia -- aqui e onde a garantia de fato existe.
+        Um LLM que "esquecer" a instrucao e descartado em silencio (com
+        log), nao propagado: nao ha ganho em falhar a geracao inteira
+        por causa de uma lista que deveria estar vazia.
+
+        Passo 5: para cada pista de um item malicioso, confere que
+        `conteudo[span_start:span_end]` bate exatamente com a
+        `evidencia` declarada. Span incoerente (fora dos limites do
+        texto ou trecho diferente) e zerado (vira None/None), mas a
+        pista em si e MANTIDA -- o codigo da pista pode estar certo
+        mesmo quando o modelo erra a localizacao exata, e um destaque
+        errado no app e pior que nenhum destaque, nao pior que nenhuma
+        pista.
+        """
+        if not is_malicious:
+            if cues:
+                logging.warning(
+                    "LLM emitiu %d pista(s) de phishing num item legitimo -- "
+                    "descartando (issue #5, passo 9).",
+                    len(cues),
+                )
+            return []
+
+        validadas = []
+        for cue in cues:
+            se_tem_span = cue.span_start is not None and cue.span_end is not None
+            span_valido = (
+                se_tem_span
+                and 0 <= cue.span_start < cue.span_end <= len(conteudo)
+                and conteudo[cue.span_start:cue.span_end] == cue.evidencia
+            )
+            if se_tem_span and not span_valido:
+                cue = cue.model_copy(update={"span_start": None, "span_end": None})
+            validadas.append(cue)
+        return validadas
 
     async def generate_hypothetical_answer(self, query: str) -> str:
         """

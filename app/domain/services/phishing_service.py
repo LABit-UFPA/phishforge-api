@@ -50,6 +50,18 @@ class PhishingEmailService:
                 "antes de chegar aqui -- ver issue #2."
             )
 
+        # Mesma logica de "erro explicito, nao correcao silenciosa" da
+        # validacao de nivel acima -- issue #5, passo 9. O primeiro
+        # cinto de seguranca e em ResponseGenerator._validar_cues
+        # (descarta a pista antes do PhishingEmail existir); este e o
+        # segundo, para qualquer chamador que monte um PhishingEmail
+        # sem passar pelo gerador.
+        if not email.is_malicious and email.cues:
+            raise ValueError(
+                f"item legitimo chegou ao PhishingEmailService com {len(email.cues)} "
+                "pista(s) de phishing anotada(s) -- ver issue #5, passo 9."
+            )
+
         # Salva o email
         email_id = await self.repository.create(email)
 
