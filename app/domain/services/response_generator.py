@@ -1,11 +1,13 @@
 # app/domain/services/response_generator.py
 
 import logging
-from typing import List
+from typing import List, Optional
 
 from langchain_core.prompts import PromptTemplate
 from app.domain.models.cue import Cue
+from app.domain.models.difficulty import Difficulty
 from app.domain.models.generated_item_draft import GeneratedItemDraft
+from app.domain.models.phish_scale import PhishScale, PremiseAlignment
 from langchain_openai import ChatOpenAI
 
 # Descricao curta de cada codigo, injetada nos dois prompts (issue #5,
@@ -72,8 +74,11 @@ class ResponseGenerator:
                 "- Formatação inconsistente ou amadora\n"
                 "- Ausência de personalização (tratamento genérico)\n"
                 "- Ameaças diretas e explícitas\n"
-                "- Solicitação óbvia de informações sensíveis\n\n"
-                
+                "- Solicitação óbvia de informações sensíveis\n"
+                "- Phish Scale: mire em 3 OU MAIS pistas da taxonomia abaixo, óbvias, e "
+                "premissa `baixo` ou `medio` (pretexto genérico, sem relação com a rotina "
+                "específica de quem recebe)\n\n"
+
                 "**MÉDIO:**\n"
                 "- Remetente parcialmente convincente mas com pequenas inconsistências\n"
                 "- Assunto plausível mas com alguns indicadores de suspeita\n"
@@ -83,8 +88,9 @@ class ResponseGenerator:
                 "- Personalização básica (nome do destinatário)\n"
                 "- Mistura de informações verdadeiras com falsas\n"
                 "- Uso de logos e identidade visual parcialmente convincentes\n"
-                "- Solicitação indireta de ação (download, clique, verificação)\n\n"
-                
+                "- Solicitação indireta de ação (download, clique, verificação)\n"
+                "- Phish Scale: mire em EXATAMENTE 2 pistas moderadas e premissa `medio`\n\n"
+
                 "**DIFÍCIL:**\n"
                 "- Remetente altamente convincente, indistinguível de comunicações legítimas\n"
                 "- Assunto contextualmente perfeito e relevante\n"
@@ -95,7 +101,10 @@ class ResponseGenerator:
                 "- Informações específicas e verificáveis sobre a empresa/pessoa\n"
                 "- Identidade visual perfeita (logos, assinaturas, layout)\n"
                 "- Contexto temporal relevante (eventos atuais, datas importantes)\n"
-                "- Engenharia social sofisticada (psicologia, autoridade, reciprocidade)\n\n"
+                "- Engenharia social sofisticada (psicologia, autoridade, reciprocidade)\n"
+                "- Phish Scale: mire em 0 OU 1 pista, bem sutil, e premissa `alto` -- o "
+                "pretexto precisa parecer parte genuína da rotina de quem recebe, dado o "
+                "cenário '{context}'\n\n"
 
                 "## 3.5 TAXONOMIA DE PISTAS (cues) -- ISSUE #5\n"
                 "Alem do texto, anote em `cues` QUAIS das pistas abaixo estao de fato "
@@ -111,6 +120,20 @@ class ResponseGenerator:
                 "pistas REALMENTE presentes: uma lista vazia e melhor que uma pista forcada. "
                 "`generic_greeting` so se aplica quando a saudacao for de fato generica "
                 "('Prezado cliente'), nao quando houver qualquer personalizacao.\n\n"
+
+                "## 3.6 ALINHAMENTO DE PREMISSA (premise_alignment) -- ISSUE #9\n"
+                "Alem de escrever o email, julgue o proprio `premise_alignment`: o quanto o "
+                "PRETEXTO que voce usou se encaixa na rotina de quem recebe, dado o cenario "
+                "'{context}'. Nao e sobre quao bem escrito esta o email -- e sobre se o "
+                "MOTIVO do email faz sentido para o dia a dia da pessoa:\n"
+                "- `alto`: o pretexto e algo que faz parte da rotina de quem recebe (fatura "
+                "de um servico que a pessoa realmente usa, processo interno que existe na "
+                "empresa do cenario)\n"
+                "- `medio`: plausivel, mas nao esperado naquele momento especifico\n"
+                "- `baixo`: pretexto generico ou incoerente com o cenario pedido\n"
+                "Julgue com honestidade o que voce de fato escreveu -- nao repita "
+                "mecanicamente o alvo do nivel '{difficulty}' se o texto que voce produziu "
+                "não atingiu aquele alinhamento.\n\n"
 
                 "## 4. EXEMPLOS DE REFERÊNCIA (FEW-SHOT LEARNING)\n"
                 "Analise as táticas, métodos e gatilhos psicológicos descritos nos documentos de pesquisa para garantir consistência com padrões acadêmicos estabelecidos.\n\n"
@@ -144,10 +167,11 @@ class ResponseGenerator:
                 "- ✓ Técnicas acadêmicas implementadas?\n"
                 "- ✓ Nível de dificuldade respeitado?\n"
                 "- ✓ Coerência entre cenário + táticas + nível?\n"
-                "- ✓ `cues` lista exatamente as pistas realmente presentes, com evidência literal?\n\n"
+                "- ✓ `cues` lista exatamente as pistas realmente presentes, com evidência literal?\n"
+                "- ✓ `premise_alignment` reflete o que você de fato escreveu, não só o alvo do nível?\n\n"
 
                 "## FORMATO DE RESPOSTA\n"
-                "Gere APENAS o objeto JSON com os campos solicitados (receptor, remetente, assunto, conteudo, explicacao, categoria, links, cues).\n"
+                "Gere APENAS o objeto JSON com os campos solicitados (receptor, remetente, assunto, conteudo, explicacao, categoria, links, cues, premise_alignment).\n"
                 "Não mostre explicitamente os passos de raciocínio, mas seu resultado deve demonstrar que você seguiu o processo Chain-of-Thought, implementando:\n"
                 "- As características específicas do nível '{difficulty}'\n"
                 "- As táticas acadêmicas do conhecimento técnico\n"
@@ -233,6 +257,8 @@ class ResponseGenerator:
                 "As pistas abaixo descrevem indicadores de PHISHING, e nenhuma delas pode "
                 "estar presente aqui -- é exatamente isso que torna o item confiável:\n"
                 f"{_TAXONOMIA_DE_PISTAS}\n\n"
+                "Não preencha `premise_alignment`: o Phish Scale (issue #9) mede dificuldade "
+                "de DETECTAR phishing, o que não se aplica a um item que não é phishing.\n\n"
 
                 "## FORMATO DE RESPOSTA\n"
                 "Gere APENAS o objeto JSON com os campos solicitados (receptor, remetente, "
@@ -290,6 +316,10 @@ class ResponseGenerator:
             do LLM). `cues` já vem validado por `_validar_cues` (issue
             #5, passos 5 e 9) -- span incoerente é descartado (mantendo
             a pista) e item legítimo nunca sai daqui com pista alguma.
+            `phish_scale` (issue #9) é montado por
+            `_compute_phish_scale` a partir do `cues` já validado e do
+            `premise_alignment` que o LLM julgou -- None para item
+            legítimo.
         """
         chain = self.chain if is_malicious else self.legitimate_chain
         try:
@@ -303,6 +333,7 @@ class ResponseGenerator:
             raise e
 
         draft.cues = self._validar_cues(draft.conteudo, draft.cues, is_malicious)
+        draft.phish_scale = self._compute_phish_scale(draft.cues, draft.premise_alignment, is_malicious)
         return draft
 
     def _validar_cues(
@@ -347,6 +378,81 @@ class ResponseGenerator:
                 cue = cue.model_copy(update={"span_start": None, "span_end": None})
             validadas.append(cue)
         return validadas
+
+    def _compute_phish_scale(
+        self,
+        cues: List[Cue],
+        premise_alignment: Optional[PremiseAlignment],
+        is_malicious: bool,
+    ) -> Optional[PhishScale]:
+        """Monta o Phish Scale (issue #9) DEPOIS da geracao e da
+        validacao de cues -- nunca antes, e nunca a partir do que o
+        LLM eventualmente tenha proposto para os campos derivados.
+
+        None para item legitimo ou quando o LLM nao julgou
+        `premise_alignment` (prompt legitimo nao pede o campo, ver
+        `legitimate_prompt_template`): "dificuldade de detectar
+        phishing" nao se aplica a um item que nao e phishing.
+
+        `cue_count` e SEMPRE `len(cues)` deste mesmo draft (ja
+        validado por `_validar_cues`) -- nunca um numero que o LLM
+        declara a parte, exatamente o que a issue pede ("nao de campo
+        livre... duas fontes de verdade para a mesma contagem vao
+        divergir").
+        """
+        if not is_malicious or premise_alignment is None:
+            return None
+
+        cue_count = len(cues)
+        return PhishScale(
+            cue_count=cue_count,
+            premise_alignment=premise_alignment,
+            difficulty_estimated=self._derivar_dificuldade_estimada(
+                cue_count, premise_alignment
+            ),
+        )
+
+    def _derivar_dificuldade_estimada(
+        self, cue_count: int, premise_alignment: PremiseAlignment
+    ) -> Difficulty:
+        """Regra de derivacao DETERMINISTICA e documentada da issue #9
+        (passo 4) -- nunca um terceiro palpite do modelo.
+
+        Pontuacao por eixo, somada:
+
+        - `cue_count`: 0-1 pistas -> 2 pontos (poucas pistas, mais
+          dificil de perceber); 2 pistas -> 1 ponto; 3+ pistas -> 0
+          pontos (muitas pistas, mais facil de perceber).
+        - `premise_alignment`: `alto` -> 2 pontos; `medio` -> 1 ponto;
+          `baixo` -> 0 pontos.
+
+        Soma 0-1 -> facil; 2-3 -> medio; 4 -> dificil. Bate com o
+        esboco da issue: "muitas pistas + baixo/medio -> facil" da
+        soma 0 ou 1; "poucas pistas + alto" da soma 4 -> dificil; as
+        combinacoes intermediarias caem em medio. Os pontos de corte
+        sao candidatos a revisao quando houver dado empirico de
+        calibracao (ver `phishing-quest-api` #66) -- por isso isolados
+        nesta funcao, e nao espalhados pelo prompt.
+        """
+        if cue_count <= 1:
+            pontos_cue = 2
+        elif cue_count == 2:
+            pontos_cue = 1
+        else:
+            pontos_cue = 0
+
+        pontos_alinhamento = {
+            PremiseAlignment.ALTO: 2,
+            PremiseAlignment.MEDIO: 1,
+            PremiseAlignment.BAIXO: 0,
+        }[premise_alignment]
+
+        soma = pontos_cue + pontos_alinhamento
+        if soma <= 1:
+            return Difficulty.FACIL
+        if soma <= 3:
+            return Difficulty.MEDIO
+        return Difficulty.DIFICIL
 
     async def generate_hypothetical_answer(self, query: str) -> str:
         """

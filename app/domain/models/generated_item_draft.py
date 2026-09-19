@@ -1,8 +1,9 @@
-from typing import List
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
 from app.domain.models.cue import Cue
+from app.domain.models.phish_scale import PhishScale, PremiseAlignment
 
 
 class GeneratedItemDraft(BaseModel):
@@ -44,3 +45,18 @@ class GeneratedItemDraft(BaseModel):
     # e o valor esperado para item legitimo (ver
     # ResponseGenerator._validar_cues).
     cues: List[Cue] = Field(default_factory=list)
+    # Unico pedaco do Phish Scale (issue #9) que o LLM de fato julga --
+    # o outro eixo (`cue_count`) e `len(cues)` deste mesmo draft, nunca
+    # um numero declarado a parte (duas fontes de verdade para a mesma
+    # contagem divergem). None para item legitimo: o prompt legitimo
+    # nao pede este campo, e "dificuldade de detectar phishing" nao
+    # tem sentido para um item que nao e phishing.
+    premise_alignment: Optional[PremiseAlignment] = None
+    # Montado por ResponseGenerator._compute_phish_scale DEPOIS da
+    # geracao, a partir de `cues` + `premise_alignment` -- nunca
+    # preenchido pelo LLM de verdade (o default None o deixa fora do
+    # `required` do structured output, mas qualquer valor que o modelo
+    # tentar propor aqui e descartado e recalculado). Existe como campo
+    # do draft, e nao um retorno a parte de generate_response, para
+    # fluir para o PhishingEmail final do mesmo jeito que `cues` flui.
+    phish_scale: Optional[PhishScale] = None
