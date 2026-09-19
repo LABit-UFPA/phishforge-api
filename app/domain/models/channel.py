@@ -4,17 +4,12 @@ from enum import Enum
 class Channel(str, Enum):
     """Os 6 canais que o backend Go modela em `items.channel` (issue
     #6). O CHECK de `phishing_emails.channel` aceita os 6 -- alinhado
-    com o Go -- mas a geracao hoje so sabe produzir 4: `EMAIL` (colunas
-    antigas, sem mudanca) e os 3 novos desta issue.
-
-    `SMS`/`WHATSAPP` existem aqui so para o vocabulario bater com o
-    Go; `GENERATION_SUPORTADOS` abaixo e o que a API de fato aceita
-    como entrada -- pedir um dos dois de proposito da 422 explicito
-    (ver generator.py), em vez de aceitar e falhar de forma obscura
-    depois. Bloqueio: `buildDraftContent` no Go monta
-    `map[string]string`, que nao comporta o array de objetos que o
-    shape de sms/whatsapp exige (`messages`/`links` aninhados) --
-    mesma causa do bloqueio de `links` na #5.
+    com o Go -- e a geracao agora sabe produzir todos: `EMAIL` (colunas
+    antigas, sem mudanca), os 3 canais planos (website/phone_call/
+    pix_qr) e `SMS`/`WHATSAPP` (desbloqueados pela `phishing-quest-api`
+    #68, que ensinou `buildDraftContent` a aceitar valor aninhado --
+    `links`/`messages` como array de objetos -- em vez de
+    `map[string]string`).
     """
 
     EMAIL = "email"
@@ -25,9 +20,9 @@ class Channel(str, Enum):
     PIX_QR = "pix_qr"
 
 
-# Canais que a geracao de fato sabe produzir hoje. EMAIL usa as colunas
-# antigas (sem content_json); os outros tres usam content_json (ver
-# app/domain/models/channel_content.py).
-GENERATION_SUPORTADOS = frozenset(
-    {Channel.EMAIL, Channel.WEBSITE, Channel.PHONE_CALL, Channel.PIX_QR}
-)
+# Canais que a geracao de fato sabe produzir. EMAIL usa as colunas
+# antigas (sem content_json); os demais usam content_json (ver
+# app/domain/models/channel_content.py). Todos os 6 membros de Channel
+# desde a issue #68 do lado Go -- antes SMS/WHATSAPP ficavam de fora
+# por exigirem valor aninhado que o Go ainda nao aceitava.
+GENERATION_SUPORTADOS = frozenset(Channel)

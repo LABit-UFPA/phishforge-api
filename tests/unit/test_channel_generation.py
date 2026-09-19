@@ -1,10 +1,12 @@
-"""Contrato multicanal (issue #6): so 3 canais novos entram nesta
-issue -- website, phone_call, pix_qr -- porque sms/whatsapp precisam
-de valor aninhado (`messages`/`links`) que o backend Go ainda nao
-aceita (`buildDraftContent` monta `map[string]string`, mesmo bloqueio
-da #5). O canal email continua exatamente como antes (ver
-test_generate_endpoint.py, test_generate_is_malicious.py, etc. --
-nenhum foi alterado por esta issue e todos continuam passando).
+"""Contrato multicanal (issue #6): todos os 5 canais que usam
+content_json -- website, phone_call, pix_qr, sms e whatsapp. Os dois
+ultimos foram desbloqueados pela phishing-quest-api #68
+(`buildDraftContent` passou a aceitar valor aninhado -- `links`/
+`messages` como array de objetos -- em vez de `map[string]string`,
+mesmo bloqueio registrado na #5 para o `links` de email). O canal
+email continua exatamente como antes (ver test_generate_endpoint.py,
+test_generate_is_malicious.py, etc. -- nenhum foi alterado por esta
+issue e todos continuam passando).
 """
 
 import pytest
@@ -15,10 +17,14 @@ _SHAPE_POR_CANAL = {
     "website": {"url", "title", "visible_content"},
     "phone_call": {"caller", "transcript"},
     "pix_qr": {"payload", "recipient", "amount", "pix_key"},
+    "sms": {"sender", "text", "links"},
+    "whatsapp": {"sender", "display_name", "messages"},
 }
 
+_CANAIS_NOVOS = ["website", "phone_call", "pix_qr", "sms", "whatsapp"]
 
-@pytest.mark.parametrize("channel", ["website", "phone_call", "pix_qr"])
+
+@pytest.mark.parametrize("channel", _CANAIS_NOVOS)
 async def test_generate_em_canal_novo_devolve_content_json_no_shape_certo(client, channel):
     response = await client.post(
         "/api/v1/generate",
@@ -50,17 +56,6 @@ async def test_generate_sem_channel_continua_email_por_padrao(client):
     assert body["conteudo"] is not None
 
 
-@pytest.mark.parametrize("channel", ["sms", "whatsapp"])
-async def test_generate_em_canal_ainda_bloqueado_da_422(client, channel):
-    response = await client.post(
-        "/api/v1/generate",
-        json={"context": "cobranca de fatura", "difficulty": "facil", "channel": channel},
-    )
-
-    assert response.status_code == 422
-    assert "nao suportado" in response.json()["detail"]
-
-
 async def test_generate_com_canal_invalido_da_422_do_pydantic(client):
     response = await client.post(
         "/api/v1/generate",
@@ -70,7 +65,7 @@ async def test_generate_com_canal_invalido_da_422_do_pydantic(client):
     assert response.status_code == 422
 
 
-@pytest.mark.parametrize("channel", ["website", "phone_call", "pix_qr"])
+@pytest.mark.parametrize("channel", _CANAIS_NOVOS)
 async def test_lote_em_canal_novo_gera_itens_com_content_json(client, channel):
     job = await post_batch_and_get_job(
         client,
@@ -90,10 +85,14 @@ async def test_lote_em_canal_novo_gera_itens_com_content_json(client, channel):
         assert set(item["content_json"].keys()) == _SHAPE_POR_CANAL[channel]
 
 
-async def test_lote_com_canal_bloqueado_da_422_antes_de_criar_job(client):
+async def test_lote_com_canal_invalido_da_422_antes_de_criar_job(client):
     response = await client.post(
         "/api/v1/generate/batch",
-        json={"context": "cobranca de fatura", "difficulties": ["facil"], "channel": "whatsapp"},
+        json={
+            "context": "cobranca de fatura",
+            "difficulties": ["facil"],
+            "channel": "carta_pombo",
+        },
     )
 
     assert response.status_code == 422

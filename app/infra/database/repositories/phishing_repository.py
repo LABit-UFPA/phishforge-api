@@ -37,7 +37,7 @@ class PhishingEmailRepository:
                     email.explicacao,
                     email.nivel,
                     email.categoria,
-                    json.dumps(email.links) if email.links else "[]",
+                    json.dumps([link.model_dump() for link in email.links]) if email.links else "[]",
                     email.is_malicious,
                     phish_scale.cue_count if phish_scale else None,
                     phish_scale.premise_alignment.value if phish_scale else None,
@@ -269,6 +269,9 @@ class PhishingEmailRepository:
             explicacao=row["explicacao"],
             nivel=row["nivel"],
             categoria=row["categoria"],
+            # json.loads devolve dicts crus ({"text":..., "href":...});
+            # o Pydantic valida e converte para List[LinkRef] ao
+            # construir PhishingEmail, sem precisar de conversao manual.
             links=json.loads(row["links"]) if row["links"] else [],
             is_malicious=row["is_malicious"],
             cues=cues or [],

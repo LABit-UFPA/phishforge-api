@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.domain.models.channel import Channel
 from app.domain.models.cue import Cue
+from app.domain.models.link_ref import LinkRef
 from app.domain.models.phish_scale import PhishScale
 
 class PhishingEmail(BaseModel):
@@ -21,7 +22,11 @@ class PhishingEmail(BaseModel):
     explicacao: str
     nivel: str
     categoria: str
-    links: List[str] = Field(default_factory=list)
+    # List[LinkRef] desde a issue #5 (antes List[str]): texto exibido
+    # separado do destino real, habilitando a pista link_text_mismatch.
+    # Quebra-contrato deliberada -- ver docstring de LinkRef sobre o
+    # porque agora e o momento certo (nenhum consumidor real ainda).
+    links: List[LinkRef] = Field(default_factory=list)
     # Canal do item (issue #6). Default EMAIL preserva o
     # comportamento historico para quem constroi este modelo sem
     # passar o campo -- todo item ate esta issue era email por

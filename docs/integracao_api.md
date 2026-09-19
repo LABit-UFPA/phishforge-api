@@ -91,7 +91,9 @@ Gera um único exemplo de email de phishing personalizado usando um pipeline RAG
   "explicacao": "Este email utiliza táticas de urgência e personificação...",
   "nivel": "medio",
   "categoria": "financeiro",
-  "links": ["http://banc0-brasil.com.phishing-site.net/atualizar"],
+  "links": [
+    {"text": "Atualizar meus dados agora", "href": "http://banc0-brasil.com.phishing-site.net/atualizar"}
+  ],
   "is_malicious": true,
   "cues": [
     {
@@ -134,6 +136,24 @@ Exemplo de item **legítimo** (`is_malicious: false`) para o mesmo contexto:
 }
 ```
 
+#### Links estruturados (`links`)
+
+Desde a issue #5, cada item de `links` é um **objeto** com `text` (o texto exibido, o que a
+vítima lê e clica) e `href` (o destino real) -- **não** mais uma string solta com só o destino.
+Mudança quebra-contrato deliberada: não havia consumidor real desta API ainda (o backend Go
+integra via `phishing-quest-api` #62, que ainda não existe), então o momento de trocar o shape
+foi antes de existir um cliente para quebrar.
+
+```json
+"links": [
+  {"text": "Atualizar meus dados agora", "href": "http://banc0-brasil.com.phishing-site.net/atualizar"}
+]
+```
+
+Essa separação é o que habilita a pista `link_text_mismatch` (ver tabela abaixo): o texto do
+link pode sugerir um destino diferente do `href` real, e o servidor consegue expressar essa
+divergência em vez de só apontar "há um link suspeito".
+
 #### Pistas anotadas (`cues`)
 
 Além do texto livre em `explicacao`, cada item gerado traz `cues`: a lista estruturada das
@@ -168,9 +188,8 @@ Garantias do servidor (não é só instrução de prompt):
 - Quando `span_start`/`span_end` vêm preenchidos, `conteudo[span_start:span_end]` sempre bate
   exatamente com `evidencia`. Se o modelo declarar um span que não corresponde ao texto real, o
   servidor descarta o span (fica `null`/`null`) mas **mantém a pista**.
-- `link_text_mismatch` ainda não é gerável: depende da mudança de `links` de `List[str]` para
-  objeto com texto exibido e destino, que segue bloqueada do lado do backend Go (issue #5 da
-  `phishforge-api`).
+- `link_text_mismatch` já é gerável: `links` passou a ser objeto com texto exibido e destino
+  (ver [Links estruturados](#links-estruturados-links) acima).
 
 #### Dificuldade estimada (`phish_scale`)
 
@@ -213,9 +232,11 @@ A soma dos dois pontos decide o resultado: **0–1 → `facil`**, **2–3 → `m
 
 #### Canais suportados (`channel`)
 
-Além de email, a geração suporta mais 3 canais (issue #6). Cada canal tem seu próprio shape em
-`content_json` -- quando `channel` é diferente de `email`, os campos `receptor`/`remetente`/
-`assunto`/`conteudo` vêm `null` e o conteúdo real está em `content_json`.
+Além de email, a geração suporta os 5 outros canais do vocabulário compartilhado com o backend
+Go (issue #6, completa desde que a `phishing-quest-api` #68 desbloqueou `sms`/`whatsapp`). Cada
+canal tem seu próprio shape em `content_json` -- quando `channel` é diferente de `email`, os
+campos `receptor`/`remetente`/`assunto`/`conteudo` vêm `null` e o conteúdo real está em
+`content_json`.
 
 | `channel` | Shape de `content_json` |
 |-----------|--------------------------|
@@ -223,6 +244,8 @@ Além de email, a geração suporta mais 3 canais (issue #6). Cada canal tem seu
 | `website` | `{"url", "title", "visible_content"}` |
 | `phone_call` | `{"caller", "transcript"}` |
 | `pix_qr` | `{"payload", "recipient", "amount", "pix_key"}` -- `amount` é sempre **string** (ex.: `"149.90"`), nunca número |
+| `sms` | `{"sender", "text", "links"}` -- `links` no mesmo shape de [Links estruturados](#links-estruturados-links) |
+| `whatsapp` | `{"sender", "display_name", "messages"}` -- `messages` é um histórico: `[{"author": "contact" \| "user", "text"}]` |
 
 Exemplo de resposta para `channel: "pix_qr"`:
 
@@ -249,12 +272,35 @@ Exemplo de resposta para `channel: "pix_qr"`:
 }
 ```
 
-**`sms` e `whatsapp` ainda não são suportados** -- pedir um dos dois devolve **422** explícito.
-Os dois exigem valor aninhado (`links`/`messages`, arrays de objetos) no `content_json` que o
-backend Go ainda não aceita (`item_draft_service.go::buildDraftContent` monta
-`map[string]string`) -- mesmo bloqueio que impede `links` estruturado em email (issue #5).
+Exemplo de resposta para `channel: "whatsapp"`:
 
-`cues`/`phish_scale` ainda não existem para os 3 canais novos -- adaptar a taxonomia de pistas
+```json
+{
+  "id": "...",
+  "receptor": null,
+  "remetente": null,
+  "assunto": null,
+  "conteudo": null,
+  "explicacao": "...",
+  "nivel": "medio",
+  "categoria": "financeiro",
+  "channel": "whatsapp",
+  "content_json": {
+    "sender": "+5511999990000",
+    "display_name": "Suporte Banco",
+    "messages": [
+      {"author": "contact", "text": "Identificamos uma pendência em sua conta."},
+      {"author": "user", "text": "Que pendência?"},
+      {"author": "contact", "text": "Acesse o link para regularizar: bit.ly/xyz"}
+    ]
+  },
+  "cues": [],
+  "phish_scale": null,
+  "is_malicious": true
+}
+```
+
+`cues`/`phish_scale` ainda não existem para os 5 canais novos -- adaptar a taxonomia de pistas
 por canal é decisão de pesquisa (ex.: `sender_domain_mismatch` não se aplica a Pix), fora do
 escopo desta entrega.
 
@@ -648,6 +694,11 @@ if __name__ == "__main__":
 ```typescript
 const BASE_URL = "http://localhost:8000";
 
+interface LinkRef {
+  text: string;
+  href: string;
+}
+
 interface PhishingEmail {
   id: string;
   receptor: string;
@@ -657,7 +708,7 @@ interface PhishingEmail {
   explicacao: string;
   nivel: string;
   categoria: string;
-  links: string[];
+  links: LinkRef[];
   is_malicious: boolean;
 }
 

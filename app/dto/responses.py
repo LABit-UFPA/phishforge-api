@@ -2,6 +2,8 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from app.domain.models.link_ref import LinkRef
+
 
 class PhishingEmailResponse(BaseModel):
     """Response DTO para geração de email de phishing individual.
@@ -18,7 +20,7 @@ class PhishingEmailResponse(BaseModel):
     explicacao: str
     nivel: str
     categoria: str
-    links: List[str]
+    links: List[LinkRef]
     is_malicious: bool
 
 

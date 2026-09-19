@@ -3,6 +3,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from app.domain.models.cue import Cue
+from app.domain.models.link_ref import LinkRef
 from app.domain.models.phish_scale import PhishScale, PremiseAlignment
 
 
@@ -37,7 +38,11 @@ class GeneratedItemDraft(BaseModel):
     conteudo: str
     explicacao: str
     categoria: str
-    links: List[str]
+    # List[LinkRef] desde a issue #5 (antes List[str]): texto exibido
+    # separado do destino real, para expressar a pista
+    # link_text_mismatch. Mudanca quebra-contrato deliberada -- ver
+    # docstring de LinkRef.
+    links: List[LinkRef]
     # Pistas de phishing anotadas pelo proprio LLM, com codigo da
     # taxonomia compartilhada com o Go (issue #5). E SAIDA legitima do
     # gerador (ao contrario de nivel/is_malicious/channel): passa

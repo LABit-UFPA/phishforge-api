@@ -1,4 +1,8 @@
+from typing import List, Literal
+
 from pydantic import BaseModel, Field
+
+from app.domain.models.link_ref import LinkRef
 
 
 class WebsiteContent(BaseModel):
@@ -46,3 +50,55 @@ class PixQrContent(BaseModel):
     recipient: str = Field(description="Nome do recebedor exibido no comprovante/confirmacao")
     amount: str = Field(description="Valor da cobranca, como string (ex.: '149.90')")
     pix_key: str = Field(description="Chave Pix exibida (CPF/CNPJ/e-mail/telefone/aleatoria)")
+
+
+class SmsContent(BaseModel):
+    """Shape de `content_json` para `channel=sms` (issue #6, desbloqueado
+    pela `phishing-quest-api` #68: o shape exige `links` aninhado, que o
+    `buildDraftContent` do Go so passou a aceitar depois daquela issue).
+
+    Sem `assunto`: SMS nao tem campo de assunto -- diferente de email,
+    o remetente e o proprio texto sao os unicos sinais disponiveis.
+    `links` reaproveita `LinkRef` (issue #5): mesma pista
+    `link_text_mismatch` faz sentido aqui (um link encurtado cujo texto
+    exibido nao bate com o destino).
+    """
+
+    sender: str = Field(description="Numero ou identificacao do remetente exibido")
+    text: str = Field(description="Texto da mensagem SMS -- curto, sem formatacao")
+    links: List[LinkRef] = Field(
+        default_factory=list,
+        description="Links presentes na mensagem, se houver (comum em SMS ser encurtado)",
+    )
+
+
+class WhatsAppMessage(BaseModel):
+    """Uma mensagem dentro do historico de conversa de `WhatsAppContent`.
+
+    `author` distingue quem enviou -- `contact` e o golpista/organizacao
+    simulada, `user` e uma resposta do proprio destinatario (util para
+    simular um dialogo, nao so uma mensagem solta).
+    """
+
+    author: Literal["contact", "user"] = Field(
+        description="Quem enviou a mensagem: 'contact' (golpista/organizacao) ou 'user' (destinatario)"
+    )
+    text: str = Field(description="Texto da mensagem")
+
+
+class WhatsAppContent(BaseModel):
+    """Shape de `content_json` para `channel=whatsapp` (issue #6,
+    desbloqueado pela `phishing-quest-api` #68).
+
+    `messages` e um HISTORICO (lista), nao uma mensagem unica: golpes
+    de WhatsApp tipicamente se desenrolam em varias mensagens (contato
+    inicial, resposta a duvida, pressao final). Sem `links` no nivel
+    do content -- um link, quando existir, aparece dentro do `text` de
+    uma mensagem especifica, como aconteceria de verdade no app.
+    """
+
+    sender: str = Field(description="Numero de telefone do remetente exibido")
+    display_name: str = Field(description="Nome de exibicao do contato/organizacao simulada")
+    messages: List[WhatsAppMessage] = Field(
+        description="Historico de mensagens da conversa, em ordem cronologica"
+    )
