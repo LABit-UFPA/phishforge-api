@@ -71,6 +71,11 @@ services:
       DB_PASSWORD: phishforge
       DB_NAME: phishforge
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # Issue #7: autenticacao entre servicos. Sem valor no .env, o
+      # container sobe com API_KEY vazia e require_api_key falha
+      # fechado (503) em toda rota -- visivel na hora, nao um "sem
+      # autenticacao" silencioso.
+      API_KEY: ${API_KEY}
     networks:
       - phishforge_network
     depends_on:

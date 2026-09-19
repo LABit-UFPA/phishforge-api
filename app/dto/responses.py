@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -39,16 +39,6 @@ class EmailListResponse(BaseModel):
     """Response DTO para listagem de emails"""
     emails: List[PhishingEmailResponse] = Field(description="Lista de emails")
     count: int = Field(ge=0, description="Quantidade de emails retornados")
-
-
-class DebugStatisticsResponse(BaseModel):
-    """Response DTO para debug de estatísticas"""
-    raw_stats: Dict[str, Any] = Field(description="Estatísticas brutas")
-    raw_stats_type: str = Field(description="Tipo das estatísticas brutas")
-    by_difficulty_type: str = Field(description="Tipo da distribuição por dificuldade")
-    by_category_type: str = Field(description="Tipo da distribuição por categoria")
-    total_type: str = Field(description="Tipo do total")
-    recent_count_type: str = Field(description="Tipo da contagem recente")
 
 
 class DeleteEmailResponse(BaseModel):

@@ -28,6 +28,15 @@ import os
 # abaixo.
 os.environ.setdefault("OPENAI_API_KEY", "sk-test-nao-usada-em-nenhuma-chamada-real")
 
+# Issue #7: toda rota agora exige X-API-Key (require_api_key falha 503
+# se API_KEY estiver vazia). O fixture `client` abaixo ja manda esse
+# header em toda requisicao por padrao, entao a suite inteira continua
+# passando sem cada teste precisar saber de autenticacao -- os poucos
+# testes que EXERCITAM a autenticacao em si (test_api_key_auth.py)
+# usam um client proprio, sem esse header default.
+TEST_API_KEY = "test-api-key-nao-usada-em-producao"
+os.environ.setdefault("API_KEY", TEST_API_KEY)
+
 import httpx
 import pytest
 import pytest_asyncio
@@ -104,5 +113,7 @@ def fakes(app_and_fakes):
 async def client(app_and_fakes):
     app, _fakes = app_and_fakes
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test", headers={"X-API-Key": TEST_API_KEY}
+    ) as ac:
         yield ac

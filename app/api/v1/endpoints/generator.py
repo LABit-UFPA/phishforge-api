@@ -1,10 +1,12 @@
 from uuid import UUID
 
 from dependency_injector.wiring import Provide, inject
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from app.core.config import settings
 from app.core.container import Container
+from app.core.security import limiter
 from app.domain.models.phishing_email import PhishingEmail
 from app.domain.services.batch_generation_worker import BatchGenerationWorker
 from app.domain.services.generation_pipeline import GenerationPipeline
@@ -25,9 +27,11 @@ app = APIRouter()
 
 
 @app.post("/api/v1/generate")
+@limiter.limit(settings.GENERATION_RATE_LIMIT)
 @inject
 async def generate(
-    request: QueryRequest,
+    request: Request,
+    payload: QueryRequest,
     pipeline: GenerationPipeline = Depends(Provide[Container.generation_pipeline]),
     response_generator: ResponseGenerator = Depends(
         Provide[Container.response_generator]
@@ -38,6 +42,11 @@ async def generate(
 ):
     """
     Gera um exemplo de phishing com um pipeline RAG avançado.
+
+    `request: Request` (issue #7): o slowapi precisa desse parametro,
+    com esse nome exato, para identificar o IP de quem chama e aplicar
+    `GENERATION_RATE_LIMIT`. O corpo da requisicao passou a se chamar
+    `payload` para nao colidir.
     """
     # 1-5. Normalizacao, HyDE, retrieve, rerank e fusao -- ver
     # GenerationPipeline. Extraido nesta issue (#11a) porque a mesma
@@ -51,7 +60,7 @@ async def generate(
     # servidor real com chave da OpenAI invalida, onde a falha real
     # era na normalizacao (a primeira chamada de LLM da pipeline).
     try:
-        built = await pipeline.build_context(request.user_context)
+        built = await pipeline.build_context(payload.user_context)
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Error building context: {str(e)}"
@@ -59,11 +68,11 @@ async def generate(
 
     # 6. Geração Final
     #
-    # request.difficulty ja foi validado e normalizado pelo Pydantic
+    # payload.difficulty ja foi validado e normalizado pelo Pydantic
     # (QueryRequest.difficulty: Difficulty -- ver issue #2). Usamos
     # sempre `.value` (str puro), nunca o membro do Enum diretamente:
     # `Difficulty(str, Enum)` tem __str__ sobrescrito pelo proprio
-    # Enum (a partir do Python 3.11), entao `str(request.difficulty)`
+    # Enum (a partir do Python 3.11), entao `str(payload.difficulty)`
     # ou uma f-string dariam "Difficulty.FACIL" em vez de "facil" --
     # confirmado experimentalmente. O PromptTemplate do
     # response_generator usa .format() por baixo, que cairia
@@ -75,15 +84,15 @@ async def generate(
     # nivel ja validado.
     try:
         draft = await response_generator.generate_response(
-            difficulty=request.difficulty.value,
+            difficulty=payload.difficulty.value,
             context=built.generation_context,
             relevant_docs=built.fused_context,
-            is_malicious=request.is_malicious,
+            is_malicious=payload.is_malicious,
         )
         phishing_example = PhishingEmail(
             **draft.model_dump(),
-            nivel=request.difficulty.value,
-            is_malicious=request.is_malicious,
+            nivel=payload.difficulty.value,
+            is_malicious=payload.is_malicious,
         )
     except Exception as e:
         raise HTTPException(
@@ -99,9 +108,11 @@ async def generate(
 
 
 @app.post("/api/v1/generate/batch", status_code=202)
+@limiter.limit(settings.GENERATION_RATE_LIMIT)
 @inject
 async def generate_batch(
-    request: BatchGenerationRequest,
+    request: Request,
+    payload: BatchGenerationRequest,
     background_tasks: BackgroundTasks,
     job_repository: GenerationJobRepository = Depends(
         Provide[Container.generation_job_repository]
@@ -122,23 +133,27 @@ async def generate_batch(
     Issue #8, item 1: `difficulties` vazia, `total` fora de 1..100 e
     `malicious_ratio` fora de 0..1 são 422 do Pydantic (Field
     min_length/ge/le no DTO), não mais um `if` manual.
+
+    `request: Request` (issue #7): mesmo motivo do `/generate` -- o
+    slowapi precisa do parametro para aplicar `GENERATION_RATE_LIMIT`
+    por IP. O corpo passou a se chamar `payload`.
     """
-    difficulties_values = [d.value for d in request.difficulties]
+    difficulties_values = [d.value for d in payload.difficulties]
 
     job_id = await job_repository.create(
-        context=request.context,
+        context=payload.context,
         difficulties=difficulties_values,
-        total=request.total,
-        malicious_ratio=request.malicious_ratio,
+        total=payload.total,
+        malicious_ratio=payload.malicious_ratio,
     )
 
     background_tasks.add_task(
         worker.run,
         job_id=job_id,
-        context=request.context,
+        context=payload.context,
         difficulties=difficulties_values,
-        total=request.total,
-        malicious_ratio=request.malicious_ratio,
+        total=payload.total,
+        malicious_ratio=payload.malicious_ratio,
     )
 
     return JSONResponse(
@@ -212,27 +227,6 @@ async def get_statistics(
         raise HTTPException(
             status_code=500, detail=f"Erro ao calcular estatisticas: {str(e)}"
         )
-
-
-@app.get("/api/v1/emails/statistics/debug")
-@inject
-async def debug_statistics(
-    phishing_service: PhishingEmailService = Depends(
-        Provide[Container.phishing_service]
-    ),
-):
-    try:
-        raw_stats = await phishing_service.repository.get_stats()
-        return {
-            "raw_stats": raw_stats,
-            "raw_stats_type": str(type(raw_stats)),
-            "by_difficulty_type": str(type(raw_stats.get("by_difficulty"))),
-            "by_category_type": str(type(raw_stats.get("by_category"))),
-            "total_type": str(type(raw_stats.get("total"))),
-            "recent_count_type": str(type(raw_stats.get("recent_count"))),
-        }
-    except Exception as e:
-        return {"error": str(e), "error_type": str(type(e).__name__)}
 
 
 @app.get("/api/v1/emails")

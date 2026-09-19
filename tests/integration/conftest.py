@@ -35,6 +35,10 @@ from tests.fakes import (
 )
 
 os.environ.setdefault("OPENAI_API_KEY", "sk-test-nao-usada-em-nenhuma-chamada-real")
+# Issue #7: toda rota exige X-API-Key -- client_com_postgres_real
+# manda o header por padrao, mesmo valor de tests/conftest.py.
+TEST_API_KEY = "test-api-key-nao-usada-em-producao"
+os.environ.setdefault("API_KEY", TEST_API_KEY)
 
 
 @pytest_asyncio.fixture
@@ -112,7 +116,9 @@ async def client_com_postgres_real():
     # resolve as versoes reais, usando o db_connection real acima.
 
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test", headers={"X-API-Key": TEST_API_KEY}
+    ) as ac:
         yield ac
 
     await real_db_connection.close_pool()
