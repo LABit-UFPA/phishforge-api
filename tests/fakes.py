@@ -161,7 +161,18 @@ class FakePhishingRepository:
 
     async def create(self, email: PhishingEmail):
         email_id = uuid4()
-        self.storage[email_id] = email
+        # Issue #24: o repositorio real preenche id/created_at/
+        # updated_at ao persistir. Um fake que devolvesse o email
+        # exatamente como recebeu (sem id) seria mais permissivo que o
+        # real e deixaria passar batido uma regressao do tipo que a
+        # #24 corrigiu.
+        self.storage[email_id] = email.model_copy(
+            update={
+                "id": email_id,
+                "created_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }
+        )
         return email_id
 
     async def get_by_id(self, email_id):

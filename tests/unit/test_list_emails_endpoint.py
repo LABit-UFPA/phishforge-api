@@ -27,8 +27,9 @@ def _seed(fakes, **overrides):
         is_malicious=True,
     )
     base.update(overrides)
-    email = PhishingEmail(**base)
-    fakes["phishing_service"].repository.storage[uuid4()] = email
+    email_id = uuid4()
+    email = PhishingEmail(id=email_id, **base)
+    fakes["phishing_service"].repository.storage[email_id] = email
     return email
 
 
