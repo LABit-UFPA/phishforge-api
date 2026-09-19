@@ -12,9 +12,11 @@ OPENAI_API_KEY configurada (ver issue #8).
 tests/integration usa Postgres de verdade e nao importa nada daqui.
 """
 
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from app.domain.models.generated_item_draft import GeneratedItemDraft
+from app.domain.models.generation_job import GenerationFailure, GenerationJob, JobStatus
 from app.domain.models.phishing_email import PhishingEmail
 from app.dto.query import QueryResponse
 
@@ -56,6 +58,7 @@ class FakeResponseGenerator:
 
     def __init__(self):
         self.calls: list[dict] = []
+        self._contador = 0
 
     async def generate_hypothetical_answer(self, query: str) -> str:
         self.calls.append({"step": "generate_hypothetical_answer", "query": query})
@@ -88,11 +91,17 @@ class FakeResponseGenerator:
         # Sem `nivel`: o draft nunca inclui dificuldade (issue #11) --
         # quem monta o PhishingEmail final e o endpoint, combinando
         # este draft com o `difficulty` acima.
+        #
+        # `conteudo` inclui um contador para ser unico por chamada: com
+        # FakeEmbeddingClient (deriva o embedding do texto), conteudo
+        # identico em toda chamada faria a dedup por similaridade de
+        # cosseno da #11b descartar todos os itens exceto o primeiro.
+        self._contador += 1
         return GeneratedItemDraft(
             receptor="alvo@example.com",
             remetente="fake@example.com",
             assunto="Assunto de teste",
-            conteudo="Conteudo de teste gerado pelo fake, sem chamada de LLM.",
+            conteudo=f"Conteudo de teste gerado pelo fake #{self._contador}, sem chamada de LLM.",
             explicacao="Explicacao de teste.",
             categoria="teste",
             links=[],
@@ -215,6 +224,20 @@ class FakePhishingService:
     async def search_emails(self, search_term: str, limit: int = 50):
         return await self.repository.search_content(search_term, limit)
 
+    async def get_emails_by_ids(self, email_ids: list) -> list:
+        """Usado por GET /generate/batch/{job_id} (issue #11b) para
+        trazer o conteudo completo dos itens do job. Preserva a ordem
+        de `email_ids`, igual ao repositorio real (ORDER BY
+        array_position).
+        """
+        # FakePhishingRepository guarda por id como chave -- basta
+        # olhar direto no storage, sem precisar reconstruir um indice.
+        return [
+            self.repository.storage[email_id]
+            for email_id in email_ids
+            if email_id in self.repository.storage
+        ]
+
 
 class FakeUserAnswerScore:
     """Espelha app.domain.services.user_answer_evaluator.UserAnswerScore."""
@@ -249,6 +272,31 @@ class FakeUserAnswerEvaluator:
         return FakeUserAnswerScore()
 
 
+class FakeEmbeddingClient:
+    """Substitui OpenAIEmbeddingClient sem chamar a OpenAI (issue #11b:
+    BatchGenerationWorker usa `embed()` para a dedup por similaridade
+    de cosseno).
+
+    O embedding e derivado de forma deterministica do proprio texto via
+    hash, em vez de fixo: textos iguais produzem o mesmo vetor
+    (similaridade 1.0, o caso que a dedup precisa detectar), e textos
+    diferentes produzem vetores praticamente ortogonais (similaridade
+    proxima de 0) -- o suficiente para os testes de dedup exercitarem a
+    comparacao de verdade, sem exigir uma chave de API real.
+    """
+
+    DIMENSAO = 32
+
+    def embed(self, text: str) -> list[float]:
+        import hashlib
+
+        digest = hashlib.sha256(text.encode("utf-8")).digest()
+        return [b / 255.0 for b in digest[: self.DIMENSAO]]
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [self.embed(t) for t in texts]
+
+
 class FakeDbConnection:
     """Substitui DatabaseConnection no lifespan da app.
 
@@ -265,3 +313,64 @@ class FakeDbConnection:
 
     async def close_pool(self):
         return None
+
+
+class FakeGenerationJobRepository:
+    """Em memoria, mesma interface publica de GenerationJobRepository
+    (issue #11b).
+
+    Existe porque o repositorio real fala SQL direto via
+    `db.get_connection()`, que FakeDbConnection nao implementa (ela so
+    cobre create_pool/close_pool, usados no lifespan) -- sem este fake,
+    os testes de /generate/batch em tests/unit exigiriam Postgres real.
+    BatchGenerationWorker e resolvido pelo container a partir deste
+    mesmo provider, entao overrideando so `generation_job_repository`
+    o worker tambem passa a usar o fake, sem precisar de um
+    FakeBatchGenerationWorker.
+    """
+
+    def __init__(self):
+        self.storage: dict = {}
+
+    async def create(
+        self, context: str, difficulties: list, total: int, malicious_ratio: float
+    ):
+        job_id = uuid4()
+        now = datetime.now(timezone.utc)
+        self.storage[job_id] = GenerationJob(
+            id=job_id,
+            status=JobStatus.PENDENTE,
+            context=context,
+            difficulties=difficulties,
+            total=total,
+            malicious_ratio=malicious_ratio,
+            created_at=now,
+            updated_at=now,
+        )
+        return job_id
+
+    async def get_by_id(self, job_id):
+        return self.storage.get(job_id)
+
+    async def mark_em_progresso(self, job_id, distribution: dict) -> None:
+        job = self.storage[job_id]
+        job.status = JobStatus.EM_PROGRESSO
+        job.distribution = distribution
+
+    async def update_progress(
+        self, job_id, total_generated, total_failed, total_discarded, item_ids, failures
+    ) -> None:
+        job = self.storage[job_id]
+        job.total_generated = total_generated
+        job.total_failed = total_failed
+        job.total_discarded = total_discarded
+        job.item_ids = list(item_ids)
+        job.failures = [
+            f if isinstance(f, GenerationFailure) else GenerationFailure(**f) for f in failures
+        ]
+
+    async def mark_finished(self, job_id, status: JobStatus, error_message=None) -> None:
+        job = self.storage[job_id]
+        job.status = status
+        job.error_message = error_message
+        job.completed_at = datetime.now(timezone.utc)

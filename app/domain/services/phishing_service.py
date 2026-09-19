@@ -62,6 +62,12 @@ class PhishingEmailService:
         """Busca um email por ID"""
         return await self.repository.get_by_id(email_id)
 
+    async def get_emails_by_ids(self, email_ids: List[UUID]) -> List[PhishingEmail]:
+        """Busca varios emails na mesma ordem de `email_ids` (issue
+        #11b: o endpoint de status do job de lote usa isso).
+        """
+        return await self.repository.get_by_ids(email_ids)
+
     async def get_emails_by_categoria(self, categoria: str, limit: int = 50) -> List[PhishingEmail]:
         """Busca emails por categoria"""
         return await self.repository.get_by_categoria(categoria, limit)

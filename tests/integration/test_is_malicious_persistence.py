@@ -35,7 +35,10 @@ async def test_is_malicious_persistido_bate_com_o_solicitado(
 async def test_lote_com_malicious_ratio_persiste_os_dois_rotulos(
     client_com_postgres_real, phishing_repository
 ):
-    response = await client_com_postgres_real.post(
+    """Desde a issue #11b, /generate/batch responde 202 -- o resultado
+    e lido via polling em GET /generate/batch/{job_id}.
+    """
+    post_response = await client_com_postgres_real.post(
         "/api/v1/generate/batch",
         json={
             "context": "cobranca de fatura",
@@ -44,10 +47,14 @@ async def test_lote_com_malicious_ratio_persiste_os_dois_rotulos(
             "malicious_ratio": 0.5,
         },
     )
+    assert post_response.status_code == 202
+    job_id = post_response.json()["job_id"]
 
-    assert response.status_code == 200
-    body = response.json()
-    ids = [UUID(item["id"]) for item in body["examples"]]
+    get_response = await client_com_postgres_real.get(f"/api/v1/generate/batch/{job_id}")
+    assert get_response.status_code == 200
+    job = get_response.json()
+    assert job["status"] == "concluido"
+    ids = [UUID(item["id"]) for item in job["examples"]]
 
     persistidos = [await phishing_repository.get_by_id(i) for i in ids]
     assert all(p is not None for p in persistidos)

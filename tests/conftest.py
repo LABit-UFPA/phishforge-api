@@ -36,6 +36,8 @@ from dependency_injector import providers
 import main as main_module
 from tests.fakes import (
     FakeDbConnection,
+    FakeEmbeddingClient,
+    FakeGenerationJobRepository,
     FakePhishingService,
     FakePromptNormalizer,
     FakeReRanker,
@@ -63,6 +65,18 @@ def _build_app_with_fakes():
         "qdrant_store": FakeVectorStore(),
         "phishing_service": FakePhishingService(),
         "user_answer_evaluator": FakeUserAnswerEvaluator(),
+        # issue #11b: repositorio do job de lote fala SQL direto via
+        # db.get_connection(), que FakeDbConnection nao implementa --
+        # overrideado direto (nao via db_connection) para nao exigir
+        # Postgres real em tests/unit. batch_generation_worker e
+        # composto a partir deste mesmo provider, entao ganha o fake
+        # automaticamente.
+        "generation_job_repository": FakeGenerationJobRepository(),
+        # issue #11b: BatchGenerationWorker usa embedding_client_openai
+        # (real, chamaria a OpenAI de verdade) so para a dedup por
+        # similaridade de cosseno -- sem este override, todo item do
+        # lote falha com 401 antes mesmo de chegar na dedup.
+        "embedding_client_openai": FakeEmbeddingClient(),
     }
     for name, fake in fakes.items():
         getattr(container, name).override(providers.Object(fake))

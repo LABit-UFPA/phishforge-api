@@ -23,7 +23,16 @@ class Settings(BaseSettings):
     EMBEDDING_DIMENSION: int = 1536
 
     OPENAI_API_KEY: str = ""
-    
+
+    # Limiar de similaridade de cosseno (0..1) acima do qual dois itens
+    # do MESMO lote sao considerados quase-duplicados (issue #11b).
+    # Com o mesmo context/dificuldade/documentos, a unica variacao
+    # entre itens e a temperatura -- sem essa checagem, itens quase
+    # identicos entram no corpus e o participante "reencontra" o mesmo
+    # item, medindo memoria em vez de deteccao. Configuravel porque o
+    # valor certo e empirico, nao um numero obvio.
+    DEDUP_SIMILARITY_THRESHOLD: float = 0.95
+
     CHUNK_SIZE: int = 1024
     CHUNK_OVERLAP: int = 256
     TOP_K_DOCUMENTS: int = 4

@@ -97,7 +97,11 @@ Exemplo de item **legítimo** (`is_malicious: false`) para o mesmo contexto:
 
 #### POST `/api/v1/generate/batch`
 
-Gera múltiplos exemplos de phishing em lote.
+Aceita um pedido de geração de múltiplos exemplos e processa **em background** (issue #11b). Um
+`total` alto podia levar minutos rodando dentro de uma única conexão HTTP -- qualquer
+ingress/proxy com timeout mais curto encerrava a conexão antes do fim, mesmo com os itens já
+gravados no banco. Agora a request só cria o job e devolve **202 Accepted** com um `job_id`; o
+progresso e o resultado final são obtidos por **polling** em `GET /api/v1/generate/batch/{job_id}`.
 
 **Request Body:**
 
@@ -113,16 +117,34 @@ Gera múltiplos exemplos de phishing em lote.
 | Campo | Tipo | Obrigatório | Descrição |
 |-------|------|-------------|-----------|
 | `context` | string | Sim | Contexto geral para geração |
-| `difficulties` | array | Sim | Lista de dificuldades desejadas (ver [Vocabulário de dificuldade](#vocabulário-de-dificuldade)) |
-| `total` | integer | Não | Total de itens (máx: 100, padrão: 10) |
+| `difficulties` | array | Sim | Lista de dificuldades desejadas, não pode ser vazia (ver [Vocabulário de dificuldade](#vocabulário-de-dificuldade)) |
+| `total` | integer | Não | Total de itens, entre 1 e 100 (padrão: 10) |
 | `malicious_ratio` | float (0.0-1.0) | Não (default `1.0`) | Proporção de itens maliciosos vs. legítimos. Compõe com `difficulties`: dentro de cada nível, a fração `malicious_ratio` do total daquele nível é gerada como phishing e o restante como item legítimo |
+
+**Response (202 Accepted):**
+
+```json
+{
+  "job_id": "9b458e37-be38-4487-8bc1-c8e30c1170ba",
+  "status": "pendente"
+}
+```
+
+#### GET `/api/v1/generate/batch/{job_id}`
+
+Consulta o status e o resultado (parcial ou final) de um job criado pelo endpoint acima. O
+cliente deve fazer polling neste endpoint até `status` chegar num valor terminal.
 
 **Response (200 OK):**
 
 ```json
 {
+  "job_id": "9b458e37-be38-4487-8bc1-c8e30c1170ba",
+  "status": "concluido",
   "total_requested": 9,
   "total_generated": 9,
+  "total_failed": 0,
+  "total_discarded": 1,
   "distribution": {
     "facil": 3,
     "medio": 3,
@@ -141,9 +163,44 @@ Gera múltiplos exemplos de phishing em lote.
       "links": [...],
       "is_malicious": true
     }
-  ]
+  ],
+  "failures": [
+    {
+      "difficulty": "medio",
+      "is_malicious": true,
+      "error": "Error code: 401 - Incorrect API key provided..."
+    }
+  ],
+  "error_message": null,
+  "created_at": "2026-09-18T20:00:00.000000+00:00",
+  "updated_at": "2026-09-18T20:00:03.500000+00:00",
+  "completed_at": "2026-09-18T20:00:03.500000+00:00"
 }
 ```
+
+Retorna **404 Not Found** se `job_id` não existir.
+
+**Valores de `status`:**
+
+| Valor | Significado |
+|-------|--------------|
+| `pendente` | Job criado, processamento ainda não começou |
+| `em_progresso` | Processando; `total_generated`/`total_failed`/`total_discarded` refletem o progresso parcial (atualizados a cada item, não só no final) |
+| `concluido` | Terminou sem nenhuma falha de geração |
+| `concluido_com_falhas` | Terminou com pelo menos 1 item gerado e pelo menos 1 falha -- `failures` lista o que deu errado, sem interromper o restante do lote |
+| `falhou` | Nenhum item foi gerado. Dois casos possíveis: (a) a etapa de montagem de contexto (normalização/HyDE/busca/fusão, compartilhada por todo o lote) lançou exceção antes de qualquer item ser tentado -- `error_message` traz o motivo e `distribution`/`examples`/`failures` ficam vazios; (b) todo item tentado foi descartado por duplicidade (ver abaixo) e nenhum falhou de fato |
+
+**`total_discarded` -- deduplicação, distinto de falha:** cada item gerado é comparado (por
+similaridade de cosseno entre embeddings) com os itens já aceitos no mesmo lote. Um item quase
+idêntico a outro já aceito é re-gerado algumas vezes e, se continuar parecido demais, é
+descartado -- contabilizado em `total_discarded`, **não** em `total_failed` nem em `failures`.
+É uma categoria de resultado diferente de uma falha real de geração (erro de LLM, por exemplo),
+que sempre aparece em `failures`.
+
+**Retrocompatibilidade dentro do contrato anterior:** a distribuição entre dificuldades
+(resto do `total` vai para as primeiras dificuldades da lista) e a composição de
+`malicious_ratio` dentro de cada dificuldade continuam exatamente como antes da #11b -- só a
+forma de obter o resultado final mudou, de resposta síncrona para polling.
 
 #### Vocabulário de dificuldade
 
@@ -541,8 +598,9 @@ curl -X POST "http://localhost:8000/api/v1/evaluate/user-answer" \
 | Código | Descrição |
 |--------|-----------|
 | 200 | Sucesso |
+| 202 | Job de geração em lote aceito (`POST /api/v1/generate/batch`) -- resultado por polling em `GET /api/v1/generate/batch/{job_id}` |
 | 400 | Requisição inválida (parâmetros faltando ou incorretos) |
-| 404 | Recurso não encontrado |
+| 404 | Recurso não encontrado (inclui `job_id` inexistente em `GET /api/v1/generate/batch/{job_id}`) |
 | 422 | Corpo da requisição não passa na validação (ex.: `difficulty` fora do [vocabulário aceito](#vocabulário-de-dificuldade)) |
 | 500 | Erro interno do servidor |
 

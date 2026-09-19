@@ -6,7 +6,12 @@ retrieve, rerank, fusao) uma vez por requisicao, nao uma vez por item.
 Antes desta extracao, nenhuma das duas coisas era verdade: o lote
 pulava normalizacao/HyDE/rerank/fusao inteiramente e usava o chunk de
 busca (child_text) em vez do bloco completo (parent_content).
+
+Desde a issue #11b, /generate/batch responde 202 -- os testes do lote
+usam post_batch_and_get_job para chegar no resultado final.
 """
+
+from tests.unit._batch_helpers import post_batch_and_get_job
 
 
 async def test_generate_e_generate_batch_recebem_o_mesmo_contexto(client, fakes):
@@ -24,11 +29,9 @@ async def test_generate_e_generate_batch_recebem_o_mesmo_contexto(client, fakes)
 
     fakes["response_generator"].calls.clear()
 
-    resposta_lote = await client.post(
-        "/api/v1/generate/batch",
-        json={"context": contexto, "difficulties": ["facil"], "total": 1},
+    await post_batch_and_get_job(
+        client, {"context": contexto, "difficulties": ["facil"], "total": 1}
     )
-    assert resposta_lote.status_code == 200
 
     chamada_lote = next(
         c for c in fakes["response_generator"].calls if c["step"] == "generate_response"
@@ -47,19 +50,17 @@ async def test_lote_reaproveita_o_pipeline_uma_vez_por_requisicao(client, fakes)
     parte que a issue #11 identificou como reaproveitavel entre itens
     do mesmo lote.
     """
-    response = await client.post(
-        "/api/v1/generate/batch",
-        json={
+    job = await post_batch_and_get_job(
+        client,
+        {
             "context": "cobranca de fatura",
             "difficulties": ["facil", "medio"],
             "total": 6,
         },
     )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["total_generated"] == 6
-    assert all("error" not in item for item in body["examples"])
+    assert job["total_generated"] == 6
+    assert all("error" not in item for item in job["examples"])
 
     generator_calls = fakes["response_generator"].calls
     generate_response_calls = [c for c in generator_calls if c["step"] == "generate_response"]
