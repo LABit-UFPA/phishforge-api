@@ -22,8 +22,9 @@ class PhishingEmailRepository:
                 query = """
                     INSERT INTO phishing_emails
                     (receptor, remetente, assunto, conteudo, explicacao, nivel, categoria, links, is_malicious,
-                     phish_scale_cue_count, phish_scale_premise_alignment, difficulty_estimated)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                     phish_scale_cue_count, phish_scale_premise_alignment, difficulty_estimated,
+                     channel, content_json)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                     RETURNING id
                 """
                 phish_scale = email.phish_scale
@@ -41,6 +42,8 @@ class PhishingEmailRepository:
                     phish_scale.cue_count if phish_scale else None,
                     phish_scale.premise_alignment.value if phish_scale else None,
                     phish_scale.difficulty_estimated.value if phish_scale else None,
+                    email.channel.value,
+                    json.dumps(email.content_json) if email.content_json is not None else None,
                 )
 
                 if email.cues:
@@ -87,7 +90,8 @@ class PhishingEmailRepository:
             query = """
                 SELECT id, receptor, remetente, assunto, conteudo, explicacao,
                        nivel, categoria, links, is_malicious, created_at, updated_at,
-                       phish_scale_cue_count, phish_scale_premise_alignment, difficulty_estimated
+                       phish_scale_cue_count, phish_scale_premise_alignment, difficulty_estimated,
+                       channel, content_json
                 FROM phishing_emails
                 WHERE id = $1
             """
@@ -269,6 +273,8 @@ class PhishingEmailRepository:
             is_malicious=row["is_malicious"],
             cues=cues or [],
             phish_scale=phish_scale,
+            channel=row["channel"],
+            content_json=json.loads(row["content_json"]) if row["content_json"] else None,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )

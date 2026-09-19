@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.domain.models.channel import Channel
+
 
 class JobStatus(str, Enum):
     """Estados de um job de geracao em lote (issue #11b).
@@ -40,6 +42,10 @@ class GenerationJob(BaseModel):
     difficulties: List[str]
     total: int
     malicious_ratio: float
+    # Canal do lote inteiro (issue #6) -- um lote e sempre de um unico
+    # canal. Default EMAIL preserva o comportamento historico de linhas
+    # anteriores a esta issue.
+    channel: Channel = Channel.EMAIL
     distribution: Optional[dict] = None
     total_generated: int = 0
     total_failed: int = 0

@@ -113,6 +113,48 @@ class FakeResponseGenerator:
             cues=list(self.cues_a_devolver),
         )
 
+    async def generate_channel_item(
+        self, channel: str, difficulty: str, context: str, relevant_docs, is_malicious: bool = True
+    ) -> dict:
+        """Equivalente de `generate_response` para os canais novos
+        (issue #6), sem chamar LLM. `content_json` inclui um contador
+        pelo mesmo motivo de `conteudo` acima -- unicidade para a
+        dedup por embedding nao descartar tudo menos o primeiro item.
+        """
+        self.calls.append(
+            {
+                "step": "generate_channel_item",
+                "channel": channel,
+                "difficulty": difficulty,
+                "context": context,
+                "relevant_docs": relevant_docs,
+                "is_malicious": is_malicious,
+            }
+        )
+        self._contador += 1
+        content_por_canal = {
+            "website": {
+                "url": "http://exemplo-falso.test",
+                "title": "Titulo de teste",
+                "visible_content": f"Conteudo de pagina de teste #{self._contador}.",
+            },
+            "phone_call": {
+                "caller": "+5500000000000",
+                "transcript": f"Roteiro de teste #{self._contador}.",
+            },
+            "pix_qr": {
+                "payload": f"payload-de-teste-{self._contador}",
+                "recipient": "Recebedor de teste",
+                "amount": "10.00",
+                "pix_key": "chave-de-teste",
+            },
+        }
+        return {
+            "content_json": content_por_canal[channel],
+            "explicacao": "Explicacao de teste.",
+            "categoria": "teste",
+        }
+
 
 class FakeReRanker:
     """Sem cross-encoder: devolve os documentos na mesma ordem, so
@@ -350,7 +392,12 @@ class FakeGenerationJobRepository:
         self.storage: dict = {}
 
     async def create(
-        self, context: str, difficulties: list, total: int, malicious_ratio: float
+        self,
+        context: str,
+        difficulties: list,
+        total: int,
+        malicious_ratio: float,
+        channel: str = "email",
     ):
         job_id = uuid4()
         now = datetime.now(timezone.utc)
@@ -361,6 +408,7 @@ class FakeGenerationJobRepository:
             difficulties=difficulties,
             total=total,
             malicious_ratio=malicious_ratio,
+            channel=channel,
             created_at=now,
             updated_at=now,
         )

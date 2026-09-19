@@ -4,6 +4,11 @@ import logging
 from typing import List, Optional
 
 from langchain_core.prompts import PromptTemplate
+from app.domain.models.channel_item_draft import (
+    PhoneCallItemDraft,
+    PixQrItemDraft,
+    WebsiteItemDraft,
+)
 from app.domain.models.cue import Cue
 from app.domain.models.difficulty import Difficulty
 from app.domain.models.generated_item_draft import GeneratedItemDraft
@@ -25,6 +30,120 @@ _TAXONOMIA_DE_PISTAS = (
     "- link_text_mismatch: texto do link diferente do destino real\n"
     "- unexpected_attachment: anexo inesperado ou fora do contexto\n"
     "- scarcity: apelo a escassez ou oferta por tempo limitado"
+)
+
+
+def _construir_prompt_canal(
+    instrucao_sistema: str, regras_do_canal: str, niveis_dificuldade: str, campos: str
+) -> str:
+    """Monta o prompt de um canal novo (issue #6) na mesma estrutura
+    do prompt de email (instrucao -> contexto -> tarefa -> regras do
+    meio -> niveis -> formato), mas mais enxuto: os 3 canais novos nao
+    tem `cues`/`premise_alignment` (adaptar a taxonomia por canal e
+    decisao de pesquisa fora do escopo desta entrega, ver comentario
+    da issue #6), entao nao precisam da secao Chain-of-Thought inteira
+    que o email tem para blindar esses dois campos extras.
+    """
+    return (
+        "## 1. INSTRUÇÃO DE SISTEMA\n"
+        f"{instrucao_sistema}\n\n"
+        "## 2. CONTEXTO RECUPERADO\n"
+        "**CONHECIMENTO ACADÊMICO DA BASE VETORIAL:**\n"
+        "{relevant_docs}\n\n"
+        "## 3. ESPECIFICAÇÃO DA TAREFA\n"
+        "**Nível de Dificuldade:** {difficulty}\n"
+        "**Cenário Específico:** {context}\n\n"
+        f"{regras_do_canal}\n\n"
+        f"{niveis_dificuldade}\n\n"
+        "## FORMATO DE RESPOSTA\n"
+        f"Gere APENAS o objeto JSON com os campos solicitados ({campos}).\n"
+    )
+
+
+# Regras de realismo e niveis de dificuldade por canal (issue #6).
+# Cada uma serve DOIS prompts (malicioso e legitimo) do mesmo canal --
+# so a INSTRUÇÃO DE SISTEMA muda de objetivo entre os dois, igual ao
+# padrao ja estabelecido para email (#3).
+
+_REGRAS_WEBSITE = (
+    "### O QUE TORNA UM SITE FALSO CONVINCENTE (OBRIGATÓRIO)\n"
+    "- `url`: domínio parecido com o legítimo (typosquatting, subdomínio enganoso, TLD "
+    "trocado) -- nunca o domínio oficial exato\n"
+    "- `title` e `visible_content` devem imitar o layout/tom de uma página real do "
+    "cenário pedido (login, confirmação, prêmio, atualização cadastral)\n"
+    "- `visible_content` é o que a vítima LÊ na página -- não é um email, não tem "
+    "saudação nem assinatura de remetente\n\n"
+    "### NÍVEIS DE DIFICULDADE\n"
+    "**FÁCIL:** domínio visivelmente errado, página com erros visuais/gramaticais óbvios.\n"
+    "**MÉDIO:** domínio parecido mas com uma inconsistência perceptível, layout razoável.\n"
+    "**DIFÍCIL:** domínio quase idêntico ao original, página visualmente indistinguível "
+    "da legítima."
+)
+
+_REGRAS_WEBSITE_LEGITIMO = (
+    "### O QUE TORNA A PÁGINA LEGÍTIMA (OBRIGATÓRIO)\n"
+    "- `url` é o domínio OFICIAL e coerente com a organização do cenário\n"
+    "- NUNCA pede senha, código de verificação ou dado de cartão fora de um fluxo já "
+    "esperado pelo usuário\n"
+    "- `visible_content` tem tom institucional, sem urgência artificial\n\n"
+    "### NÍVEIS DE DIFICULDADE (risco de falso alarme)\n"
+    "**FÁCIL:** sinais de confiança óbvios (domínio oficial claro, nenhuma urgência).\n"
+    "**MÉDIO:** legítimo mas com algum elemento que poderia gerar dúvida à primeira vista.\n"
+    "**DIFÍCIL:** legítimo mas com elemento que superficialmente lembra golpe (prazo "
+    "real apertado), exigindo checar o domínio para não cair em falso alarme."
+)
+
+_REGRAS_PHONE_CALL = (
+    "### O QUE TORNA UMA LIGAÇÃO CONVINCENTE (OBRIGATÓRIO)\n"
+    "- Sem elemento visual: toda tática é VERBAL -- tom de voz (na transcrição, via "
+    "escolha de palavras), pressa, autoridade fingida, pedido de código recebido por "
+    "SMS\n"
+    "- `caller` é o número/identificação exibida (spoofed) na tela do telefone\n"
+    "- `transcript` é o roteiro falado pelo golpista, em primeira pessoa, como se "
+    "estivesse sendo dito\n\n"
+    "### NÍVEIS DE DIFICULDADE\n"
+    "**FÁCIL:** pressa óbvia e explícita, ameaça direta, roteiro decorado e artificial.\n"
+    "**MÉDIO:** tom profissional mas com pequena inconsistência no roteiro.\n"
+    "**DIFÍCIL:** roteiro fluido e contextualmente coerente com a rotina do alvo, "
+    "pressão sutil."
+)
+
+_REGRAS_PHONE_CALL_LEGITIMO = (
+    "### O QUE TORNA A LIGAÇÃO LEGÍTIMA (OBRIGATÓRIO)\n"
+    "- NUNCA pede código de SMS, senha ou dado de cartão completo por telefone\n"
+    "- Oferece um canal alternativo verificável (ligar de volta pelo número oficial)\n"
+    "- Tom institucional, sem pressa artificial\n\n"
+    "### NÍVEIS DE DIFICULDADE (risco de falso alarme)\n"
+    "**FÁCIL:** tom calmo, nenhuma solicitação sensível, encerramento tranquilo.\n"
+    "**MÉDIO:** legítimo mas com um pedido de confirmação que poderia soar estranho.\n"
+    "**DIFÍCIL:** legítimo mas com prazo real apertado, exigindo notar a ausência de "
+    "pedido de credencial para não desconfiar à toa."
+)
+
+_REGRAS_PIX_QR = (
+    "### O QUE TORNA UM GOLPE DE PIX/QR CONVINCENTE (OBRIGATÓRIO)\n"
+    "- Não há domínio nem link nesse canal -- a pista central é `recipient` (nome do "
+    "recebedor) divergente do esperado pelo cenário, ou um `pix_key` que não bate com "
+    "a organização alegada\n"
+    "- `amount` é sempre string (ex.: '149.90'), nunca número\n"
+    "- Cenários típicos: cobrança falsa, QR trocado em ponto físico, 'devolução' de "
+    "valor pago a mais\n\n"
+    "### NÍVEIS DE DIFICULDADE\n"
+    "**FÁCIL:** `recipient` obviamente não relacionado ao cenário, valor incoerente.\n"
+    "**MÉDIO:** `recipient` parecido mas com pequena inconsistência de nome/razão social.\n"
+    "**DIFÍCIL:** `recipient` plausível para o cenário, só a `pix_key` denuncia o golpe."
+)
+
+_REGRAS_PIX_QR_LEGITIMO = (
+    "### O QUE TORNA A COBRANÇA PIX LEGÍTIMA (OBRIGATÓRIO)\n"
+    "- `recipient` é exatamente a organização/pessoa esperada pelo cenário\n"
+    "- `amount` condizente com o que o cenário descreve, sem valor arredondado suspeito\n"
+    "- Nenhuma urgência artificial para pagar\n\n"
+    "### NÍVEIS DE DIFICULDADE (risco de falso alarme)\n"
+    "**FÁCIL:** recebedor e valor obviamente corretos e esperados.\n"
+    "**MÉDIO:** legítimo mas com um valor um pouco diferente do usual, sem ser suspeito.\n"
+    "**DIFÍCIL:** legítimo mas com timing incomum (cobrança fora do ciclo esperado), "
+    "exigindo conferir o recebedor para não desconfiar à toa."
 )
 
 
@@ -270,6 +389,88 @@ class ResponseGenerator:
             )
         )
 
+        # Canais novos (issue #6): um LLM (`with_structured_output`
+        # proprio) e dois prompts (malicioso/legitimo) por canal --
+        # mesma separacao de chains com objetivos opostos que o email
+        # ja usa (#3), so que schemas diferentes (WebsiteItemDraft,
+        # PhoneCallItemDraft, PixQrItemDraft) em vez de reusar
+        # GeneratedItemDraft, que fica intocado por esta issue.
+        self.website_llm = ChatOpenAI(
+            model_name=model_name, api_key=api_key, temperature=0.7
+        ).with_structured_output(WebsiteItemDraft)
+        self.phone_call_llm = ChatOpenAI(
+            model_name=model_name, api_key=api_key, temperature=0.7
+        ).with_structured_output(PhoneCallItemDraft)
+        self.pix_qr_llm = ChatOpenAI(
+            model_name=model_name, api_key=api_key, temperature=0.7
+        ).with_structured_output(PixQrItemDraft)
+
+        _campos_canal = "content, explicacao, categoria"
+
+        self.website_prompt_template = PromptTemplate(
+            input_variables=["context", "difficulty", "relevant_docs"],
+            template=_construir_prompt_canal(
+                "Você é um especialista em cibersegurança criando um SITE FALSO "
+                "(phishing via web) educacional, baseado em pesquisas acadêmicas.",
+                _REGRAS_WEBSITE,
+                "",
+                _campos_canal,
+            ),
+        )
+        self.website_legitimate_prompt_template = PromptTemplate(
+            input_variables=["context", "difficulty", "relevant_docs"],
+            template=_construir_prompt_canal(
+                "Você é um especialista em comunicação institucional criando a página "
+                "REAL e LEGÍTIMA (não um golpe) que uma organização manteria -- o lado "
+                "'controle' do experimento.",
+                _REGRAS_WEBSITE_LEGITIMO,
+                "",
+                _campos_canal,
+            ),
+        )
+        self.phone_call_prompt_template = PromptTemplate(
+            input_variables=["context", "difficulty", "relevant_docs"],
+            template=_construir_prompt_canal(
+                "Você é um especialista em cibersegurança criando o ROTEIRO de uma "
+                "LIGAÇÃO de vishing (phishing por voz) educacional, baseado em "
+                "pesquisas acadêmicas.",
+                _REGRAS_PHONE_CALL,
+                "",
+                _campos_canal,
+            ),
+        )
+        self.phone_call_legitimate_prompt_template = PromptTemplate(
+            input_variables=["context", "difficulty", "relevant_docs"],
+            template=_construir_prompt_canal(
+                "Você é um especialista em atendimento institucional criando o "
+                "ROTEIRO de uma ligação REAL e LEGÍTIMA (não um golpe) -- o lado "
+                "'controle' do experimento.",
+                _REGRAS_PHONE_CALL_LEGITIMO,
+                "",
+                _campos_canal,
+            ),
+        )
+        self.pix_qr_prompt_template = PromptTemplate(
+            input_variables=["context", "difficulty", "relevant_docs"],
+            template=_construir_prompt_canal(
+                "Você é um especialista em cibersegurança criando uma cobrança PIX/QR "
+                "FALSA educacional, baseada em pesquisas acadêmicas.",
+                _REGRAS_PIX_QR,
+                "",
+                _campos_canal,
+            ),
+        )
+        self.pix_qr_legitimate_prompt_template = PromptTemplate(
+            input_variables=["context", "difficulty", "relevant_docs"],
+            template=_construir_prompt_canal(
+                "Você é um especialista financeiro criando uma cobrança PIX REAL e "
+                "LEGÍTIMA (não um golpe) -- o lado 'controle' do experimento.",
+                _REGRAS_PIX_QR_LEGITIMO,
+                "",
+                _campos_canal,
+            ),
+        )
+
         self.hyde_prompt_template = PromptTemplate(
             input_variables=["query"],
             template=(
@@ -285,6 +486,31 @@ class ResponseGenerator:
         self.chain = self.prompt_template | self.llm
         self.legitimate_chain = self.legitimate_prompt_template | self.llm
         self.hyde_chain = self.hyde_prompt_template | self.text_llm
+
+        self.website_chain = self.website_prompt_template | self.website_llm
+        self.website_legitimate_chain = (
+            self.website_legitimate_prompt_template | self.website_llm
+        )
+        self.phone_call_chain = self.phone_call_prompt_template | self.phone_call_llm
+        self.phone_call_legitimate_chain = (
+            self.phone_call_legitimate_prompt_template | self.phone_call_llm
+        )
+        self.pix_qr_chain = self.pix_qr_prompt_template | self.pix_qr_llm
+        self.pix_qr_legitimate_chain = (
+            self.pix_qr_legitimate_prompt_template | self.pix_qr_llm
+        )
+
+        # Dispatch por canal usado por generate_channel_item -- indexado
+        # por (channel.value, is_malicious), unica fonte de verdade de
+        # "qual chain atende qual canal", em vez de um if/elif longo.
+        self._chains_por_canal = {
+            ("website", True): self.website_chain,
+            ("website", False): self.website_legitimate_chain,
+            ("phone_call", True): self.phone_call_chain,
+            ("phone_call", False): self.phone_call_legitimate_chain,
+            ("pix_qr", True): self.pix_qr_chain,
+            ("pix_qr", False): self.pix_qr_legitimate_chain,
+        }
 
     async def generate_response(
         self, difficulty: str, context: str, relevant_docs, is_malicious: bool = True
@@ -453,6 +679,46 @@ class ResponseGenerator:
         if soma <= 3:
             return Difficulty.MEDIO
         return Difficulty.DIFICIL
+
+    async def generate_channel_item(
+        self, channel: str, difficulty: str, context: str, relevant_docs, is_malicious: bool = True
+    ) -> dict:
+        """Gera um item de um canal NOVO (issue #6: website, phone_call
+        ou pix_qr -- sms/whatsapp ainda bloqueados, ver
+        app.domain.models.channel.GENERATION_SUPORTADOS).
+
+        Espelha `generate_response` (email) na forma -- mesmos
+        parametros, mesma selecao malicioso/legitimo por chain
+        separada -- mas devolve um dict solto (`content_json`,
+        `explicacao`, `categoria`), nao um `GeneratedItemDraft`: os
+        canais novos nao tem `cues`/`phish_scale` (fora do escopo desta
+        entrega, ver comentario da issue #6), entao nao ha um schema
+        de retorno unico que fizesse sentido para os dois mundos sem
+        forcar campos vazios artificiais.
+
+        Args:
+            channel: um dos `GENERATION_SUPORTADOS` nao-email, como
+                string (`.value` do enum `Channel`). Chamador (o
+                endpoint) e quem valida que o canal e suportado --
+                esta funcao apenas espelha o dispatch.
+        """
+        chain = self._chains_por_canal.get((channel, is_malicious))
+        if chain is None:
+            raise ValueError(f"Canal '{channel}' nao tem chain de geracao configurada.")
+
+        try:
+            draft = await chain.ainvoke(
+                {"context": context, "difficulty": difficulty, "relevant_docs": relevant_docs}
+            )
+        except Exception as e:
+            logging.error(f"Error generating channel item ({channel}): {e}")
+            raise e
+
+        return {
+            "content_json": draft.content.model_dump(),
+            "explicacao": draft.explicacao,
+            "categoria": draft.categoria,
+        }
 
     async def generate_hypothetical_answer(self, query: str) -> str:
         """
