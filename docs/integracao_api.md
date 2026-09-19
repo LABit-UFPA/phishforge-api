@@ -88,7 +88,12 @@ Gera um único exemplo de email de phishing personalizado usando um pipeline RAG
       "span_start": null,
       "span_end": null
     }
-  ]
+  ],
+  "phish_scale": {
+    "cue_count": 2,
+    "premise_alignment": "medio",
+    "difficulty_estimated": "medio"
+  }
 }
 ```
 
@@ -106,7 +111,8 @@ Exemplo de item **legítimo** (`is_malicious: false`) para o mesmo contexto:
   "categoria": "financeiro",
   "links": [],
   "is_malicious": false,
-  "cues": []
+  "cues": [],
+  "phish_scale": null
 }
 ```
 
@@ -147,6 +153,45 @@ Garantias do servidor (não é só instrução de prompt):
 - `link_text_mismatch` ainda não é gerável: depende da mudança de `links` de `List[str]` para
   objeto com texto exibido e destino, que segue bloqueada do lado do backend Go (issue #5 da
   `phishforge-api`).
+
+#### Dificuldade estimada (`phish_scale`)
+
+Até a issue #9, a dificuldade era **autodeclarada pelo LLM**: o modelo escrevia o item e
+devolvia de volta o mesmo `nivel` que recebeu como instrução, sem nada verificar se o item
+gerado como `dificil` de fato ficou mais difícil que um `facil`. `phish_scale` substitui esse
+palpite pelos dois eixos objetivos do **NIST Phish Scale**:
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| `cue_count` | integer | Quantidade de pistas do item (`= len(cues)`) -- nunca um número declarado à parte |
+| `premise_alignment` | `baixo` \| `medio` \| `alto` | O quanto o pretexto do item se encaixa na rotina de quem recebe, julgado pelo LLM contra o `context`/`user_context` da request |
+| `difficulty_estimated` | `facil` \| `medio` \| `dificil` | **Derivado** deterministicamente de `cue_count` + `premise_alignment` -- nunca um terceiro palpite do modelo |
+
+`phish_scale` é `null` para item **legítimo** (`is_malicious: false`): "dificuldade de detectar
+phishing" não se aplica a algo que não é phishing.
+
+**Três campos de dificuldade, três significados diferentes -- não confundir:**
+
+| Campo | Quando existe | O que significa |
+|-------|----------------|------------------|
+| `nivel` | Sempre | O nível **pedido** na request (`difficulty`) |
+| `phish_scale.difficulty_estimated` | Item malicioso | Estimativa **a priori**, derivada dos dois eixos acima, no momento da geração |
+| `difficulty_calibrated` (futuro, backend Go) | Após dados de tentativas reais | Dificuldade **medida a posteriori**, a partir da taxa de acerto de participantes (`phishing-quest-api` #66) |
+
+Regra de derivação de `difficulty_estimated` (determinística, revisável quando houver dado
+empírico de calibração):
+
+| `cue_count` | pontos | `premise_alignment` | pontos | soma | `difficulty_estimated` |
+|---|---|---|---|---|---|
+| 0–1 | 2 | qualquer | — | — | — |
+| 2 | 1 | qualquer | — | — | — |
+| 3+ | 0 | qualquer | — | — | — |
+| — | — | `alto` | 2 | — | — |
+| — | — | `medio` | 1 | — | — |
+| — | — | `baixo` | 0 | — | — |
+
+A soma dos dois pontos decide o resultado: **0–1 → `facil`**, **2–3 → `medio`**, **4 →
+`dificil`**.
 
 #### POST `/api/v1/generate/batch`
 
@@ -215,7 +260,8 @@ cliente deve fazer polling neste endpoint até `status` chegar num valor termina
       "categoria": "...",
       "links": [...],
       "is_malicious": true,
-      "cues": [...]
+      "cues": [...],
+      "phish_scale": {...}
     }
   ],
   "failures": [
@@ -409,7 +455,7 @@ Lista emails de phishing gerados anteriormente.
 
 #### GET `/api/v1/emails/{email_id}`
 
-Busca um email específico por ID. Inclui `cues` (ver [Pistas anotadas](#pistas-anotadas-cues)).
+Busca um email específico por ID. Inclui `cues` (ver [Pistas anotadas](#pistas-anotadas-cues)) e `phish_scale` (ver [Dificuldade estimada](#dificuldade-estimada-phish_scale)).
 
 > `GET /api/v1/emails` e as demais listagens filtradas (`categoria`, `nivel`, `search`) **não**
 > incluem `cues` -- só a busca por id e o `examples` do resultado do lote

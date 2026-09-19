@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from app.domain.models.cue import Cue
+from app.domain.models.phish_scale import PhishScale
 
 class PhishingEmail(BaseModel):
     receptor: str
@@ -23,6 +24,14 @@ class PhishingEmail(BaseModel):
     # dois no repositorio) -- as demais listagens nao fazem o join,
     # decisao de escopo registrada no PR.
     cues: List[Cue] = Field(default_factory=list)
+    # Estimativa a priori de dificuldade (issue #9), derivada de
+    # `cues` + `premise_alignment` -- None para item legitimo, onde
+    # "dificuldade de detectar phishing" nao se aplica. NAO confundir
+    # com `nivel` (o pedido na request) nem com uma futura
+    # `difficulty_calibrated` (medida a partir de tentativas reais no
+    # backend Go, phishing-quest-api #66) -- ver docstring de
+    # PhishScale para os tres significados.
+    phish_scale: Optional[PhishScale] = None
     # Default True preserva o comportamento historico (todo item ate a
     # issue #3 era phishing por construcao) para quem constroi este
     # modelo sem passar o campo explicitamente. O endpoint sempre passa

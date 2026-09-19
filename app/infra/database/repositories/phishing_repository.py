@@ -3,6 +3,7 @@ from typing import Dict, List, Optional
 from uuid import UUID
 
 from app.domain.models.cue import Cue
+from app.domain.models.phish_scale import PhishScale
 from app.domain.models.phishing_email import PhishingEmail
 from app.infra.database.connection import DatabaseConnection
 
@@ -20,10 +21,12 @@ class PhishingEmailRepository:
             async with conn.transaction():
                 query = """
                     INSERT INTO phishing_emails
-                    (receptor, remetente, assunto, conteudo, explicacao, nivel, categoria, links, is_malicious)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    (receptor, remetente, assunto, conteudo, explicacao, nivel, categoria, links, is_malicious,
+                     phish_scale_cue_count, phish_scale_premise_alignment, difficulty_estimated)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                     RETURNING id
                 """
+                phish_scale = email.phish_scale
                 email_id = await conn.fetchval(
                     query,
                     email.receptor,
@@ -35,6 +38,9 @@ class PhishingEmailRepository:
                     email.categoria,
                     json.dumps(email.links) if email.links else "[]",
                     email.is_malicious,
+                    phish_scale.cue_count if phish_scale else None,
+                    phish_scale.premise_alignment.value if phish_scale else None,
+                    phish_scale.difficulty_estimated.value if phish_scale else None,
                 )
 
                 if email.cues:
@@ -80,7 +86,8 @@ class PhishingEmailRepository:
         async with self.db.get_connection() as conn:
             query = """
                 SELECT id, receptor, remetente, assunto, conteudo, explicacao,
-                       nivel, categoria, links, is_malicious, created_at, updated_at
+                       nivel, categoria, links, is_malicious, created_at, updated_at,
+                       phish_scale_cue_count, phish_scale_premise_alignment, difficulty_estimated
                 FROM phishing_emails
                 WHERE id = $1
             """
@@ -242,6 +249,13 @@ class PhishingEmailRepository:
         return cues_por_email
 
     def _row_to_model(self, row, cues: Optional[List[Cue]] = None) -> PhishingEmail:
+        phish_scale = None
+        if row["difficulty_estimated"] is not None:
+            phish_scale = PhishScale(
+                cue_count=row["phish_scale_cue_count"],
+                premise_alignment=row["phish_scale_premise_alignment"],
+                difficulty_estimated=row["difficulty_estimated"],
+            )
         return PhishingEmail(
             id=row["id"],
             receptor=row["receptor"],
@@ -254,6 +268,7 @@ class PhishingEmailRepository:
             links=json.loads(row["links"]) if row["links"] else [],
             is_malicious=row["is_malicious"],
             cues=cues or [],
+            phish_scale=phish_scale,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
