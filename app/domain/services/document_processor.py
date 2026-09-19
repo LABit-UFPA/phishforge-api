@@ -1,10 +1,7 @@
 import os
 import re
 import unicodedata
-import numpy as np
 from typing import Dict, List
-from qdrant_client import QdrantClient
-from qdrant_client.http.models import Filter, FieldCondition, Range
 
 from langchain.docstore.document import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -19,7 +16,6 @@ class DocumentProcessor:
             chunk_size=self.chunk_size,
             chunk_overlap=self.chunk_overlap
         )
-        self.qdrant_client = QdrantClient("http://localhost:6333")
 
     def preprocess_text(self, text: str) -> str:
         """Limpa e normaliza o texto."""
@@ -28,32 +24,21 @@ class DocumentProcessor:
         text = re.sub(r'[^\w\s.,!?-]', ' ', text)
         return " ".join(text.split())
 
-    def retrieve_top_k(self, query_vector: np.ndarray, top_k: int = 4, filters: dict = None):
-        """
-        Recupera os top-k documentos mais relevantes com base na similaridade semântica e filtros opcionais.
-        """
-        conditions = []
-        if filters:
-            for field, value_range in filters.items():
-                conditions.append(FieldCondition(
-                    key=field,
-                    range=Range(**value_range)
-                ))
-
-        query_filter = Filter(must=conditions) if conditions else None
-
-        search_result = self.qdrant_client.search(
-            collection_name="document_chunks",
-            query_vector=query_vector,
-            query_filter=query_filter,
-            top=top_k
-        )
-
-        return [hit.payload for hit in search_result]
-
     def process_file(self, file_path: str) -> List[Dict]:
         """
         Método principal que carrega e divide um arquivo em chunks com base na sua extensão.
+
+        Só faz o parsing/chunking -- NAO indexa no Qdrant. Antes, este
+        método tinha seu próprio upsert direto (`self.qdrant_client`),
+        com collection_name, formato de ponto e embedding (literalmente
+        `np.random.rand` -- nunca chegou a chamar um modelo real)
+        completamente divorciados do pipeline real de indexação
+        (`QdrantVectorStore.save`, chamado por `script/run_ingestion.py`
+        logo depois deste método retornar). Esse código morto sempre
+        lançava exceção (`chunk_id` como string não é um point ID
+        válido no Qdrant atual), impedindo a ingestão de terminar em
+        qualquer ambiente. Removido -- os chunks retornados aqui já são
+        o que `run_ingestion.py` persiste de verdade.
         """
         file_extension = os.path.splitext(file_path)[1].lower()
 
@@ -66,27 +51,7 @@ class DocumentProcessor:
             return []
 
         documents = loader.load()
-        chunks = self._create_small_to_big_chunks(documents, file_path)
-
-        # Indexar os chunks no Qdrant
-        for chunk in chunks:
-            self.qdrant_client.upsert(
-                collection_name="document_chunks",
-                points=[{
-                    "id": chunk["metadata"]["chunk_id"],
-                    "vector": self._embed_text(chunk["child_text"]),
-                    "payload": chunk["metadata"]
-                }]
-            )
-
-        return chunks
-
-    def _embed_text(self, text: str) -> np.ndarray:
-        """
-        Gera o embedding para um texto usando o modelo de embedding configurado.
-        """
-        # Simulação de embedding; substitua pela chamada ao modelo real
-        return np.random.rand(1536)
+        return self._create_small_to_big_chunks(documents, file_path)
 
     def _create_small_to_big_chunks(self, documents: List[Document], file_path: str) -> List[Dict]:
         """
