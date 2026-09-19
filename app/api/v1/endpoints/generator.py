@@ -28,21 +28,19 @@ app = APIRouter()
 
 
 def _validar_canal_suportado(channel: Channel) -> None:
-    """sms/whatsapp existem no vocabulario (CHECK do banco, enum
-    Channel) para bater com o backend Go, mas a geracao ainda nao sabe
-    produzi-los -- o shape de ambos exige valor aninhado
-    (`messages`/`links`) que o Go so aceita depois de frouxar
-    `buildDraftContent` (issue #6, mesmo bloqueio da #5). Rejeitar aqui
-    com 422 explicito e melhor que aceitar e falhar de forma obscura
-    dentro do gerador.
+    """GENERATION_SUPORTADOS cobre hoje todos os membros de `Channel`
+    (issue #6 completa, com sms/whatsapp desbloqueados pela
+    phishing-quest-api #68). Este check fica como defesa: se um canal
+    novo algum dia entrar no vocabulario (`Channel`) antes de a geracao
+    saber produzi-lo, cai aqui com 422 explicito em vez de falhar de
+    forma obscura dentro do gerador.
     """
     if channel not in GENERATION_SUPORTADOS:
         raise HTTPException(
             status_code=422,
             detail=(
-                f"canal '{channel.value}' ainda nao suportado pela geracao -- "
-                f"bloqueado do lado do backend Go (issue #6). Canais disponiveis: "
-                f"{sorted(c.value for c in GENERATION_SUPORTADOS)}."
+                f"canal '{channel.value}' ainda nao suportado pela geracao. "
+                f"Canais disponiveis: {sorted(c.value for c in GENERATION_SUPORTADOS)}."
             ),
         )
 

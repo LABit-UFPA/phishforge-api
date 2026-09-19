@@ -48,6 +48,30 @@ async def test_email_continua_persistindo_como_antes(phishing_repository):
             "pix_qr",
             {"payload": "abc", "recipient": "Fulano", "amount": "10.00", "pix_key": "chave"},
         ),
+        # sms/whatsapp (issue #6, desbloqueados pela phishing-quest-api
+        # #68): content_json ANINHADO (links/messages como array de
+        # objetos) -- exatamente o valor que o Go so aceita a partir
+        # daquela issue. Prova que a coluna JSONB local ja aguentava
+        # esse shape mesmo antes do desbloqueio do outro lado.
+        (
+            "sms",
+            {
+                "sender": "+5500000000000",
+                "text": "Seu pacote chegou, confirme em bit.ly/xyz",
+                "links": [{"text": "confirme aqui", "href": "http://bit.ly/xyz"}],
+            },
+        ),
+        (
+            "whatsapp",
+            {
+                "sender": "+5500000000000",
+                "display_name": "Suporte Banco",
+                "messages": [
+                    {"author": "contact", "text": "Identificamos uma pendencia."},
+                    {"author": "user", "text": "Que pendencia?"},
+                ],
+            },
+        ),
     ],
 )
 async def test_canal_novo_persiste_e_recupera_content_json(

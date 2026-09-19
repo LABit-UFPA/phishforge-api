@@ -64,6 +64,9 @@ class FakeResponseGenerator:
         # chamar o endpoint. Vazio por padrao para nao afetar nenhum
         # teste existente.
         self.cues_a_devolver: list = []
+        # Issue #5: mesmo mecanismo para `links` -- agora List[LinkRef],
+        # nao mais List[str]. Vazio por padrao (mesmo valor de antes).
+        self.links_a_devolver: list = []
 
     async def generate_hypothetical_answer(self, query: str) -> str:
         self.calls.append({"step": "generate_hypothetical_answer", "query": query})
@@ -109,7 +112,7 @@ class FakeResponseGenerator:
             conteudo=f"Conteudo de teste gerado pelo fake #{self._contador}, sem chamada de LLM.",
             explicacao="Explicacao de teste.",
             categoria="teste",
-            links=[],
+            links=list(self.links_a_devolver),
             cues=list(self.cues_a_devolver),
         )
 
@@ -147,6 +150,18 @@ class FakeResponseGenerator:
                 "recipient": "Recebedor de teste",
                 "amount": "10.00",
                 "pix_key": "chave-de-teste",
+            },
+            "sms": {
+                "sender": "+5500000000000",
+                "text": f"Texto de SMS de teste #{self._contador}.",
+                "links": [],
+            },
+            "whatsapp": {
+                "sender": "+5500000000000",
+                "display_name": "Contato de teste",
+                "messages": [
+                    {"author": "contact", "text": f"Mensagem de teste #{self._contador}."}
+                ],
             },
         }
         return {

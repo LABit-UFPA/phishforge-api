@@ -1,6 +1,12 @@
 from pydantic import BaseModel
 
-from app.domain.models.channel_content import PhoneCallContent, PixQrContent, WebsiteContent
+from app.domain.models.channel_content import (
+    PhoneCallContent,
+    PixQrContent,
+    SmsContent,
+    WebsiteContent,
+    WhatsAppContent,
+)
 
 
 class WebsiteItemDraft(BaseModel):
@@ -33,5 +39,23 @@ class PixQrItemDraft(BaseModel):
     """Contrato do structured output do LLM para `channel=pix_qr`."""
 
     content: PixQrContent
+    explicacao: str
+    categoria: str
+
+
+class SmsItemDraft(BaseModel):
+    """Contrato do structured output do LLM para `channel=sms` (issue
+    #6, desbloqueado pela `phishing-quest-api` #68)."""
+
+    content: SmsContent
+    explicacao: str
+    categoria: str
+
+
+class WhatsAppItemDraft(BaseModel):
+    """Contrato do structured output do LLM para `channel=whatsapp`
+    (issue #6, desbloqueado pela `phishing-quest-api` #68)."""
+
+    content: WhatsAppContent
     explicacao: str
     categoria: str

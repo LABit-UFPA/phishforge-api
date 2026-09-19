@@ -7,7 +7,9 @@ from langchain_core.prompts import PromptTemplate
 from app.domain.models.channel_item_draft import (
     PhoneCallItemDraft,
     PixQrItemDraft,
+    SmsItemDraft,
     WebsiteItemDraft,
+    WhatsAppItemDraft,
 )
 from app.domain.models.cue import Cue
 from app.domain.models.difficulty import Difficulty
@@ -146,6 +148,72 @@ _REGRAS_PIX_QR_LEGITIMO = (
     "exigindo conferir o recebedor para não desconfiar à toa."
 )
 
+# SMS/WhatsApp (issue #6, desbloqueados pela phishing-quest-api #68: os
+# dois shapes exigem valor aninhado -- `links`/`messages` como array de
+# objetos -- que o buildDraftContent do Go so passou a aceitar depois
+# daquela issue).
+
+_REGRAS_SMS = (
+    "### O QUE TORNA UM SMS DE GOLPE CONVINCENTE (OBRIGATÓRIO)\n"
+    "- `text` é CURTO (poucas linhas) e SEM campo de assunto -- SMS não tem assunto\n"
+    "- `sender` costuma ser um número curto ou alfanumérico (nunca um endereço de email)\n"
+    "- Links, quando presentes em `text`, tipicamente aparecem encurtados -- isso pesa a "
+    "favor da pista `link_text_mismatch`, já que o texto exibido não revela o domínio real\n"
+    "- Golpe de SMS depende mais de urgência e menos de personalização/formatação (não há "
+    "layout num SMS)\n\n"
+    "### NÍVEIS DE DIFICULDADE\n"
+    "**FÁCIL:** urgência exagerada e óbvia, remetente claramente estranho, link visivelmente "
+    "suspeito.\n"
+    "**MÉDIO:** remetente plausível (ex.: nome de transportadora/banco), pretexto comum "
+    "(entrega, fatura), link encurtado sem outro sinal de alarme.\n"
+    "**DIFÍCIL:** pretexto muito específico e oportuno (rastreamento real esperado pela "
+    "vítima), sem erro de português, link encurtado indistinguível de um legítimo."
+)
+
+_REGRAS_SMS_LEGITIMO = (
+    "### O QUE TORNA O SMS LEGÍTIMO (OBRIGATÓRIO)\n"
+    "- NUNCA pede senha, código de verificação ou dado de cartão\n"
+    "- Se houver link, ele é coerente com a organização (`text` e `href` não divergem)\n"
+    "- Tom institucional, direto, sem ameaça\n\n"
+    "### NÍVEIS DE DIFICULDADE (risco de falso alarme)\n"
+    "**FÁCIL:** remetente e conteúdo obviamente esperados (ex.: código de entrega que a "
+    "pessoa já aguardava).\n"
+    "**MÉDIO:** legítimo mas com timing um pouco inesperado.\n"
+    "**DIFÍCIL:** legítimo mas com urgência real (ex.: prazo de hoje), exigindo notar a "
+    "ausência de pedido de credencial para não desconfiar à toa."
+)
+
+_REGRAS_WHATSAPP = (
+    "### O QUE TORNA UMA CONVERSA DE WHATSAPP CONVINCENTE (OBRIGATÓRIO)\n"
+    "- `messages` é um HISTÓRICO (2 a 4 mensagens), não uma mensagem solta -- simule contato "
+    "inicial, uma resposta a uma dúvida ou objeção, e pressão final, por exemplo\n"
+    "- `author` de cada mensagem é `contact` (o golpista/organização simulada) ou `user` "
+    "(uma reação plausível do destinatário) -- variar entre os dois torna o histórico mais "
+    "realista que uma sequência de mensagens todas do mesmo lado\n"
+    "- `display_name` e tom coloquial são o vetor de confiança aqui (não há domínio nem "
+    "assinatura formal como em email)\n"
+    "- Se houver link dentro do texto de uma mensagem, ele reforça a pista "
+    "`link_text_mismatch` quando o texto ao redor do link sugere um destino diferente do "
+    "real\n\n"
+    "### NÍVEIS DE DIFICULDADE\n"
+    "**FÁCIL:** `display_name` genérico ou suspeito, pressa óbvia, poucas trocas.\n"
+    "**MÉDIO:** `display_name` parecido com um contato real, alguma inconsistência no tom.\n"
+    "**DIFÍCIL:** `display_name` e histórico indistinguíveis de uma conversa real, pressão "
+    "sutil ao longo das mensagens."
+)
+
+_REGRAS_WHATSAPP_LEGITIMO = (
+    "### O QUE TORNA A CONVERSA LEGÍTIMA (OBRIGATÓRIO)\n"
+    "- NUNCA pede código recebido por SMS, senha ou dado de cartão\n"
+    "- `display_name` corresponde de fato à organização/pessoa esperada pelo cenário\n"
+    "- Tom institucional ou pessoal coerente com o cenário, sem pressa artificial\n\n"
+    "### NÍVEIS DE DIFICULDADE (risco de falso alarme)\n"
+    "**FÁCIL:** histórico claramente esperado pelo destinatário, sem nenhum pedido sensível.\n"
+    "**MÉDIO:** legítimo mas com uma pergunta que poderia soar estranha à primeira vista.\n"
+    "**DIFÍCIL:** legítimo mas com timing incomum, exigindo notar a ausência de pedido de "
+    "credencial para não desconfiar à toa."
+)
+
 
 class ResponseGenerator:
     def __init__(self, api_key: str, model_name: str = "gpt-4o-mini"):
@@ -253,6 +321,16 @@ class ResponseGenerator:
                 "Julgue com honestidade o que voce de fato escreveu -- nao repita "
                 "mecanicamente o alvo do nivel '{difficulty}' se o texto que voce produziu "
                 "não atingiu aquele alinhamento.\n\n"
+
+                "## 3.7 FORMATO DE LINKS (links) -- ISSUE #5\n"
+                "Cada item de `links` e um OBJETO com `text` (o texto exibido, o que a "
+                "vitima le e clica) e `href` (o destino real do link). NUNCA uma string "
+                "solta. Para simular a pista `link_text_mismatch`, faca o `text` sugerir "
+                "um destino diferente do `href` real (ex.: text 'Acessar minha conta no "
+                "banco oficial', href para um dominio com typosquatting) -- quando essa "
+                "pista estiver na sua lista de `cues` para este item, o mesmo link deve "
+                "estar refletido aqui com essa divergencia. Se o item nao tiver link (ver "
+                "VARIEDADE ESTRUTURAL acima), `links` e uma lista vazia `[]`.\n\n"
 
                 "## 4. EXEMPLOS DE REFERÊNCIA (FEW-SHOT LEARNING)\n"
                 "Analise as táticas, métodos e gatilhos psicológicos descritos nos documentos de pesquisa para garantir consistência com padrões acadêmicos estabelecidos.\n\n"
@@ -379,6 +457,14 @@ class ResponseGenerator:
                 "Não preencha `premise_alignment`: o Phish Scale (issue #9) mede dificuldade "
                 "de DETECTAR phishing, o que não se aplica a um item que não é phishing.\n\n"
 
+                "## FORMATO DE LINKS (links) -- ISSUE #5\n"
+                "Cada item de `links` é um OBJETO com `text` (texto exibido) e `href` "
+                "(destino real). Aqui os dois devem ser COERENTES -- o texto do link "
+                "descreve honestamente para onde ele leva (ex.: text 'Acessar o app "
+                "oficial', href do próprio domínio da organização) -- link_text_mismatch é "
+                "uma pista de phishing e não pode aparecer num item legítimo. Se não houver "
+                "link, `links` é `[]`.\n\n"
+
                 "## FORMATO DE RESPOSTA\n"
                 "Gere APENAS o objeto JSON com os campos solicitados (receptor, remetente, "
                 "assunto, conteudo, explicacao, categoria, links, cues).\n"
@@ -404,6 +490,14 @@ class ResponseGenerator:
         self.pix_qr_llm = ChatOpenAI(
             model_name=model_name, api_key=api_key, temperature=0.7
         ).with_structured_output(PixQrItemDraft)
+        # sms/whatsapp (issue #6, desbloqueados pela phishing-quest-api
+        # #68): mesma separacao de LLM/prompt por canal dos 3 acima.
+        self.sms_llm = ChatOpenAI(
+            model_name=model_name, api_key=api_key, temperature=0.7
+        ).with_structured_output(SmsItemDraft)
+        self.whatsapp_llm = ChatOpenAI(
+            model_name=model_name, api_key=api_key, temperature=0.7
+        ).with_structured_output(WhatsAppItemDraft)
 
         _campos_canal = "content, explicacao, categoria"
 
@@ -470,6 +564,47 @@ class ResponseGenerator:
                 _campos_canal,
             ),
         )
+        self.sms_prompt_template = PromptTemplate(
+            input_variables=["context", "difficulty", "relevant_docs"],
+            template=_construir_prompt_canal(
+                "Você é um especialista em cibersegurança criando um SMS de smishing "
+                "(phishing por SMS) educacional, baseado em pesquisas acadêmicas.",
+                _REGRAS_SMS,
+                "",
+                _campos_canal,
+            ),
+        )
+        self.sms_legitimate_prompt_template = PromptTemplate(
+            input_variables=["context", "difficulty", "relevant_docs"],
+            template=_construir_prompt_canal(
+                "Você é um especialista em comunicação institucional criando um SMS "
+                "REAL e LEGÍTIMO (não um golpe) -- o lado 'controle' do experimento.",
+                _REGRAS_SMS_LEGITIMO,
+                "",
+                _campos_canal,
+            ),
+        )
+        self.whatsapp_prompt_template = PromptTemplate(
+            input_variables=["context", "difficulty", "relevant_docs"],
+            template=_construir_prompt_canal(
+                "Você é um especialista em cibersegurança criando uma CONVERSA DE "
+                "WHATSAPP de golpe educacional, baseada em pesquisas acadêmicas.",
+                _REGRAS_WHATSAPP,
+                "",
+                _campos_canal,
+            ),
+        )
+        self.whatsapp_legitimate_prompt_template = PromptTemplate(
+            input_variables=["context", "difficulty", "relevant_docs"],
+            template=_construir_prompt_canal(
+                "Você é um especialista em atendimento institucional criando uma "
+                "CONVERSA DE WHATSAPP REAL e LEGÍTIMA (não um golpe) -- o lado "
+                "'controle' do experimento.",
+                _REGRAS_WHATSAPP_LEGITIMO,
+                "",
+                _campos_canal,
+            ),
+        )
 
         self.hyde_prompt_template = PromptTemplate(
             input_variables=["query"],
@@ -499,6 +634,12 @@ class ResponseGenerator:
         self.pix_qr_legitimate_chain = (
             self.pix_qr_legitimate_prompt_template | self.pix_qr_llm
         )
+        self.sms_chain = self.sms_prompt_template | self.sms_llm
+        self.sms_legitimate_chain = self.sms_legitimate_prompt_template | self.sms_llm
+        self.whatsapp_chain = self.whatsapp_prompt_template | self.whatsapp_llm
+        self.whatsapp_legitimate_chain = (
+            self.whatsapp_legitimate_prompt_template | self.whatsapp_llm
+        )
 
         # Dispatch por canal usado por generate_channel_item -- indexado
         # por (channel.value, is_malicious), unica fonte de verdade de
@@ -510,6 +651,10 @@ class ResponseGenerator:
             ("phone_call", False): self.phone_call_legitimate_chain,
             ("pix_qr", True): self.pix_qr_chain,
             ("pix_qr", False): self.pix_qr_legitimate_chain,
+            ("sms", True): self.sms_chain,
+            ("sms", False): self.sms_legitimate_chain,
+            ("whatsapp", True): self.whatsapp_chain,
+            ("whatsapp", False): self.whatsapp_legitimate_chain,
         }
 
     async def generate_response(
@@ -683,9 +828,9 @@ class ResponseGenerator:
     async def generate_channel_item(
         self, channel: str, difficulty: str, context: str, relevant_docs, is_malicious: bool = True
     ) -> dict:
-        """Gera um item de um canal NOVO (issue #6: website, phone_call
-        ou pix_qr -- sms/whatsapp ainda bloqueados, ver
-        app.domain.models.channel.GENERATION_SUPORTADOS).
+        """Gera um item de um canal NOVO (issue #6: website, phone_call,
+        pix_qr, sms ou whatsapp -- os dois ultimos desbloqueados pela
+        phishing-quest-api #68, ver app.domain.models.channel.Channel).
 
         Espelha `generate_response` (email) na forma -- mesmos
         parametros, mesma selecao malicioso/legitimo por chain
