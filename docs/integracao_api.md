@@ -74,7 +74,21 @@ Gera um único exemplo de email de phishing personalizado usando um pipeline RAG
   "nivel": "medio",
   "categoria": "financeiro",
   "links": ["http://banc0-brasil.com.phishing-site.net/atualizar"],
-  "is_malicious": true
+  "is_malicious": true,
+  "cues": [
+    {
+      "code": "urgency",
+      "evidencia": "URGENTE",
+      "span_start": 0,
+      "span_end": 7
+    },
+    {
+      "code": "typosquat",
+      "evidencia": "banc0-brasil.com",
+      "span_start": null,
+      "span_end": null
+    }
+  ]
 }
 ```
 
@@ -91,9 +105,48 @@ Exemplo de item **legítimo** (`is_malicious: false`) para o mesmo contexto:
   "nivel": "facil",
   "categoria": "financeiro",
   "links": [],
-  "is_malicious": false
+  "is_malicious": false,
+  "cues": []
 }
 ```
+
+#### Pistas anotadas (`cues`)
+
+Além do texto livre em `explicacao`, cada item gerado traz `cues`: a lista estruturada das
+pistas de phishing presentes, usando a taxonomia compartilhada com o backend Go
+(`phishing-quest-api`) -- os mesmos 10 códigos, com os mesmos UUIDs fixos na tabela `cues`.
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| `code` | string | Um dos 10 códigos canônicos (ver tabela abaixo) |
+| `evidencia` | string | Trecho literal do `conteudo` que evidencia a pista |
+| `span_start` / `span_end` | integer \| `null` | Posição (em caracteres) da evidência dentro de `conteudo`. **`null` quando o modelo não conseguiu localizar a pista com precisão** -- um destaque no lugar errado é pior que nenhum destaque, então o span é omitido em vez de arriscado |
+
+**Códigos da taxonomia:**
+
+| `code` | Categoria |
+|--------|-----------|
+| `sender_domain_mismatch` | technical |
+| `typosquat` | technical |
+| `homoglyph` | technical |
+| `urgency` | psychological |
+| `authority` | psychological |
+| `generic_greeting` | psychological |
+| `credential_request` | technical |
+| `link_text_mismatch` | technical |
+| `unexpected_attachment` | technical |
+| `scarcity` | psychological |
+
+Garantias do servidor (não é só instrução de prompt):
+
+- Um item **legítimo** (`is_malicious: false`) **nunca** vem com `cues` não-vazio -- validado
+  duas vezes (depois da geração e na persistência).
+- Quando `span_start`/`span_end` vêm preenchidos, `conteudo[span_start:span_end]` sempre bate
+  exatamente com `evidencia`. Se o modelo declarar um span que não corresponde ao texto real, o
+  servidor descarta o span (fica `null`/`null`) mas **mantém a pista**.
+- `link_text_mismatch` ainda não é gerável: depende da mudança de `links` de `List[str]` para
+  objeto com texto exibido e destino, que segue bloqueada do lado do backend Go (issue #5 da
+  `phishforge-api`).
 
 #### POST `/api/v1/generate/batch`
 
@@ -161,7 +214,8 @@ cliente deve fazer polling neste endpoint até `status` chegar num valor termina
       "nivel": "facil",
       "categoria": "...",
       "links": [...],
-      "is_malicious": true
+      "is_malicious": true,
+      "cues": [...]
     }
   ],
   "failures": [
@@ -355,7 +409,11 @@ Lista emails de phishing gerados anteriormente.
 
 #### GET `/api/v1/emails/{email_id}`
 
-Busca um email específico por ID.
+Busca um email específico por ID. Inclui `cues` (ver [Pistas anotadas](#pistas-anotadas-cues)).
+
+> `GET /api/v1/emails` e as demais listagens filtradas (`categoria`, `nivel`, `search`) **não**
+> incluem `cues` -- só a busca por id e o `examples` do resultado do lote
+> (`GET /api/v1/generate/batch/{job_id}`) fazem essa junção.
 
 #### GET `/api/v1/emails/statistics`
 

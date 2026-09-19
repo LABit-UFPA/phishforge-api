@@ -1,6 +1,8 @@
 from typing import List
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from app.domain.models.cue import Cue
 
 
 class GeneratedItemDraft(BaseModel):
@@ -35,3 +37,10 @@ class GeneratedItemDraft(BaseModel):
     explicacao: str
     categoria: str
     links: List[str]
+    # Pistas de phishing anotadas pelo proprio LLM, com codigo da
+    # taxonomia compartilhada com o Go (issue #5). E SAIDA legitima do
+    # gerador (ao contrario de nivel/is_malicious/channel): passa
+    # direto para o PhishingEmail final, sem remapeamento. Lista vazia
+    # e o valor esperado para item legitimo (ver
+    # ResponseGenerator._validar_cues).
+    cues: List[Cue] = Field(default_factory=list)

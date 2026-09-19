@@ -10,6 +10,7 @@ tests/integration/test_difficulty_persistence.py).
 
 import pytest
 
+from app.domain.models.cue import Cue, CueCode
 from app.domain.models.phishing_email import PhishingEmail
 from app.domain.services.phishing_service import PhishingEmailService
 
@@ -22,8 +23,8 @@ class _RepoQueNuncaDeveriaSerChamado:
         )
 
 
-def _email_de_teste(nivel: str) -> PhishingEmail:
-    return PhishingEmail(
+def _email_de_teste(nivel: str, **overrides) -> PhishingEmail:
+    base = dict(
         receptor="alvo@example.com",
         remetente="remetente@example.com",
         assunto="Assunto de teste",
@@ -33,6 +34,8 @@ def _email_de_teste(nivel: str) -> PhishingEmail:
         categoria="teste",
         links=[],
     )
+    base.update(overrides)
+    return PhishingEmail(**base)
 
 
 async def test_create_email_rejeita_nivel_fora_do_vocabulario():
@@ -42,6 +45,25 @@ async def test_create_email_rejeita_nivel_fora_do_vocabulario():
     email = _email_de_teste(nivel="nivel_que_nao_existe")
 
     with pytest.raises(ValueError, match="nivel invalido"):
+        await service.create_email(email)
+
+
+async def test_create_email_rejeita_item_legitimo_com_pistas(monkeypatch):
+    """Issue #5, passo 9: ResponseGenerator._validar_cues ja esvazia
+    `cues` para item legitimo antes disso -- este e o segundo cinto de
+    seguranca, para qualquer chamador que monte um PhishingEmail sem
+    passar pelo gerador.
+    """
+    service = PhishingEmailService(
+        repository=_RepoQueNuncaDeveriaSerChamado(), analytics_repository=None
+    )
+    email = _email_de_teste(
+        nivel="facil",
+        is_malicious=False,
+        cues=[Cue(code=CueCode.URGENCY, evidencia="algo")],
+    )
+
+    with pytest.raises(ValueError, match="pista"):
         await service.create_email(email)
 
 

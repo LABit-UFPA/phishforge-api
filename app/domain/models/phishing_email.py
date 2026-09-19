@@ -2,7 +2,9 @@ from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from app.domain.models.cue import Cue
 
 class PhishingEmail(BaseModel):
     receptor: str
@@ -13,6 +15,14 @@ class PhishingEmail(BaseModel):
     nivel: str
     categoria: str
     links: List[str]
+    # Pistas anotadas pelo LLM na geracao, com codigo da taxonomia
+    # compartilhada com o Go (issue #5). Passa direto de
+    # GeneratedItemDraft, sem remapeamento -- e SAIDA do gerador, nao
+    # entrada. Persistida em `email_cues` (PhishingEmailRepository) e
+    # so populada de volta por get_by_id/get_by_ids (ver docstring dos
+    # dois no repositorio) -- as demais listagens nao fazem o join,
+    # decisao de escopo registrada no PR.
+    cues: List[Cue] = Field(default_factory=list)
     # Default True preserva o comportamento historico (todo item ate a
     # issue #3 era phishing por construcao) para quem constroi este
     # modelo sem passar o campo explicitamente. O endpoint sempre passa

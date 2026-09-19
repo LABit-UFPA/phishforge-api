@@ -1,7 +1,8 @@
 import json
-from typing import List, Optional
+from typing import Dict, List, Optional
 from uuid import UUID
 
+from app.domain.models.cue import Cue
 from app.domain.models.phishing_email import PhishingEmail
 from app.infra.database.connection import DatabaseConnection
 
@@ -11,26 +12,69 @@ class PhishingEmailRepository:
         self.db = db
 
     async def create(self, email: PhishingEmail) -> UUID:
-        """Cria um novo email de phishing no banco"""
+        """Cria um novo email de phishing e suas pistas anotadas
+        (issue #5), numa unica transacao: um email nunca deve existir
+        com so parte das pistas persistidas.
+        """
         async with self.db.get_connection() as conn:
-            query = """
-                INSERT INTO phishing_emails
-                (receptor, remetente, assunto, conteudo, explicacao, nivel, categoria, links, is_malicious)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                RETURNING id
-            """
-            return await conn.fetchval(
-                query,
-                email.receptor,
-                email.remetente,
-                email.assunto,
-                email.conteudo,
-                email.explicacao,
-                email.nivel,
-                email.categoria,
-                json.dumps(email.links) if email.links else "[]",
-                email.is_malicious,
-            )
+            async with conn.transaction():
+                query = """
+                    INSERT INTO phishing_emails
+                    (receptor, remetente, assunto, conteudo, explicacao, nivel, categoria, links, is_malicious)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    RETURNING id
+                """
+                email_id = await conn.fetchval(
+                    query,
+                    email.receptor,
+                    email.remetente,
+                    email.assunto,
+                    email.conteudo,
+                    email.explicacao,
+                    email.nivel,
+                    email.categoria,
+                    json.dumps(email.links) if email.links else "[]",
+                    email.is_malicious,
+                )
+
+                if email.cues:
+                    # Resolve code -> cue_id contra a tabela `cues`, em
+                    # vez de duplicar o mapeamento UUID<->code em
+                    # Python: a tabela e a fonte de verdade (mesmos
+                    # ids literais da migration do Go), e um erro aqui
+                    # (codigo que nao existe) e bug real, nao deveria
+                    # ser possivel dado que CueCode ja restringe o
+                    # structured output -- mas fail loud em vez de
+                    # inserir pista nenhuma se algum dia acontecer.
+                    codigos = [cue.code.value for cue in email.cues]
+                    cue_rows = await conn.fetch(
+                        "SELECT id, code FROM cues WHERE code = ANY($1::text[])",
+                        codigos,
+                    )
+                    id_por_codigo = {row["code"]: row["id"] for row in cue_rows}
+
+                    for cue in email.cues:
+                        cue_id = id_por_codigo.get(cue.code.value)
+                        if cue_id is None:
+                            raise ValueError(
+                                f"codigo de pista '{cue.code.value}' nao existe na "
+                                "tabela cues -- taxonomia local desalinhada da "
+                                "migration (ver issue #5)."
+                            )
+                        await conn.execute(
+                            """
+                            INSERT INTO email_cues
+                            (email_id, cue_id, span_start, span_end, evidencia)
+                            VALUES ($1, $2, $3, $4, $5)
+                            """,
+                            email_id,
+                            cue_id,
+                            cue.span_start,
+                            cue.span_end,
+                            cue.evidencia,
+                        )
+
+                return email_id
 
     async def get_by_id(self, email_id: UUID) -> Optional[PhishingEmail]:
         async with self.db.get_connection() as conn:
@@ -41,13 +85,19 @@ class PhishingEmailRepository:
                 WHERE id = $1
             """
             row = await conn.fetchrow(query, email_id)
-            return self._row_to_model(row) if row else None
+            if not row:
+                return None
+            cues_por_email = await self._fetch_cues_map(conn, [email_id])
+            return self._row_to_model(row, cues_por_email.get(row["id"], []))
 
     async def get_by_ids(self, email_ids: List[UUID]) -> List[PhishingEmail]:
         """Busca varios emails de uma vez, na MESMA ordem de
         `email_ids` (issue #11b: o job de lote guarda uma lista
         ordenada de ids, e o endpoint de status busca todos numa
-        query so, em vez de N chamadas a get_by_id).
+        query so, em vez de N chamadas a get_by_id). As pistas de
+        todos os emails tambem vem numa unica query bulk (issue #5) --
+        e o mesmo caminho que expoe o resultado de um lote recem-
+        gerado para curadoria, com as pistas anotadas ja visiveis.
         """
         if not email_ids:
             return []
@@ -58,7 +108,11 @@ class PhishingEmailRepository:
                 ORDER BY array_position($1::uuid[], id)
             """
             rows = await conn.fetch(query, email_ids)
-            return [self._row_to_model(row) for row in rows]
+            cues_por_email = await self._fetch_cues_map(conn, email_ids)
+            return [
+                self._row_to_model(row, cues_por_email.get(row["id"], []))
+                for row in rows
+            ]
 
     async def get_by_categoria(self, categoria: str, limit: int = 50) -> List[PhishingEmail]:
         async with self.db.get_connection() as conn:
@@ -153,7 +207,41 @@ class PhishingEmailRepository:
             result = await conn.execute("DELETE FROM phishing_emails WHERE id = $1", email_id)
             return result.split()[-1] == "1"
 
-    def _row_to_model(self, row) -> PhishingEmail:
+    async def _fetch_cues_map(
+        self, conn, email_ids: List[UUID]
+    ) -> Dict[UUID, List[Cue]]:
+        """Busca as pistas de varios emails numa unica query (issue
+        #5), evitando N+1 quando get_by_ids traz uma lista inteira.
+        `get_all`/`get_by_categoria`/`get_by_nivel`/`search_content`
+        NAO chamam isto -- decisao de escopo: a issue pede as pistas
+        expostas em GET /emails/{id} (e, por extensao, no resultado do
+        lote via get_by_ids), nao nas listagens gerais.
+        """
+        if not email_ids:
+            return {}
+        rows = await conn.fetch(
+            """
+            SELECT ec.email_id, c.code, ec.span_start, ec.span_end, ec.evidencia
+            FROM email_cues ec
+            JOIN cues c ON c.id = ec.cue_id
+            WHERE ec.email_id = ANY($1::uuid[])
+            ORDER BY ec.created_at
+            """,
+            email_ids,
+        )
+        cues_por_email: Dict[UUID, List[Cue]] = {}
+        for row in rows:
+            cues_por_email.setdefault(row["email_id"], []).append(
+                Cue(
+                    code=row["code"],
+                    span_start=row["span_start"],
+                    span_end=row["span_end"],
+                    evidencia=row["evidencia"],
+                )
+            )
+        return cues_por_email
+
+    def _row_to_model(self, row, cues: Optional[List[Cue]] = None) -> PhishingEmail:
         return PhishingEmail(
             id=row["id"],
             receptor=row["receptor"],
@@ -165,6 +253,7 @@ class PhishingEmailRepository:
             categoria=row["categoria"],
             links=json.loads(row["links"]) if row["links"] else [],
             is_malicious=row["is_malicious"],
+            cues=cues or [],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )

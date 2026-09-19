@@ -59,6 +59,11 @@ class FakeResponseGenerator:
     def __init__(self):
         self.calls: list[dict] = []
         self._contador = 0
+        # Issue #5: testes de contrato que precisam verificar a
+        # propagacao de `cues` ate a resposta HTTP setam isto antes de
+        # chamar o endpoint. Vazio por padrao para nao afetar nenhum
+        # teste existente.
+        self.cues_a_devolver: list = []
 
     async def generate_hypothetical_answer(self, query: str) -> str:
         self.calls.append({"step": "generate_hypothetical_answer", "query": query})
@@ -105,6 +110,7 @@ class FakeResponseGenerator:
             explicacao="Explicacao de teste.",
             categoria="teste",
             links=[],
+            cues=list(self.cues_a_devolver),
         )
 
 
