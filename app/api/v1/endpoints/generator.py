@@ -1,10 +1,12 @@
 from uuid import UUID
 
 from dependency_injector.wiring import Provide, inject
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi.responses import JSONResponse
 
 from app.core.container import Container
 from app.domain.models.phishing_email import PhishingEmail
+from app.domain.services.batch_generation_worker import BatchGenerationWorker
 from app.domain.services.generation_pipeline import GenerationPipeline
 from app.domain.services.phishing_service import PhishingEmailService
 from app.domain.services.response_generator import ResponseGenerator
@@ -17,6 +19,7 @@ from app.dto.requests import (
     UserAnswerEvaluationRequest,
 )
 from app.dto.responses import UserAnswerEvaluationResponse
+from app.infra.database.repositories.generation_job_repository import GenerationJobRepository
 
 app = APIRouter()
 
@@ -95,99 +98,99 @@ async def generate(
     return result
 
 
-@app.post("/api/v1/generate/batch")
+@app.post("/api/v1/generate/batch", status_code=202)
 @inject
 async def generate_batch(
     request: BatchGenerationRequest,
-    pipeline: GenerationPipeline = Depends(Provide[Container.generation_pipeline]),
-    response_generator: ResponseGenerator = Depends(
-        Provide[Container.response_generator]
+    background_tasks: BackgroundTasks,
+    job_repository: GenerationJobRepository = Depends(
+        Provide[Container.generation_job_repository]
+    ),
+    worker: BatchGenerationWorker = Depends(Provide[Container.batch_generation_worker]),
+):
+    """
+    Aceita um lote de geração e processa em background (issue #11b).
+
+    Antes desta issue, o lote era sequencial dentro da própria request
+    HTTP: um `total=100` levava minutos numa única conexão, e qualquer
+    ingress/proxy encerrava antes do fim -- o cliente ficava sem
+    resposta mesmo com os itens já gravados no banco. Agora a request
+    só cria o job e devolve 202 com o id; o progresso e o resultado
+    final são lidos por polling em
+    `GET /api/v1/generate/batch/{job_id}`.
+
+    Issue #8, item 1: `difficulties` vazia, `total` fora de 1..100 e
+    `malicious_ratio` fora de 0..1 são 422 do Pydantic (Field
+    min_length/ge/le no DTO), não mais um `if` manual.
+    """
+    difficulties_values = [d.value for d in request.difficulties]
+
+    job_id = await job_repository.create(
+        context=request.context,
+        difficulties=difficulties_values,
+        total=request.total,
+        malicious_ratio=request.malicious_ratio,
+    )
+
+    background_tasks.add_task(
+        worker.run,
+        job_id=job_id,
+        context=request.context,
+        difficulties=difficulties_values,
+        total=request.total,
+        malicious_ratio=request.malicious_ratio,
+    )
+
+    return JSONResponse(
+        status_code=202,
+        content={"job_id": str(job_id), "status": "pendente"},
+    )
+
+
+@app.get("/api/v1/generate/batch/{job_id}")
+@inject
+async def get_batch_job(
+    job_id: UUID,
+    job_repository: GenerationJobRepository = Depends(
+        Provide[Container.generation_job_repository]
     ),
     phishing_service: PhishingEmailService = Depends(
         Provide[Container.phishing_service]
     ),
 ):
-    # Issue #8: os quatro parametros soltos (Body(..., embed=True))
-    # viraram um unico DTO. difficulties vazia, total fora de 1..100 e
-    # malicious_ratio fora de 0..1 agora sao 422 do Pydantic (Field
-    # min_length/ge/le), nao mais um `if` manual duplicando a mesma
-    # regra -- era esse `if` duplicado que tinha divergido do DTO
-    # (le=10 la, >100 aqui) sem ninguem notar.
-    context = request.context
-    difficulties = request.difficulties
-    total = request.total
-    malicious_ratio = request.malicious_ratio
+    """
+    Status e resultado de um job de geração em lote (issue #11b).
 
-    # Normalizacao, HyDE, retrieve, rerank e fusao dependem so do
-    # `context`, nao da dificuldade de cada item -- rodam UMA vez para
-    # o lote inteiro e sao reaproveitados entre todos os itens (issue
-    # #11, passo 3). Antes desta issue, o lote nao rodava nenhuma
-    # dessas etapas e usava o chunk de busca (child_text) em vez do
-    # bloco completo (parent_content) como contexto academico; agora
-    # usa o mesmo pipeline do /generate, so que uma vez em vez de N.
-    try:
-        built = await pipeline.build_context(context)
-    except Exception as e:
-        # Mesma ressalva do /generate: a mensagem cobre a pipeline
-        # inteira (normalizacao, HyDE, retrieve, rerank, fusao), nao
-        # so o retrieve.
-        raise HTTPException(
-            status_code=500, detail=f"Erro ao montar contexto: {str(e)}"
-        )
+    `examples` traz o conteúdo completo dos itens já gerados com
+    sucesso (não só os ids) -- útil para um frontend de curadoria
+    revisar sem uma segunda rodada de requisições. `failures` lista as
+    tentativas que falharam, separado dos sucessos (issue #8, item 1).
+    """
+    job = await job_repository.get_by_id(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
 
-    # Distribuicao entre dificuldades: nao mexer nesta logica (issue
-    # #11 pede explicitamente para preserva-la). O resto nas primeiras
-    # dificuldades da lista.
-    base, extra = divmod(total, len(difficulties))
-    distribution = {d: base for d in difficulties}
-    for i in range(extra):
-        distribution[difficulties[i]] += 1
-
-    results = []
-    for difficulty, count in distribution.items():
-        # .value pelo mesmo motivo do endpoint /generate: Difficulty
-        # tem __str__ sobrescrito pelo Enum, entao passar o membro cru
-        # para o PromptTemplate (via .format()) ou embuti-lo numa
-        # f-string produziria "Difficulty.FACIL" em vez de "facil".
-        difficulty_value = difficulty.value
-
-        # A proporcao malicioso/legitimo compoe com a distribuicao de
-        # dificuldades ja existente (issue #3): dentro de cada
-        # dificuldade, `count` itens se dividem em malicioso/legitimo
-        # segundo malicious_ratio. round() aqui e suficiente -- ao
-        # contrario da distribuicao entre dificuldades, a issue nao
-        # exige uma regra de desempate especifica para esta divisao.
-        n_malicious = round(count * malicious_ratio)
-        n_legitimate = count - n_malicious
-        itens_do_nivel = [True] * n_malicious + [False] * n_legitimate
-
-        for is_malicious in itens_do_nivel:
-            try:
-                draft = await response_generator.generate_response(
-                    difficulty=difficulty_value,
-                    context=built.generation_context,
-                    relevant_docs=built.fused_context,
-                    is_malicious=is_malicious,
-                )
-                phishing_example = PhishingEmail(
-                    **draft.model_dump(),
-                    nivel=difficulty_value,
-                    is_malicious=is_malicious,
-                )
-                email_id = await phishing_service.create_email(phishing_example)
-                result = phishing_example.dict()
-                result["id"] = str(email_id)
-                results.append(result)
-            except Exception as e:
-                results.append(
-                    {"error": f"Falha ao gerar exemplo {difficulty_value}: {str(e)}"}
-                )
+    emails = await phishing_service.get_emails_by_ids(job.item_ids)
+    examples = []
+    for item_id, email in zip(job.item_ids, emails):
+        result = email.dict()
+        result["id"] = str(item_id)
+        examples.append(result)
 
     return {
-        "total_requested": total,
-        "total_generated": len(results),
-        "distribution": distribution,
-        "examples": results,
+        "job_id": str(job.id),
+        "status": job.status.value,
+        "total_requested": job.total,
+        "total_generated": job.total_generated,
+        "total_failed": job.total_failed,
+        "total_discarded": job.total_discarded,
+        "distribution": job.distribution,
+        "examples": examples,
+        "failures": [f.model_dump() for f in job.failures],
+        "error_message": job.error_message,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+        "completed_at": job.completed_at,
     }
 
 

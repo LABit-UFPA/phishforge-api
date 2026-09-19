@@ -43,6 +43,23 @@ class PhishingEmailRepository:
             row = await conn.fetchrow(query, email_id)
             return self._row_to_model(row) if row else None
 
+    async def get_by_ids(self, email_ids: List[UUID]) -> List[PhishingEmail]:
+        """Busca varios emails de uma vez, na MESMA ordem de
+        `email_ids` (issue #11b: o job de lote guarda uma lista
+        ordenada de ids, e o endpoint de status busca todos numa
+        query so, em vez de N chamadas a get_by_id).
+        """
+        if not email_ids:
+            return []
+        async with self.db.get_connection() as conn:
+            query = """
+                SELECT * FROM phishing_emails
+                WHERE id = ANY($1::uuid[])
+                ORDER BY array_position($1::uuid[], id)
+            """
+            rows = await conn.fetch(query, email_ids)
+            return [self._row_to_model(row) for row in rows]
+
     async def get_by_categoria(self, categoria: str, limit: int = 50) -> List[PhishingEmail]:
         async with self.db.get_connection() as conn:
             query = """

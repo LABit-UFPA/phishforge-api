@@ -1,9 +1,26 @@
-"""Contrato de POST /api/v1/generate/batch, com o pipeline substituido
-por fakes. Cobre a distribuicao entre dificuldades (que a #11 pede
-para preservar), a validacao de entrada e, agora, o contrato de
-dificuldade (#2) tambem no lote -- nao a paridade com o /generate nem
-a deduplicacao, que sao objeto da propria #11.
+"""Contrato de POST /api/v1/generate/batch e GET /generate/batch/{job_id}
+(issue #11b: lote virou assincrono), com o pipeline substituido por
+fakes. Cobre a distribuicao entre dificuldades (que a #11 pede para
+preservar), a validacao de entrada e o contrato de dificuldade (#2)
+tambem no lote. Paridade com /generate e reaproveitamento por lote sao
+objeto de test_generation_paridade.py; dedup e job assincrono "de
+verdade" (sem depender do transporte de teste rodar sincrono) sao
+objeto de test_batch_job.py.
 """
+
+from tests.unit._batch_helpers import post_batch_and_get_job
+
+
+async def test_post_aceita_com_202_e_job_pendente(client):
+    response = await client.post(
+        "/api/v1/generate/batch",
+        json={"context": "cobranca de fatura", "difficulties": ["facil"], "total": 1},
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "pendente"
+    assert body["job_id"]
 
 
 async def test_distribui_dificuldades_com_resto_nas_primeiras(client):
@@ -11,22 +28,22 @@ async def test_distribui_dificuldades_com_resto_nas_primeiras(client):
     o resto. E o comportamento que a issue #11 explicitamente pede
     para nao mexer.
     """
-    response = await client.post(
-        "/api/v1/generate/batch",
-        json={
+    job = await post_batch_and_get_job(
+        client,
+        {
             "context": "cobranca de fatura",
             "difficulties": ["facil", "medio", "dificil"],
             "total": 10,
         },
     )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["distribution"] == {"facil": 4, "medio": 3, "dificil": 3}
-    assert body["total_requested"] == 10
+    assert job["status"] == "concluido"
+    assert job["distribution"] == {"facil": 4, "medio": 3, "dificil": 3}
+    assert job["total_requested"] == 10
     # Criterio da #2: nenhum item com erro para dificuldades validas.
-    assert body["total_generated"] == 10
-    assert all("error" not in item for item in body["examples"])
+    assert job["total_generated"] == 10
+    assert job["total_failed"] == 0
+    assert job["failures"] == []
 
 
 async def test_sinonimo_em_ingles_no_lote_e_normalizado(client):
@@ -34,18 +51,12 @@ async def test_sinonimo_em_ingles_no_lote_e_normalizado(client):
     de `distribution` na resposta vem no canonico -- nao no sinonimo
     cru que foi enviado (issue #2).
     """
-    response = await client.post(
-        "/api/v1/generate/batch",
-        json={
-            "context": "cobranca de fatura",
-            "difficulties": ["easy", "hard"],
-            "total": 4,
-        },
+    job = await post_batch_and_get_job(
+        client,
+        {"context": "cobranca de fatura", "difficulties": ["easy", "hard"], "total": 4},
     )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["distribution"] == {"facil": 2, "dificil": 2}
+    assert job["distribution"] == {"facil": 2, "dificil": 2}
 
 
 async def test_dificuldade_invalida_no_lote_da_422(client):

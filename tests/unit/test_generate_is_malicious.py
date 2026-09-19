@@ -3,8 +3,12 @@
 A selecao da chain (phishing vs. legitima) dentro de ResponseGenerator
 tem seu proprio teste em test_response_generator_is_malicious.py, sem
 HTTP. Aqui o foco e o contrato do endpoint: o campo chega, e repassado
-corretamente e persiste com o valor certo.
+corretamente e persiste com o valor certo. Desde a issue #11b,
+/generate/batch responde 202 -- os testes do lote usam
+post_batch_and_get_job para chegar no resultado final.
 """
+
+from tests.unit._batch_helpers import post_batch_and_get_job
 
 
 async def test_generate_default_e_malicious_true(client):
@@ -39,14 +43,11 @@ async def test_lote_default_malicious_ratio_gera_so_phishing(client):
     """Retrocompatibilidade: lote sem malicious_ratio continua 100%
     phishing, como antes da #3.
     """
-    response = await client.post(
-        "/api/v1/generate/batch",
-        json={"context": "cobranca de fatura", "difficulties": ["facil"], "total": 4},
+    job = await post_batch_and_get_job(
+        client, {"context": "cobranca de fatura", "difficulties": ["facil"], "total": 4}
     )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert all(item["is_malicious"] is True for item in body["examples"])
+    assert all(item["is_malicious"] is True for item in job["examples"])
 
 
 async def test_lote_com_malicious_ratio_compoe_com_a_distribuicao(client):
@@ -54,9 +55,9 @@ async def test_lote_com_malicious_ratio_compoe_com_a_distribuicao(client):
     5 legitimos (issue #3: a proporcao compoe com a distribuicao de
     dificuldades ja existente, sem alterar o divmod entre dificuldades).
     """
-    response = await client.post(
-        "/api/v1/generate/batch",
-        json={
+    job = await post_batch_and_get_job(
+        client,
+        {
             "context": "cobranca de fatura",
             "difficulties": ["facil"],
             "total": 10,
@@ -64,12 +65,10 @@ async def test_lote_com_malicious_ratio_compoe_com_a_distribuicao(client):
         },
     )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["total_generated"] == 10
+    assert job["total_generated"] == 10
 
-    maliciosos = [item for item in body["examples"] if item["is_malicious"] is True]
-    legitimos = [item for item in body["examples"] if item["is_malicious"] is False]
+    maliciosos = [item for item in job["examples"] if item["is_malicious"] is True]
+    legitimos = [item for item in job["examples"] if item["is_malicious"] is False]
     assert len(maliciosos) == 5
     assert len(legitimos) == 5
 

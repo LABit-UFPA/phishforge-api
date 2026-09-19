@@ -2,6 +2,7 @@ from dependency_injector import containers, providers
 from qdrant_client import QdrantClient
 
 from app.core.config import settings
+from app.domain.services.batch_generation_worker import BatchGenerationWorker
 from app.domain.services.document_processor import DocumentProcessor
 from app.domain.services.generation_pipeline import GenerationPipeline
 from app.domain.services.openai.embedding_client import OpenAIEmbeddingClient
@@ -14,6 +15,7 @@ from app.domain.services.user_answer_evaluator import UserAnswerEvaluator
 from app.infra.database.connection import DatabaseConnection, get_db_pool
 from app.infra.database.repositories.analytics_repository import AnalyticsRepository
 from app.infra.database.repositories.evaluation_repository import EvaluationRepository
+from app.infra.database.repositories.generation_job_repository import GenerationJobRepository
 from app.infra.database.repositories.phishing_repository import PhishingEmailRepository
 from app.infra.qdrant.store import QdrantVectorStore
 
@@ -83,6 +85,13 @@ class Container(containers.DeclarativeContainer):
         db=db_connection
     )
 
+    # issue #11b: estado do job de lote assincrono, sobrevive a
+    # restart do processo porque vive no banco, nao em memoria.
+    generation_job_repository = providers.Factory(
+        GenerationJobRepository,
+        db=db_connection
+    )
+
     analytics_repository = providers.Factory(
         AnalyticsRepository,
         db=db_connection
@@ -141,6 +150,21 @@ class Container(containers.DeclarativeContainer):
         PhishingEmailService,
         repository=phishing_repository,
         analytics_repository=analytics_repository
+    )
+
+    # issue #11b: worker do lote assincrono. Factory (nao Singleton):
+    # nao guarda estado proprio entre execucoes, e cada resolucao ja
+    # usa os providers Singleton de baixo custo (response_generator,
+    # reranker, etc) por baixo -- nao ha modelo de ML sendo recarregado
+    # aqui.
+    batch_generation_worker = providers.Factory(
+        BatchGenerationWorker,
+        job_repository=generation_job_repository,
+        phishing_service=phishing_service,
+        pipeline=generation_pipeline,
+        response_generator=response_generator,
+        embedding_client=embedding_client_openai,
+        dedup_threshold=config.DEDUP_SIMILARITY_THRESHOLD,
     )
 
     pipeline = providers.Factory(
