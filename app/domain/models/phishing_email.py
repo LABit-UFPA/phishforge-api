@@ -1,21 +1,39 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
+from app.domain.models.channel import Channel
 from app.domain.models.cue import Cue
 from app.domain.models.phish_scale import PhishScale
 
 class PhishingEmail(BaseModel):
-    receptor: str
-    remetente: str
-    assunto: str
-    conteudo: str
+    # Optional desde a issue #6 (multicanal): so `channel=email`
+    # preenche estes quatro -- os outros canais (website/phone_call/
+    # pix_qr) usam `content_json`. O validador abaixo garante que
+    # exatamente um dos dois grupos vem preenchido, nunca os dois nem
+    # nenhum -- mesma regra do CHECK `ck_conteudo_por_canal` no banco.
+    receptor: Optional[str] = None
+    remetente: Optional[str] = None
+    assunto: Optional[str] = None
+    conteudo: Optional[str] = None
     explicacao: str
     nivel: str
     categoria: str
-    links: List[str]
+    links: List[str] = Field(default_factory=list)
+    # Canal do item (issue #6). Default EMAIL preserva o
+    # comportamento historico para quem constroi este modelo sem
+    # passar o campo -- todo item ate esta issue era email por
+    # construcao.
+    channel: Channel = Channel.EMAIL
+    # Conteudo dos canais NAO-email, shape variavel (ver
+    # app/domain/models/channel_content.py -- WebsiteContent,
+    # PhoneCallContent, PixQrContent). Guardado como dict solto aqui
+    # (nao um Union tipado) porque o tipo especifico ja foi validado
+    # uma vez no draft do LLM (ChannelItemDraft.content); recriar essa
+    # validacao aqui duplicaria a fonte de verdade do shape.
+    content_json: Optional[Dict[str, Any]] = None
     # Pistas anotadas pelo LLM na geracao, com codigo da taxonomia
     # compartilhada com o Go (issue #5). Passa direto de
     # GeneratedItemDraft, sem remapeamento -- e SAIDA do gerador, nao
@@ -49,3 +67,28 @@ class PhishingEmail(BaseModel):
     id: Optional[UUID] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+    @model_validator(mode="after")
+    def _conteudo_bate_com_o_canal(self) -> "PhishingEmail":
+        """Espelha `ck_conteudo_por_canal` (migration V20260919130000)
+        no nivel do modelo: falha na construcao do objeto Python, nao
+        so no INSERT -- um erro de shape aparece antes, mais perto de
+        onde foi cometido.
+        """
+        campos_email = (self.receptor, self.remetente, self.assunto, self.conteudo)
+        if self.channel == Channel.EMAIL:
+            if any(campo is None for campo in campos_email):
+                raise ValueError(
+                    "channel=email exige receptor/remetente/assunto/conteudo preenchidos."
+                )
+            if self.content_json is not None:
+                raise ValueError("channel=email nao deve ter content_json preenchido.")
+        else:
+            if self.content_json is None:
+                raise ValueError(f"channel={self.channel.value} exige content_json preenchido.")
+            if any(campo is not None for campo in campos_email):
+                raise ValueError(
+                    f"channel={self.channel.value} nao deve ter receptor/remetente/"
+                    "assunto/conteudo preenchidos -- use content_json."
+                )
+        return self

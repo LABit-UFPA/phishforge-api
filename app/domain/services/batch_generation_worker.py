@@ -1,7 +1,9 @@
+import json
 import logging
-from typing import List
+from typing import List, Optional
 from uuid import UUID
 
+from app.domain.models.channel import Channel
 from app.domain.models.generation_job import JobStatus
 from app.domain.models.phishing_email import PhishingEmail
 from app.domain.services.generation_pipeline import GenerationPipeline
@@ -25,6 +27,20 @@ def _cosine_similarity(a: List[float], b: List[float]) -> float:
     if norm_a == 0 or norm_b == 0:
         return 0.0
     return dot / (norm_a * norm_b)
+
+
+def _texto_para_embedding(channel: str, content_json: dict) -> str:
+    """Extrai o texto usado para o dedup por similaridade de cosseno
+    dos canais novos (issue #6) -- cada canal tem seu campo de texto
+    livre natural, exceto pix_qr, que nao tem nenhum (nao ha corpo de
+    mensagem num QR Code): usa o payload inteiro serializado, que
+    ainda detecta repeticao exata/quase-exata dentro do mesmo lote.
+    """
+    if channel == "website":
+        return content_json.get("visible_content", "")
+    if channel == "phone_call":
+        return content_json.get("transcript", "")
+    return json.dumps(content_json, sort_keys=True)
 
 
 class BatchGenerationWorker:
@@ -60,6 +76,7 @@ class BatchGenerationWorker:
         difficulties: List[str],
         total: int,
         malicious_ratio: float,
+        channel: str = "email",
     ) -> None:
         try:
             built = await self._pipeline.build_context(context)
@@ -95,21 +112,50 @@ class BatchGenerationWorker:
 
             for is_malicious in itens_do_nivel:
                 try:
-                    draft, embedding = await self._generate_com_dedup(
-                        difficulty_value=difficulty_value,
-                        is_malicious=is_malicious,
-                        generation_context=built.generation_context,
-                        fused_context=built.fused_context,
-                        accepted_embeddings=accepted_embeddings,
-                    )
-                    if draft is None:
+                    if channel == Channel.EMAIL.value:
+                        # Caminho intocado pela issue #6 -- o mesmo de
+                        # antes desta issue, byte a byte.
+                        draft, embedding = await self._generate_com_dedup(
+                            difficulty_value=difficulty_value,
+                            is_malicious=is_malicious,
+                            generation_context=built.generation_context,
+                            fused_context=built.fused_context,
+                            accepted_embeddings=accepted_embeddings,
+                        )
+                        phishing_example = (
+                            None
+                            if draft is None
+                            else PhishingEmail(
+                                **draft.model_dump(),
+                                nivel=difficulty_value,
+                                is_malicious=is_malicious,
+                            )
+                        )
+                    else:
+                        resultado, embedding = await self._generate_channel_com_dedup(
+                            channel=channel,
+                            difficulty_value=difficulty_value,
+                            is_malicious=is_malicious,
+                            generation_context=built.generation_context,
+                            fused_context=built.fused_context,
+                            accepted_embeddings=accepted_embeddings,
+                        )
+                        phishing_example = (
+                            None
+                            if resultado is None
+                            else PhishingEmail(
+                                channel=Channel(channel),
+                                content_json=resultado["content_json"],
+                                explicacao=resultado["explicacao"],
+                                categoria=resultado["categoria"],
+                                nivel=difficulty_value,
+                                is_malicious=is_malicious,
+                            )
+                        )
+
+                    if phishing_example is None:
                         total_discarded += 1
                     else:
-                        phishing_example = PhishingEmail(
-                            **draft.model_dump(),
-                            nivel=difficulty_value,
-                            is_malicious=is_malicious,
-                        )
                         item_id = await self._phishing_service.create_email(phishing_example)
                         item_ids.append(item_id)
                         accepted_embeddings.append(embedding)
@@ -174,5 +220,40 @@ class BatchGenerationWorker:
             )
             if maior_similaridade < self._dedup_threshold:
                 return draft, embedding
+
+        return None, None
+
+    async def _generate_channel_com_dedup(
+        self,
+        channel: str,
+        difficulty_value: str,
+        is_malicious: bool,
+        generation_context: str,
+        fused_context: str,
+        accepted_embeddings: List[List[float]],
+    ) -> tuple[Optional[dict], Optional[List[float]]]:
+        """Equivalente de `_generate_com_dedup` para os canais novos
+        (issue #6) -- mesma logica de retry/descarte, mas chamando
+        `generate_channel_item` e derivando o texto do embedding de
+        `content_json` via `_texto_para_embedding` (o campo de texto
+        livre varia por canal; email usa `draft.conteudo` diretamente).
+        """
+        for _tentativa in range(MAX_DEDUP_RETRIES + 1):
+            resultado = await self._response_generator.generate_channel_item(
+                channel=channel,
+                difficulty=difficulty_value,
+                context=generation_context,
+                relevant_docs=fused_context,
+                is_malicious=is_malicious,
+            )
+            embedding = self._embedding_client.embed(
+                _texto_para_embedding(channel, resultado["content_json"])
+            )
+            maior_similaridade = max(
+                (_cosine_similarity(embedding, e) for e in accepted_embeddings),
+                default=0.0,
+            )
+            if maior_similaridade < self._dedup_threshold:
+                return resultado, embedding
 
         return None, None

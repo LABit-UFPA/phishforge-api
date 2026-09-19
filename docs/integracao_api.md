@@ -77,6 +77,7 @@ Gera um único exemplo de email de phishing personalizado usando um pipeline RAG
 | `user_context` | string | Sim | Contexto/cenário para geração do item |
 | `difficulty` | string | Sim | Nível: `facil`, `medio` ou `dificil` (ver [Vocabulário de dificuldade](#vocabulário-de-dificuldade)) |
 | `is_malicious` | boolean | Não (default `true`) | `true` gera phishing; `false` gera item **legítimo** (comunicação real, sem pedido de credencial nem link malicioso -- necessário para medir taxa de falso alarme e d-prime) |
+| `channel` | string | Não (default `email`) | Canal do item -- ver [Canais suportados](#canais-suportados-channel) |
 
 **Response (200 OK):**
 
@@ -210,6 +211,53 @@ empírico de calibração):
 A soma dos dois pontos decide o resultado: **0–1 → `facil`**, **2–3 → `medio`**, **4 →
 `dificil`**.
 
+#### Canais suportados (`channel`)
+
+Além de email, a geração suporta mais 3 canais (issue #6). Cada canal tem seu próprio shape em
+`content_json` -- quando `channel` é diferente de `email`, os campos `receptor`/`remetente`/
+`assunto`/`conteudo` vêm `null` e o conteúdo real está em `content_json`.
+
+| `channel` | Shape de `content_json` |
+|-----------|--------------------------|
+| `email` (default) | *(usa os campos antigos, não `content_json`)* |
+| `website` | `{"url", "title", "visible_content"}` |
+| `phone_call` | `{"caller", "transcript"}` |
+| `pix_qr` | `{"payload", "recipient", "amount", "pix_key"}` -- `amount` é sempre **string** (ex.: `"149.90"`), nunca número |
+
+Exemplo de resposta para `channel: "pix_qr"`:
+
+```json
+{
+  "id": "...",
+  "receptor": null,
+  "remetente": null,
+  "assunto": null,
+  "conteudo": null,
+  "explicacao": "...",
+  "nivel": "dificil",
+  "categoria": "financeiro",
+  "channel": "pix_qr",
+  "content_json": {
+    "payload": "00020126...",
+    "recipient": "Loja Falsa LTDA",
+    "amount": "149.90",
+    "pix_key": "loja@golpe.com"
+  },
+  "cues": [],
+  "phish_scale": null,
+  "is_malicious": true
+}
+```
+
+**`sms` e `whatsapp` ainda não são suportados** -- pedir um dos dois devolve **422** explícito.
+Os dois exigem valor aninhado (`links`/`messages`, arrays de objetos) no `content_json` que o
+backend Go ainda não aceita (`item_draft_service.go::buildDraftContent` monta
+`map[string]string`) -- mesmo bloqueio que impede `links` estruturado em email (issue #5).
+
+`cues`/`phish_scale` ainda não existem para os 3 canais novos -- adaptar a taxonomia de pistas
+por canal é decisão de pesquisa (ex.: `sender_domain_mismatch` não se aplica a Pix), fora do
+escopo desta entrega.
+
 #### POST `/api/v1/generate/batch`
 
 Aceita um pedido de geração de múltiplos exemplos e processa **em background** (issue #11b). Um
@@ -235,6 +283,7 @@ progresso e o resultado final são obtidos por **polling** em `GET /api/v1/gener
 | `difficulties` | array | Sim | Lista de dificuldades desejadas, não pode ser vazia (ver [Vocabulário de dificuldade](#vocabulário-de-dificuldade)) |
 | `total` | integer | Não | Total de itens, entre 1 e 100 (padrão: 10) |
 | `malicious_ratio` | float (0.0-1.0) | Não (default `1.0`) | Proporção de itens maliciosos vs. legítimos. Compõe com `difficulties`: dentro de cada nível, a fração `malicious_ratio` do total daquele nível é gerada como phishing e o restante como item legítimo |
+| `channel` | string | Não (default `email`) | Canal do lote **inteiro** (não misto) -- ver [Canais suportados](#canais-suportados-channel) |
 
 **Response (202 Accepted):**
 
@@ -256,6 +305,7 @@ cliente deve fazer polling neste endpoint até `status` chegar num valor termina
 {
   "job_id": "9b458e37-be38-4487-8bc1-c8e30c1170ba",
   "status": "concluido",
+  "channel": "email",
   "total_requested": 9,
   "total_generated": 9,
   "total_failed": 0,

@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from app.core.config import settings
 from app.core.container import Container
 from app.core.security import limiter
+from app.domain.models.channel import GENERATION_SUPORTADOS, Channel
 from app.domain.models.phishing_email import PhishingEmail
 from app.domain.services.batch_generation_worker import BatchGenerationWorker
 from app.domain.services.generation_pipeline import GenerationPipeline
@@ -24,6 +25,26 @@ from app.dto.responses import UserAnswerEvaluationResponse
 from app.infra.database.repositories.generation_job_repository import GenerationJobRepository
 
 app = APIRouter()
+
+
+def _validar_canal_suportado(channel: Channel) -> None:
+    """sms/whatsapp existem no vocabulario (CHECK do banco, enum
+    Channel) para bater com o backend Go, mas a geracao ainda nao sabe
+    produzi-los -- o shape de ambos exige valor aninhado
+    (`messages`/`links`) que o Go so aceita depois de frouxar
+    `buildDraftContent` (issue #6, mesmo bloqueio da #5). Rejeitar aqui
+    com 422 explicito e melhor que aceitar e falhar de forma obscura
+    dentro do gerador.
+    """
+    if channel not in GENERATION_SUPORTADOS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"canal '{channel.value}' ainda nao suportado pela geracao -- "
+                f"bloqueado do lado do backend Go (issue #6). Canais disponiveis: "
+                f"{sorted(c.value for c in GENERATION_SUPORTADOS)}."
+            ),
+        )
 
 
 @app.post("/api/v1/generate")
@@ -47,7 +68,15 @@ async def generate(
     com esse nome exato, para identificar o IP de quem chama e aplicar
     `GENERATION_RATE_LIMIT`. O corpo da requisicao passou a se chamar
     `payload` para nao colidir.
+
+    `payload.channel` (issue #6): default `email` preserva o
+    comportamento historico -- o caminho abaixo para email e o MESMO
+    de antes desta issue, byte a byte. Canais novos (website/
+    phone_call/pix_qr) entram num ramo separado, que nao usa `cues`
+    nem `phish_scale` (fora do escopo desta entrega).
     """
+    _validar_canal_suportado(payload.channel)
+
     # 1-5. Normalizacao, HyDE, retrieve, rerank e fusao -- ver
     # GenerationPipeline. Extraido nesta issue (#11a) porque a mesma
     # sequencia, escrita a mao aqui dentro, era exatamente o que
@@ -66,7 +95,37 @@ async def generate(
             status_code=500, detail=f"Error building context: {str(e)}"
         )
 
-    # 6. Geração Final
+    if payload.channel != Channel.EMAIL:
+        # Issue #6: canais novos nao tem cues/phish_scale, e o draft e
+        # um schema proprio por canal (WebsiteItemDraft, etc.) -- ver
+        # ResponseGenerator.generate_channel_item.
+        try:
+            resultado = await response_generator.generate_channel_item(
+                channel=payload.channel.value,
+                difficulty=payload.difficulty.value,
+                context=built.generation_context,
+                relevant_docs=built.fused_context,
+                is_malicious=payload.is_malicious,
+            )
+            phishing_example = PhishingEmail(
+                channel=payload.channel,
+                content_json=resultado["content_json"],
+                explicacao=resultado["explicacao"],
+                categoria=resultado["categoria"],
+                nivel=payload.difficulty.value,
+                is_malicious=payload.is_malicious,
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=500, detail=f"Error generating response: {str(e)}"
+            )
+
+        email_id = await phishing_service.create_email(phishing_example)
+        result = phishing_example.dict()
+        result["id"] = str(email_id)
+        return result
+
+    # 6. Geração Final (canal email -- caminho intocado pela issue #6)
     #
     # payload.difficulty ja foi validado e normalizado pelo Pydantic
     # (QueryRequest.difficulty: Difficulty -- ver issue #2). Usamos
@@ -137,7 +196,12 @@ async def generate_batch(
     `request: Request` (issue #7): mesmo motivo do `/generate` -- o
     slowapi precisa do parametro para aplicar `GENERATION_RATE_LIMIT`
     por IP. O corpo passou a se chamar `payload`.
+
+    `payload.channel` (issue #6): um lote inteiro e de um unico canal
+    -- default `email` preserva o comportamento historico.
     """
+    _validar_canal_suportado(payload.channel)
+
     difficulties_values = [d.value for d in payload.difficulties]
 
     job_id = await job_repository.create(
@@ -145,6 +209,7 @@ async def generate_batch(
         difficulties=difficulties_values,
         total=payload.total,
         malicious_ratio=payload.malicious_ratio,
+        channel=payload.channel.value,
     )
 
     background_tasks.add_task(
@@ -154,6 +219,7 @@ async def generate_batch(
         difficulties=difficulties_values,
         total=payload.total,
         malicious_ratio=payload.malicious_ratio,
+        channel=payload.channel.value,
     )
 
     return JSONResponse(
@@ -195,6 +261,7 @@ async def get_batch_job(
     return {
         "job_id": str(job.id),
         "status": job.status.value,
+        "channel": job.channel.value,
         "total_requested": job.total,
         "total_generated": job.total_generated,
         "total_failed": job.total_failed,

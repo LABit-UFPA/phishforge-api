@@ -2,6 +2,7 @@ from typing import List
 
 from pydantic import BaseModel, Field
 
+from app.domain.models.channel import Channel
 from app.domain.models.difficulty import Difficulty
 
 
@@ -28,6 +29,9 @@ class BatchGenerationRequest(BaseModel):
         le=1.0,
         description="Proporção de itens maliciosos (1.0 = todos phishing, 0.0 = todos legítimos)",
     )
+    # Issue #6: um canal por lote (nao misto) -- mesmo escopo do
+    # endpoint unico. Default EMAIL preserva o comportamento historico.
+    channel: Channel = Channel.EMAIL
 
 
 class EmailSearchRequest(BaseModel):

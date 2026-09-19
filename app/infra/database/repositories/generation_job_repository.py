@@ -19,16 +19,21 @@ class GenerationJobRepository:
         self.db = db
 
     async def create(
-        self, context: str, difficulties: List[str], total: int, malicious_ratio: float
+        self,
+        context: str,
+        difficulties: List[str],
+        total: int,
+        malicious_ratio: float,
+        channel: str = "email",
     ) -> UUID:
         async with self.db.get_connection() as conn:
             query = """
-                INSERT INTO generation_jobs (context, difficulties, total, malicious_ratio)
-                VALUES ($1, $2, $3, $4)
+                INSERT INTO generation_jobs (context, difficulties, total, malicious_ratio, channel)
+                VALUES ($1, $2, $3, $4, $5)
                 RETURNING id
             """
             return await conn.fetchval(
-                query, context, json.dumps(difficulties), total, malicious_ratio
+                query, context, json.dumps(difficulties), total, malicious_ratio, channel
             )
 
     async def get_by_id(self, job_id: UUID) -> Optional[GenerationJob]:
@@ -96,6 +101,7 @@ class GenerationJobRepository:
             difficulties=json.loads(row["difficulties"]),
             total=row["total"],
             malicious_ratio=row["malicious_ratio"],
+            channel=row["channel"],
             distribution=json.loads(row["distribution"]) if row["distribution"] else None,
             total_generated=row["total_generated"],
             total_failed=row["total_failed"],
