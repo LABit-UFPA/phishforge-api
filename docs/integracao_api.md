@@ -568,6 +568,33 @@ demais rotas.
 Ordenadas por `category` e depois por `code`. Uma pista com `ativo = false` não aparece aqui,
 mas continua válida para o histórico que a referencia (`email_cues`).
 
+### 2.6 Módulo de avaliação por especialistas (sessão e consentimento)
+
+Rotas usadas por um **especialista no navegador**. Ficam num roteador separado e **não** exigem a
+`X-API-Key` do backend Go (essa chave é servidor-a-servidor e nunca deve chegar a um navegador):
+autenticam-se por um **JWT de sessão** (`Authorization: Bearer <token>`, HS256, 12h, sem refresh).
+
+| Método / Path | Auth | Resumo |
+|---|---|---|
+| `POST /api/v1/expert/session` | — | `{codigo_acesso}` → `{token, expires_at, especialista, rodada, consentimento, perfil, progresso}` |
+| `GET /api/v1/expert/me` | Bearer | Mesmo corpo, sem `token` |
+| `GET /api/v1/expert/tcle` | Bearer | `{versao, texto_md}` |
+| `POST /api/v1/expert/consentimento` | Bearer | `{versao, aceito}` — 422 se `aceito=false`, 409 se `versao` não for a vigente |
+| `POST /api/v1/expert/perfil` | Bearer | `{anos_experiencia, area_atuacao, formacao}` |
+| `POST /api/v1/expert/revogacao` | Bearer | Autoatendimento LGPD; idempotente, vale imediatamente |
+
+- O **código de acesso** (`XXXX-XXXX-XXXX-XXXX`, sem caracteres ambíguos) é entregue em claro uma única
+  vez, ao ser criado; só o SHA-256 fica gravado. Maiúsculas/minúsculas e traços são ignorados.
+- `401` tem a **mesma** mensagem para código inexistente, revogado, token inválido e expirado.
+- `409`: especialista sem rodada, ou rodada que não está `aberta`.
+- `503` em **todas** as rotas se `EXPERT_JWT_SECRET` estiver vazio (fail-closed: não existe segredo
+  default). O console do pesquisador usa `X-API-Key` contra `RESEARCHER_API_KEY`, **distinta** de `API_KEY`.
+- `consentimento.necessario` volta a `true` quando o TCLE muda de versão no meio da coleta.
+- `progresso` é `{total, concluidas: 0, proxima_ordem: 1}` até a issue #37 introduzir as avaliações.
+
+Variáveis: `EXPERT_JWT_SECRET`, `EXPERT_JWT_EXPIRES_HOURS` (12), `RESEARCHER_API_KEY`,
+`EXPERT_FRONTEND_URL` — ver `.env.example`.
+
 ### 3. Listagem de Emails
 
 #### GET `/api/v1/emails`

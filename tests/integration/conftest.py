@@ -25,6 +25,8 @@ from dependency_injector import providers
 import main as main_module
 from app.infra.database.connection import DatabaseConnection
 from app.infra.database.repositories.cue_repository import CueRepository
+from app.infra.database.repositories.evaluation_round_repository import EvaluationRoundRepository
+from app.infra.database.repositories.expert_repository import ExpertRepository
 from app.infra.database.repositories.generation_job_repository import GenerationJobRepository
 from app.infra.database.repositories.phishing_repository import PhishingEmailRepository
 from tests.fakes import (
@@ -67,8 +69,44 @@ async def cue_repository(db_connection):
 
 
 @pytest_asyncio.fixture
+async def expert_repository(db_connection):
+    return ExpertRepository(db=db_connection)
+
+
+@pytest_asyncio.fixture
+async def evaluation_round_repository(db_connection):
+    return EvaluationRoundRepository(db=db_connection)
+
+
+@pytest_asyncio.fixture
 async def generation_job_repository(db_connection):
     return GenerationJobRepository(db=db_connection)
+
+
+TEST_EXPERT_JWT_SECRET = "segredo-jwt-de-teste-de-integracao-nao-usado-em-producao"
+
+
+@pytest_asyncio.fixture
+async def expert_client_real():
+    """App com repositorios REAIS (Postgres) e o servico de auth com um
+    segredo de teste, SEM `X-API-Key`: exercita o modulo de especialistas
+    (issue #36) de ponta a ponta, inclusive a checagem de `revogado_em`
+    no banco a cada request.
+    """
+    from app.domain.services.expert_auth_service import ExpertAuthService
+
+    app = main_module.create_app()
+    conexao = nova_conexao_real()
+    app.container.db_connection.override(providers.Object(conexao))
+    app.container.expert_auth_service.override(
+        providers.Object(ExpertAuthService(TEST_EXPERT_JWT_SECRET, expires_hours=12))
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+    await conexao.close_pool()
 
 
 def nova_conexao_real() -> DatabaseConnection:

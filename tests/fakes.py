@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from app.domain.models.cue import CueCode, CueTaxonomyEntry
+from app.domain.models.evaluation_round import AvaliacaoRodada
+from app.domain.models.expert import Especialista
 from app.domain.models.generated_item_draft import GeneratedItemDraft
 from app.domain.models.generation_job import GenerationFailure, GenerationJob, JobStatus
 from app.domain.models.phishing_email import PhishingEmail
@@ -417,6 +419,89 @@ class FakeCueRepository:
     async def get_all_ativas(self):
         self.calls.append("get_all_ativas")
         return [e for e in self.entries if e.ativo]
+
+
+class FakeExpertRepository:
+    """Especialistas em memoria (issue #36). Guarda o hash do codigo a
+    parte do modelo, como o repositorio real: `Especialista` nunca o
+    carrega.
+    """
+
+    def __init__(self):
+        self.storage: dict = {}
+        self._por_hash: dict = {}
+
+    def adicionar(self, codigo_hash: str, **campos) -> Especialista:
+        """Atalho de teste (o repositorio real usa `create`)."""
+        esp = Especialista(
+            id=uuid4(),
+            nome=campos.pop("nome", "Ana"),
+            sobrenome=campos.pop("sobrenome", "Souza"),
+            email=campos.pop("email", f"{uuid4()}@example.com"),
+            codigo_prefixo=campos.pop("codigo_prefixo", "TEST"),
+            **campos,
+        )
+        self.storage[esp.id] = esp
+        self._por_hash[codigo_hash] = esp.id
+        return esp
+
+    async def create(self, nome, sobrenome, email, codigo_hash, codigo_prefixo, rodada_id=None, papel="especialista"):
+        return self.adicionar(
+            codigo_hash, nome=nome, sobrenome=sobrenome, email=email,
+            codigo_prefixo=codigo_prefixo, rodada_id=rodada_id, papel=papel,
+        )
+
+    async def get_by_id(self, especialista_id):
+        return self.storage.get(especialista_id)
+
+    async def get_by_codigo_hash(self, codigo_hash):
+        esp_id = self._por_hash.get(codigo_hash)
+        return self.storage.get(esp_id) if esp_id else None
+
+    async def registrar_acesso(self, especialista_id):
+        self.storage[especialista_id].ultimo_acesso_em = datetime.now(timezone.utc)
+
+    async def registrar_consentimento(self, especialista_id, versao):
+        esp = self.storage[especialista_id]
+        esp.consentimento_versao = versao
+        esp.consentimento_em = datetime.now(timezone.utc)
+
+    async def registrar_perfil(self, especialista_id, perfil):
+        esp = self.storage[especialista_id]
+        esp.perfil_json = perfil
+        esp.perfil_em = datetime.now(timezone.utc)
+
+    async def revogar(self, especialista_id):
+        esp = self.storage[especialista_id]
+        if esp.revogado_em is None:
+            esp.revogado_em = datetime.now(timezone.utc)
+        return esp.revogado_em
+
+
+class FakeEvaluationRoundRepository:
+    """Rodadas em memoria (issue #36)."""
+
+    def __init__(self):
+        self.storage: dict = {}
+        self.itens: dict = {}
+
+    async def create(self, nome, tcle_versao, tcle_texto_md, descricao=None, status="rascunho"):
+        rodada = AvaliacaoRodada(
+            id=uuid4(), nome=nome, descricao=descricao, status=status,
+            tcle_versao=tcle_versao, tcle_texto_md=tcle_texto_md,
+        )
+        self.storage[rodada.id] = rodada
+        self.itens[rodada.id] = []
+        return rodada
+
+    async def get_by_id(self, rodada_id):
+        return self.storage.get(rodada_id)
+
+    async def adicionar_item(self, rodada_id, email_id, ordem_canonica):
+        self.itens[rodada_id].append((email_id, ordem_canonica))
+
+    async def contar_itens(self, rodada_id):
+        return len(self.itens.get(rodada_id, []))
 
 
 class FakeGenerationJobRepository:
