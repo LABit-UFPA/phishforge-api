@@ -23,6 +23,7 @@ from app.infra.database.repositories.expert_evaluation_repository import ExpertE
 from app.infra.database.repositories.expert_repository import ExpertRepository
 from app.infra.database.repositories.generation_job_repository import GenerationJobRepository
 from app.infra.database.repositories.phishing_repository import PhishingEmailRepository
+from app.infra.database.repositories.researcher_repository import ResearcherRepository
 from app.infra.qdrant.store import QdrantVectorStore
 
 
@@ -133,6 +134,12 @@ class Container(containers.DeclarativeContainer):
         ExpertAuthService,
         jwt_secret=config.EXPERT_JWT_SECRET,
         expires_hours=config.EXPERT_JWT_EXPIRES_HOURS,
+    )
+
+    # issue #38: console do pesquisador (rodadas, especialistas, export).
+    researcher_repository = providers.Factory(
+        ResearcherRepository,
+        db=db_connection
     )
 
     analytics_repository = providers.Factory(

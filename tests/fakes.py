@@ -511,6 +511,78 @@ class FakeEvaluationRoundRepository:
         return len(self.itens.get(rodada_id, []))
 
 
+class FakeResearcherRepository:
+    """Repositorio do console do pesquisador em memoria (issue #38).
+
+    As regras de negocio reais (congelamento, contagem esperada, filtros
+    de revogado) vivem no SQL e sao cobertas em tests/integration; aqui
+    o objetivo e exercitar HTTP, auth e serializacao com dados canned.
+    """
+
+    def __init__(self, rounds):
+        self.rounds = rounds
+        self.datasets: dict = {"avaliacoes": [], "anotacoes": [], "itens": [], "especialistas": []}
+        self.especialistas_listados: list = []
+        self.recodificados: list = []
+        self.pii_pedida: list = []
+
+    async def substituir_itens(self, rodada_id, email_ids):
+        from app.infra.database.repositories.researcher_repository import RodadaNaoEditavel, RodadaNaoEncontrada
+
+        rodada = self.rounds.storage.get(rodada_id)
+        if rodada is None:
+            raise RodadaNaoEncontrada()
+        if rodada.status != "rascunho":
+            raise RodadaNaoEditavel(rodada.status)
+        self.rounds.itens[rodada_id] = [(e, i) for i, e in enumerate(email_ids, start=1)]
+        return {"facil": len(email_ids), "medio": 0, "dificil": 0}
+
+    async def transicionar(self, rodada_id, de, para, itens_esperados=None):
+        from app.infra.database.repositories.researcher_repository import (
+            ItensInvalidos, RodadaNaoEncontrada, TransicaoInvalida,
+        )
+
+        rodada = self.rounds.storage.get(rodada_id)
+        if rodada is None:
+            raise RodadaNaoEncontrada()
+        if rodada.status != de:
+            raise TransicaoInvalida(rodada.status)
+        if itens_esperados is not None and len(self.rounds.itens[rodada_id]) != itens_esperados:
+            raise ItensInvalidos("itens diferentes do esperado")
+        rodada.status = para
+        return rodada
+
+    async def listar_rodadas(self):
+        return [
+            {"id": r.id, "nome": r.nome, "descricao": r.descricao, "status": r.status,
+             "tcle_versao": r.tcle_versao, "created_at": None, "total_itens": len(self.rounds.itens[r.id])}
+            for r in self.rounds.storage.values()
+        ]
+
+    async def ids_dos_itens(self, rodada_id):
+        return [e for e, _ in sorted(self.rounds.itens[rodada_id], key=lambda t: t[1])]
+
+    async def recodificar(self, especialista_id, codigo_hash, codigo_prefixo):
+        self.recodificados.append((especialista_id, codigo_hash, codigo_prefixo))
+        return True
+
+    async def listar_especialistas(self, rodada_id):
+        return self.especialistas_listados
+
+    async def dataset_avaliacoes(self, rodada_id):
+        return self.datasets["avaliacoes"]
+
+    async def dataset_anotacoes(self, rodada_id):
+        return self.datasets["anotacoes"]
+
+    async def dataset_itens(self, rodada_id):
+        return self.datasets["itens"]
+
+    async def dataset_especialistas(self, rodada_id, incluir_pii):
+        self.pii_pedida.append(incluir_pii)
+        return self.datasets["especialistas"]
+
+
 class FakeExpertEvaluationRepository:
     """Avaliacoes em memoria (issue #37). Como o repositorio real, so
     conhece o `ConteudoParaAvaliar` do item -- nunca o rotulo.

@@ -85,6 +85,11 @@ class Settings(BaseSettings):
     # (`{EXPERT_FRONTEND_URL}/avaliacao/entrar?codigo=...`).
     EXPERT_FRONTEND_URL: str = "http://localhost:5173"
 
+    # Quantos itens uma rodada precisa ter vinculados para poder ser
+    # aberta (composicao 10/10/10 do plano de validacao). Rodadas piloto
+    # menores baixam este valor no .env.
+    RODADA_ITENS_ESPERADOS: int = 30
+
     class Config:
         env_file = ".env"
 
