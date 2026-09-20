@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends
-from app.api.v1.endpoints import expert, generator
+from app.api.v1.endpoints import expert, generator, researcher
 from app.core.security import require_api_key
 
 router = APIRouter()
@@ -16,3 +16,8 @@ router.include_router(generator.app, dependencies=[Depends(require_api_key)])
 # Estas rotas se autenticam por JWT proprio (require_expert) -- ver
 # app/api/v1/endpoints/deps.py.
 router.include_router(expert.router)
+
+# Console do pesquisador (issue #38): terceiro roteador, autenticado so por
+# `require_researcher` (declarado no proprio roteador) -- nem a chave do
+# Go nem o JWT do especialista valem aqui.
+router.include_router(researcher.router)

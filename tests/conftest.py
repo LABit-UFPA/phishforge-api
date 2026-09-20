@@ -56,6 +56,7 @@ from tests.fakes import (
     FakePhishingService,
     FakePromptNormalizer,
     FakeReRanker,
+    FakeResearcherRepository,
     FakeResponseGenerator,
     FakeUserAnswerEvaluator,
     FakeVectorStore,
@@ -73,6 +74,7 @@ def _build_app_with_fakes():
     container = app.container
 
     cue_repository = FakeCueRepository()
+    round_repository = FakeEvaluationRoundRepository()
     fakes = {
         "db_connection": FakeDbConnection(),
         "prompt_normalizer": FakePromptNormalizer(),
@@ -93,7 +95,8 @@ def _build_app_with_fakes():
         # issue #36: modulo de avaliacao por especialistas. O servico de
         # auth ganha um segredo de teste (em producao nao ha default).
         "expert_repository": FakeExpertRepository(),
-        "evaluation_round_repository": FakeEvaluationRoundRepository(),
+        "evaluation_round_repository": round_repository,
+        "researcher_repository": FakeResearcherRepository(round_repository),
         "expert_auth_service": ExpertAuthService(TEST_EXPERT_JWT_SECRET, expires_hours=12),
         # issue #11b: BatchGenerationWorker usa embedding_client_openai
         # (real, chamaria a OpenAI de verdade) so para a dedup por

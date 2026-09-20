@@ -635,6 +635,30 @@ id do item: o id não sai do servidor. Sem consentimento na versão vigente do T
 `DELETE /api/v1/emails/{id}` responde `409` (em vez do erro cru do driver) para um item que já está numa
 rodada de avaliação, e `404` (antes virava `500`) para um item inexistente.
 
+### 2.7 Console do pesquisador (rodadas, especialistas e export)
+
+Rotas sob `/api/v1/researcher`, autenticadas **somente** por `X-API-Key` contra
+`RESEARCHER_API_KEY` (chave distinta de `API_KEY`, a do backend Go, e do JWT do
+especialista). Sem a chave, 401; chave não configurada no servidor, 503.
+
+| Método / Path | Resumo |
+|---|---|
+| `POST /rodadas` | `{nome, descricao?, tcle_versao, tcle_texto_md}` → 201 |
+| `PUT /rodadas/{id}/itens` | `{email_ids}` (a ordem vira `ordem_canonica`) → `{total, distribuicao:{facil,medio,dificil}}`. 409 se a rodada não está em `rascunho`; 422 se algum item não existe ou não é do canal `email` |
+| `POST /rodadas/{id}/abrir` | `rascunho → aberta`. 409 se a quantidade de itens vinculados difere de `RODADA_ITENS_ESPERADOS` (padrão 30) |
+| `POST /rodadas/{id}/encerrar` | `aberta → encerrada` |
+| `POST /especialistas` | `{nome, sobrenome, email, rodada_id}` → 201 `{id, codigo_acesso, link}`. O código em claro só aparece aqui e em `recodificar`. 409 se o e-mail já existe ou a rodada está encerrada |
+| `POST /especialistas/{id}/recodificar` | invalida o código anterior e emite um novo |
+| `GET /especialistas?rodada_id=` | progresso `concluidas/total`, consentimento, último acesso |
+| `GET /rodadas/{id}/resumo` | matriz de confusão 3×3 (`nivel_sistema` × `dificuldade_percebida`), `concordancia_bruta`, `qualidade_media`, frequência de pistas (e quantas também estavam no `cues[]` do LLM). Não calcula κ |
+| `GET /rodadas/{id}/export?dataset=&format=csv\|json&incluir_pii=` | datasets `avaliacoes`, `anotacoes`, `itens`, `especialistas` |
+
+Regras do export:
+- Só entram avaliações `concluida` de especialistas **não revogados**, em todos os datasets.
+- CSV em UTF-8 **com BOM** (Excel pt-BR) e células de texto que começam com `= + - @` recebem um `'` na frente (CSV injection); o JSON sai intacto.
+- `especialistas` é pseudonimizado (só `especialista_id`, perfil e progresso). `incluir_pii=true` (apenas nesse dataset) traz `nome`, `sobrenome`, `email` e gera a linha de log `EXPORT_PII rodada=… dataset=… origem=…` no logger `app.audit`.
+- `especialista_id` é o pseudônimo que liga os datasets entre si; `item_id` liga `avaliacoes`, `anotacoes` e `itens`.
+
 ### 3. Listagem de Emails
 
 #### GET `/api/v1/emails`

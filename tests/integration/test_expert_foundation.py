@@ -89,10 +89,11 @@ async def test_rodada_com_status_invalido_e_rejeitada(evaluation_round_repositor
 
 async def test_email_de_especialista_e_unico(expert_repository):
     email = f"{uuid4()}@example.com"
-    await expert_repository.create("A", "B", email, "1" * 64, "AAAA")
+    # hashes unicos por execucao: o banco pode ser reaproveitado entre rodadas
+    await expert_repository.create("A", "B", email, uuid4().hex * 2, "AAAA")
 
     with pytest.raises(asyncpg.UniqueViolationError):
-        await expert_repository.create("C", "D", email, "2" * 64, "BBBB")
+        await expert_repository.create("C", "D", email, uuid4().hex * 2, "BBBB")
 
 
 async def test_fluxo_completo_pela_api_e_revogacao_imediata(
