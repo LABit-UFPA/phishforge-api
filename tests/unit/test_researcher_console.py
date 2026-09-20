@@ -28,6 +28,8 @@ def _rotas(rodada_id, esp_id):
          {"nome": "a", "sobrenome": "b", "email": "a@b.co", "rodada_id": str(rodada_id)}),
         ("post", f"/api/v1/researcher/especialistas/{esp_id}/recodificar", None),
         ("get", "/api/v1/researcher/especialistas", None),
+        ("get", "/api/v1/researcher/rodadas", None),
+        ("get", f"/api/v1/researcher/rodadas/{rodada_id}", None),
         ("get", f"/api/v1/researcher/rodadas/{rodada_id}/resumo", None),
         ("get", f"/api/v1/researcher/rodadas/{rodada_id}/export?dataset=avaliacoes", None),
     ]
@@ -286,3 +288,22 @@ async def test_resumo_vazio_nao_quebra(expert_client, fakes):
     rodada = await _rodada(fakes)
     j = (await expert_client.get(f"/api/v1/researcher/rodadas/{rodada.id}/resumo", headers=H)).json()
     assert j["total_avaliacoes"] == 0 and j["concordancia_bruta"] is None and j["qualidade_media"] is None
+
+
+async def test_listar_e_obter_rodada_mostram_status_e_itens(expert_client, fakes, monkeypatch):
+    monkeypatch.setattr("app.api.v1.endpoints.researcher.settings.RODADA_ITENS_ESPERADOS", 2)
+    rid = (await expert_client.post(
+        "/api/v1/researcher/rodadas", headers=H,
+        json={"nome": "Piloto", "tcle_versao": "v1", "tcle_texto_md": "TCLE SECRETO LONGO"},
+    )).json()["id"]
+    a, b = str(uuid4()), str(uuid4())
+    await expert_client.put(f"/api/v1/researcher/rodadas/{rid}/itens", json={"email_ids": [b, a]}, headers=H)
+    await expert_client.post(f"/api/v1/researcher/rodadas/{rid}/abrir", headers=H)
+
+    lista = (await expert_client.get("/api/v1/researcher/rodadas", headers=H)).json()
+    assert lista[0]["status"] == "aberta" and lista[0]["total_itens"] == 2
+    assert "TCLE SECRETO" not in str(lista)
+
+    det = (await expert_client.get(f"/api/v1/researcher/rodadas/{rid}", headers=H)).json()
+    assert det["email_ids"] == [b, a] and det["total_itens"] == 2 and det["status"] == "aberta"
+    assert (await expert_client.get(f"/api/v1/researcher/rodadas/{uuid4()}", headers=H)).status_code == 404

@@ -552,6 +552,16 @@ class FakeResearcherRepository:
         rodada.status = para
         return rodada
 
+    async def listar_rodadas(self):
+        return [
+            {"id": r.id, "nome": r.nome, "descricao": r.descricao, "status": r.status,
+             "tcle_versao": r.tcle_versao, "created_at": None, "total_itens": len(self.rounds.itens[r.id])}
+            for r in self.rounds.storage.values()
+        ]
+
+    async def ids_dos_itens(self, rodada_id):
+        return [e for e, _ in sorted(self.rounds.itens[rodada_id], key=lambda t: t[1])]
+
     async def recodificar(self, especialista_id, codigo_hash, codigo_prefixo):
         self.recodificados.append((especialista_id, codigo_hash, codigo_prefixo))
         return True

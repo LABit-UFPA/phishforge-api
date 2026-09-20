@@ -87,6 +87,10 @@ async def test_fluxo_completo_do_pesquisador(expert_client_real, phishing_reposi
     ids = await _criar_itens(phishing_repository)
     rid = await _rodada_aberta(c, ids)
 
+    det = (await c.get(f"/api/v1/researcher/rodadas/{rid}", headers=H)).json()
+    assert det["email_ids"] == [str(i) for i in ids] and det["status"] == "aberta"
+    assert next(r for r in (await c.get("/api/v1/researcher/rodadas", headers=H)).json() if r["id"] == rid)["total_itens"] == 3
+
     # composicao congelada depois de aberta
     r = await c.put(f"/api/v1/researcher/rodadas/{rid}/itens", headers=H, json={"email_ids": [str(ids[0])]})
     assert r.status_code == 409

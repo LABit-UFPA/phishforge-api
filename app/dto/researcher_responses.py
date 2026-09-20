@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -12,6 +12,12 @@ class RodadaResponse(BaseModel):
     status: str
     tcle_versao: str
     created_at: Optional[datetime] = None
+    total_itens: int = 0
+
+
+class RodadaDetalheResponse(RodadaResponse):
+    # Na ordem canonica; o front usa para pre-selecionar os itens.
+    email_ids: List[UUID] = []
 
 
 class RodadaItensResponse(BaseModel):

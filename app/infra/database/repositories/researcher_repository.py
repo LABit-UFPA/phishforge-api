@@ -83,6 +83,28 @@ class ResearcherRepository:
             distribuicao[por_id[email_id]["nivel"]] += 1
         return distribuicao
 
+    async def listar_rodadas(self) -> List[Dict[str, Any]]:
+        async with self.db.get_connection() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT r.id, r.nome, r.descricao, r.status, r.tcle_versao, r.created_at,
+                       COUNT(ri.id) AS total_itens
+                FROM avaliacao_rodadas r
+                LEFT JOIN avaliacao_rodada_itens ri ON ri.rodada_id = r.id
+                GROUP BY r.id
+                ORDER BY r.created_at DESC, r.id
+                """
+            )
+        return [dict(r) for r in rows]
+
+    async def ids_dos_itens(self, rodada_id: UUID) -> List[UUID]:
+        async with self.db.get_connection() as conn:
+            rows = await conn.fetch(
+                "SELECT email_id FROM avaliacao_rodada_itens WHERE rodada_id = $1 ORDER BY ordem_canonica",
+                rodada_id,
+            )
+        return [r["email_id"] for r in rows]
+
     async def transicionar(
         self, rodada_id: UUID, de: str, para: str, itens_esperados: Optional[int] = None
     ) -> AvaliacaoRodada:

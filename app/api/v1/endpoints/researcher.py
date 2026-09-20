@@ -20,6 +20,7 @@ from app.dto.researcher_requests import (
 from app.dto.researcher_responses import (
     EspecialistaCriadoResponse,
     EspecialistaLinha,
+    RodadaDetalheResponse,
     ResumoResponse,
     RodadaItensResponse,
     RodadaResponse,
@@ -75,6 +76,28 @@ async def criar_rodada(
         tcle_versao=body.tcle_versao, tcle_texto_md=body.tcle_texto_md,
     )
     return _rodada_response(rodada)
+
+
+@router.get("/rodadas", response_model=list[RodadaResponse])
+@inject
+async def listar_rodadas(
+    repo: ResearcherRepository = Depends(Provide[Container.researcher_repository]),
+):
+    return [RodadaResponse(**r) for r in await repo.listar_rodadas()]
+
+
+@router.get("/rodadas/{rodada_id}", response_model=RodadaDetalheResponse)
+@inject
+async def obter_rodada(
+    rodada_id: UUID,
+    rounds: EvaluationRoundRepository = Depends(Provide[Container.evaluation_round_repository]),
+    repo: ResearcherRepository = Depends(Provide[Container.researcher_repository]),
+):
+    rodada = await _exigir_rodada(rodada_id, rounds)
+    ids = await repo.ids_dos_itens(rodada_id)
+    return RodadaDetalheResponse(
+        **_rodada_response(rodada).model_dump(exclude={"total_itens"}), total_itens=len(ids), email_ids=ids
+    )
 
 
 @router.put("/rodadas/{rodada_id}/itens", response_model=RodadaItensResponse)
