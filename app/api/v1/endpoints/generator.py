@@ -1,5 +1,6 @@
 from uuid import UUID
 
+import asyncpg
 from dependency_injector.wiring import Provide, inject
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -367,11 +368,21 @@ async def delete_email(
 ):
     try:
         success = await phishing_service.delete_email(email_id)
-        if not success:
-            raise HTTPException(status_code=404, detail="Email not found")
-        return {"message": "Email deleted successfully"}
+    except asyncpg.exceptions.ForeignKeyViolationError:
+        # avaliacao_rodada_itens.email_id e ON DELETE RESTRICT (issue #36):
+        # apagar um item que ja esta numa rodada destruiria o corpus no
+        # meio da coleta. 409 explicito, nao o erro cru do driver.
+        raise HTTPException(
+            status_code=409, detail="Item faz parte de uma rodada de avaliacao e nao pode ser apagado."
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting email: {str(e)}")
+
+    # Fora do try: um 404 lancado la dentro era capturado pelo `except
+    # Exception` e devolvido como 500.
+    if not success:
+        raise HTTPException(status_code=404, detail="Email not found")
+    return {"message": "Email deleted successfully"}
 
 
 @app.post("/api/v1/evaluate/user-answer", response_model=UserAnswerEvaluationResponse)

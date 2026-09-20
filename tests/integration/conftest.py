@@ -26,6 +26,7 @@ import main as main_module
 from app.infra.database.connection import DatabaseConnection
 from app.infra.database.repositories.cue_repository import CueRepository
 from app.infra.database.repositories.evaluation_round_repository import EvaluationRoundRepository
+from app.infra.database.repositories.expert_evaluation_repository import ExpertEvaluationRepository
 from app.infra.database.repositories.expert_repository import ExpertRepository
 from app.infra.database.repositories.generation_job_repository import GenerationJobRepository
 from app.infra.database.repositories.phishing_repository import PhishingEmailRepository
@@ -76,6 +77,11 @@ async def expert_repository(db_connection):
 @pytest_asyncio.fixture
 async def evaluation_round_repository(db_connection):
     return EvaluationRoundRepository(db=db_connection)
+
+
+@pytest_asyncio.fixture
+async def expert_evaluation_repository(db_connection):
+    return ExpertEvaluationRepository(db=db_connection)
 
 
 @pytest_asyncio.fixture

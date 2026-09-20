@@ -1,15 +1,28 @@
 from dependency_injector.wiring import Provide, inject
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Path
 
 from app.api.v1.endpoints.deps import require_expert
 from app.core.container import Container
 from app.domain.models.evaluation_round import AvaliacaoRodada
 from app.domain.models.expert import Especialista
 from app.domain.services.expert_auth_service import ExpertAuthService
-from app.dto.expert_requests import ConsentimentoRequest, ExpertSessionRequest, PerfilRequest
+from app.domain.services.expert_evaluation_service import (
+    AvaliacaoInvalida,
+    CanalNaoSuportado,
+    ExpertEvaluationService,
+    ItemNaoEncontrado,
+)
+from app.dto.expert_requests import (
+    AvaliacaoRequest,
+    ConsentimentoRequest,
+    ExpertSessionRequest,
+    PerfilRequest,
+)
 from app.dto.expert_responses import (
     ConsentimentoEstado,
     EspecialistaResumo,
+    CueResponse,
+    ExpertItemResponse,
     ExpertMeResponse,
     ExpertSessionResponse,
     PerfilEstado,
@@ -18,7 +31,9 @@ from app.dto.expert_responses import (
     RodadaResumo,
     TcleResponse,
 )
+from app.infra.database.repositories.cue_repository import CueRepository
 from app.infra.database.repositories.evaluation_round_repository import EvaluationRoundRepository
+from app.infra.database.repositories.expert_evaluation_repository import ExpertEvaluationRepository
 from app.infra.database.repositories.expert_repository import ExpertRepository
 
 # Roteador SEPARADO, sem `require_api_key` (issue #36). A chave
@@ -41,9 +56,13 @@ async def _rodada_aberta(
 
 
 async def _estado(
-    especialista: Especialista, rodada: AvaliacaoRodada, rounds: EvaluationRoundRepository
+    especialista: Especialista,
+    rodada: AvaliacaoRodada,
+    rounds: EvaluationRoundRepository,
+    evals: ExpertEvaluationRepository,
 ) -> dict:
     total = await rounds.contar_itens(rodada.id)
+    progresso = await evals.progresso(especialista.id, total)
     return {
         "especialista": EspecialistaResumo(
             id=especialista.id, nome=especialista.nome, sobrenome=especialista.sobrenome
@@ -58,9 +77,11 @@ async def _estado(
             versao=rodada.tcle_versao,
         ),
         "perfil": PerfilEstado(necessario=especialista.perfil_em is None),
-        # As avaliacoes (tabela `avaliacoes`) chegam na issue #37; ate la
-        # nenhuma esta concluida e o proximo item e o primeiro.
-        "progresso": Progresso(total=total, concluidas=0, proxima_ordem=1),
+        # Quando tudo esta concluido, `proxima_ordem` fica no ultimo item e
+        # `concluidas == total` sinaliza o fim.
+        "progresso": Progresso(
+            total=progresso.total, concluidas=progresso.concluidas, proxima_ordem=progresso.proxima_ordem
+        ),
     }
 
 
@@ -71,6 +92,7 @@ async def criar_sessao(
     auth: ExpertAuthService = Depends(Provide[Container.expert_auth_service]),
     experts: ExpertRepository = Depends(Provide[Container.expert_repository]),
     rounds: EvaluationRoundRepository = Depends(Provide[Container.evaluation_round_repository]),
+    evals: ExpertEvaluationRepository = Depends(Provide[Container.expert_evaluation_repository]),
 ):
     """Troca o codigo de acesso por um JWT de sessao (12h, sem refresh)."""
     if not auth.configurado:
@@ -86,7 +108,7 @@ async def criar_sessao(
         raise HTTPException(status_code=401, detail="Codigo de acesso invalido.")
 
     rodada = await _rodada_aberta(especialista, rounds)
-    estado = await _estado(especialista, rodada, rounds)
+    estado = await _estado(especialista, rodada, rounds, evals)
 
     await experts.registrar_acesso(especialista.id)
     token, expira = auth.emitir_token(especialista.id)
@@ -98,9 +120,10 @@ async def criar_sessao(
 async def me(
     especialista: Especialista = Depends(require_expert),
     rounds: EvaluationRoundRepository = Depends(Provide[Container.evaluation_round_repository]),
+    evals: ExpertEvaluationRepository = Depends(Provide[Container.expert_evaluation_repository]),
 ):
     rodada = await _rodada_aberta(especialista, rounds)
-    return ExpertMeResponse(**await _estado(especialista, rodada, rounds))
+    return ExpertMeResponse(**await _estado(especialista, rodada, rounds, evals))
 
 
 @router.get("/tcle", response_model=TcleResponse)
@@ -120,6 +143,7 @@ async def consentimento(
     especialista: Especialista = Depends(require_expert),
     experts: ExpertRepository = Depends(Provide[Container.expert_repository]),
     rounds: EvaluationRoundRepository = Depends(Provide[Container.evaluation_round_repository]),
+    evals: ExpertEvaluationRepository = Depends(Provide[Container.expert_evaluation_repository]),
 ):
     rodada = await _rodada_aberta(especialista, rounds)
     if not payload.aceito:
@@ -135,7 +159,7 @@ async def consentimento(
 
     await experts.registrar_consentimento(especialista.id, payload.versao)
     atualizado = await experts.get_by_id(especialista.id)
-    return ExpertMeResponse(**await _estado(atualizado, rodada, rounds))
+    return ExpertMeResponse(**await _estado(atualizado, rodada, rounds, evals))
 
 
 @router.post("/perfil", response_model=ExpertMeResponse)
@@ -145,11 +169,12 @@ async def perfil(
     especialista: Especialista = Depends(require_expert),
     experts: ExpertRepository = Depends(Provide[Container.expert_repository]),
     rounds: EvaluationRoundRepository = Depends(Provide[Container.evaluation_round_repository]),
+    evals: ExpertEvaluationRepository = Depends(Provide[Container.expert_evaluation_repository]),
 ):
     rodada = await _rodada_aberta(especialista, rounds)
     await experts.registrar_perfil(especialista.id, payload.model_dump())
     atualizado = await experts.get_by_id(especialista.id)
-    return ExpertMeResponse(**await _estado(atualizado, rodada, rounds))
+    return ExpertMeResponse(**await _estado(atualizado, rodada, rounds, evals))
 
 
 @router.post("/revogacao", response_model=RevogacaoResponse)
@@ -162,3 +187,76 @@ async def revogacao(
     Nao exige rodada aberta -- revogar deve ser sempre possivel.
     """
     return RevogacaoResponse(revogado_em=await experts.revogar(especialista.id))
+
+
+def _exigir_consentimento(especialista: Especialista, rodada: AvaliacaoRodada) -> None:
+    """Sem consentimento na versao vigente do TCLE, nenhum item e entregue
+    -- inclusive apos uma nova versao do TCLE no meio da coleta.
+    """
+    if especialista.consentimento_versao != rodada.tcle_versao:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Consentimento pendente para a versao {rodada.tcle_versao} do TCLE.",
+        )
+
+
+@router.get("/cues", response_model=list[CueResponse])
+@inject
+async def cues(
+    _: Especialista = Depends(require_expert),
+    cue_repository: CueRepository = Depends(Provide[Container.cue_repository]),
+):
+    """Vocabulario de pistas (issue #35), com a definicao operacional.
+    Nao e sensivel ao cegamento: e o vocabulario, nao o rotulo de item nenhum.
+    """
+    entradas = await cue_repository.get_all_ativas()
+    return [
+        CueResponse(
+            id=e.id, code=e.code.value, label_pt=e.label_pt, descricao_pt=e.descricao_pt, category=e.category
+        )
+        for e in entradas
+    ]
+
+
+@router.get("/itens/{ordem}", response_model=ExpertItemResponse)
+@inject
+async def obter_item(
+    ordem: int = Path(ge=1),
+    especialista: Especialista = Depends(require_expert),
+    rounds: EvaluationRoundRepository = Depends(Provide[Container.evaluation_round_repository]),
+    service: ExpertEvaluationService = Depends(Provide[Container.expert_evaluation_service]),
+):
+    """Entrega o item as cegas. `ordem` e a posicao DO PROPRIO especialista
+    (sorteada por ele), nunca o id do item: o id nao sai do servidor, entao
+    nem ha como correlacionar itens entre especialistas pelo cliente.
+    """
+    rodada = await _rodada_aberta(especialista, rounds)
+    _exigir_consentimento(especialista, rodada)
+    try:
+        return await service.obter_item(especialista, rodada, ordem)
+    except ItemNaoEncontrado as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except CanalNaoSuportado as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.put("/itens/{ordem}", response_model=ExpertItemResponse)
+@inject
+async def submeter_avaliacao(
+    payload: AvaliacaoRequest,
+    ordem: int = Path(ge=1),
+    especialista: Especialista = Depends(require_expert),
+    rounds: EvaluationRoundRepository = Depends(Provide[Container.evaluation_round_repository]),
+    service: ExpertEvaluationService = Depends(Provide[Container.expert_evaluation_service]),
+):
+    """Substituicao total das anotacoes + avaliacao, numa transacao (idempotente)."""
+    rodada = await _rodada_aberta(especialista, rounds)
+    _exigir_consentimento(especialista, rodada)
+    try:
+        return await service.submeter(especialista, rodada, ordem, payload)
+    except ItemNaoEncontrado as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except CanalNaoSuportado as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except AvaliacaoInvalida as e:
+        raise HTTPException(status_code=422, detail=str(e))

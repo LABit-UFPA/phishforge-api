@@ -18,6 +18,13 @@ from uuid import uuid4
 from app.domain.models.cue import CueCode, CueTaxonomyEntry
 from app.domain.models.evaluation_round import AvaliacaoRodada
 from app.domain.models.expert import Especialista
+from app.domain.models.expert_evaluation import (
+    AnotacaoSubmetida,
+    AvaliacaoSubmetida,
+    ConteudoParaAvaliar,
+    ItemParaAvaliacao,
+    ProgressoAvaliacao,
+)
 from app.domain.models.generated_item_draft import GeneratedItemDraft
 from app.domain.models.generation_job import GenerationFailure, GenerationJob, JobStatus
 from app.domain.models.phishing_email import PhishingEmail
@@ -502,6 +509,86 @@ class FakeEvaluationRoundRepository:
 
     async def contar_itens(self, rodada_id):
         return len(self.itens.get(rodada_id, []))
+
+
+class FakeExpertEvaluationRepository:
+    """Avaliacoes em memoria (issue #37). Como o repositorio real, so
+    conhece o `ConteudoParaAvaliar` do item -- nunca o rotulo.
+    """
+
+    def __init__(self, cue_repository):
+        self._cues = cue_repository
+        self.itens_por_rodada: dict = {}
+        self.avaliacoes: dict = {}
+        self.chamadas_inicializar = 0
+
+    def registrar_item(self, rodada_id, conteudo: ConteudoParaAvaliar) -> None:
+        self.itens_por_rodada.setdefault(rodada_id, []).append(conteudo)
+
+    async def inicializar_avaliacoes(self, especialista_id, rodada_id, embaralhar):
+        self.chamadas_inicializar += 1
+        if self.avaliacoes.get(especialista_id):
+            return
+        itens = self.itens_por_rodada.get(rodada_id, [])
+        ordens = list(range(1, len(itens) + 1))
+        embaralhar(ordens)
+        self.avaliacoes[especialista_id] = [
+            {"id": uuid4(), "ordem": ordem, "conteudo": conteudo, "status": "pendente", "campos": {}, "anotacoes": []}
+            for conteudo, ordem in zip(itens, ordens)
+        ]
+
+    def _linha(self, especialista_id, ordem):
+        return next((r for r in self.avaliacoes.get(especialista_id, []) if r["ordem"] == ordem), None)
+
+    def _codigo(self, cue_id):
+        return next(e.code for e in self._cues.entries if e.id == cue_id)
+
+    async def obter_por_ordem(self, especialista_id, ordem):
+        linha = self._linha(especialista_id, ordem)
+        if linha is None:
+            return None
+        c = linha["campos"]
+        return ItemParaAvaliacao(
+            avaliacao_id=linha["id"],
+            ordem=ordem,
+            total=len(self.avaliacoes[especialista_id]),
+            conteudo=linha["conteudo"],
+            avaliacao=AvaliacaoSubmetida(
+                status=linha["status"],
+                anotacoes=[
+                    AnotacaoSubmetida(campo=campo, cue_code=self._codigo(cue_id), span_start=i, span_end=f, trecho=t)
+                    for cue_id, campo, i, f, t in linha["anotacoes"]
+                ],
+                **c,
+            ),
+        )
+
+    async def salvar_avaliacao(
+        self, avaliacao_id, dificuldade_percebida, adequado_uso_educacional, qualidade_geral,
+        justificativa, comentario, tempo_ms, anotacoes,
+    ):
+        for linhas in self.avaliacoes.values():
+            for linha in linhas:
+                if linha["id"] == avaliacao_id:
+                    linha["status"] = "concluida"
+                    linha["campos"] = dict(
+                        dificuldade_percebida=dificuldade_percebida,
+                        adequado_uso_educacional=adequado_uso_educacional,
+                        qualidade_geral=qualidade_geral, justificativa=justificativa,
+                        comentario=comentario, tempo_ms=tempo_ms,
+                    )
+                    linha["anotacoes"] = list(anotacoes)  # substituicao total
+
+    async def progresso(self, especialista_id, total_da_rodada):
+        linhas = self.avaliacoes.get(especialista_id)
+        if not linhas:
+            return ProgressoAvaliacao(total=total_da_rodada, concluidas=0, proxima_ordem=1)
+        pendentes = [r["ordem"] for r in linhas if r["status"] == "pendente"]
+        return ProgressoAvaliacao(
+            total=len(linhas),
+            concluidas=sum(1 for r in linhas if r["status"] == "concluida"),
+            proxima_ordem=min(pendentes) if pendentes else len(linhas),
+        )
 
 
 class FakeGenerationJobRepository:
