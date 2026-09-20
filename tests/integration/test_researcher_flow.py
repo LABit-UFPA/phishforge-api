@@ -89,6 +89,7 @@ async def test_fluxo_completo_do_pesquisador(expert_client_real, phishing_reposi
 
     det = (await c.get(f"/api/v1/researcher/rodadas/{rid}", headers=H)).json()
     assert det["email_ids"] == [str(i) for i in ids] and det["status"] == "aberta"
+    assert [i["nivel"] for i in det["itens"]] == NIVEIS and det["itens"][0]["assunto"] == "Assunto 1"
     assert next(r for r in (await c.get("/api/v1/researcher/rodadas", headers=H)).json() if r["id"] == rid)["total_itens"] == 3
 
     # composicao congelada depois de aberta
@@ -201,3 +202,39 @@ async def test_export_de_rodada_sem_avaliacoes_e_vazio(expert_client_real, phish
     r = await c.get(f"/api/v1/researcher/rodadas/{rid}/export?dataset=avaliacoes", headers=H)
     assert len(_linhas(r)) == 0 and r.content.startswith(b"\xef\xbb\xbf")
     assert (await c.get(f"/api/v1/researcher/rodadas/{rid}/resumo", headers=H)).json()["total_avaliacoes"] == 0
+
+
+async def test_corpus_compoe_filtros_pagina_e_so_lista_elegiveis(expert_client_real, phishing_repository):
+    c = expert_client_real
+    marca = uuid4().hex[:8]
+
+    def mk(i, nivel, **extra):
+        return PhishingEmail(
+            receptor="a@x.com", remetente=f"s{i}@x.example", assunto=f"CORPUS-{marca}-{i}",
+            conteudo="texto", explicacao="EXPLICACAO-SECRETA", nivel=nivel, categoria="financeiro",
+            links=[], is_malicious=extra.pop("is_malicious", True), **extra,
+        )
+
+    ids = [await phishing_repository.create(mk(i, n)) for i, n in enumerate(["facil", "medio", "medio", "dificil"], 1)]
+    await phishing_repository.create(mk(9, "medio", is_malicious=False))
+    await phishing_repository.create(PhishingEmail(
+        receptor=None, remetente=None, assunto=None, conteudo=None, explicacao="x", nivel="medio",
+        categoria=f"CORPUS-{marca}", links=[], is_malicious=True, channel="website",
+        content_json={"url": "http://x.test", "title": "t", "visible_content": "c"},
+    ))
+
+    def lista(**q):
+        params = "&".join(f"{k}={v}" for k, v in {"search": f"CORPUS-{marca}", **q}.items())
+        return c.get(f"/api/v1/researcher/corpus?{params}", headers=H)
+
+    todos = (await lista()).json()
+    assert {i["id"] for i in todos} == {str(i) for i in ids}  # sem is_malicious=false nem outro canal
+    assert "EXPLICACAO-SECRETA" not in str(todos)
+    assert {i["id"] for i in (await lista(nivel="medio")).json()} == {str(ids[1]), str(ids[2])}  # compoe
+
+    p1 = (await lista(limit=3, offset=0)).json()
+    p2 = (await lista(limit=3, offset=3)).json()
+    assert len(p1) == 3 and len(p2) == 1 and not ({i["id"] for i in p1} & {i["id"] for i in p2})  # offset vale
+
+    assert (await lista(search="%25")).json() == []  # '%' e literal, nao curinga
+    assert (await c.get("/api/v1/researcher/corpus")).status_code == 401

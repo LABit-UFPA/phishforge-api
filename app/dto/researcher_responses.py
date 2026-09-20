@@ -15,9 +15,22 @@ class RodadaResponse(BaseModel):
     total_itens: int = 0
 
 
+class ItemCorpusResponse(BaseModel):
+    """Campos minimos para SELECIONAR um item: sem `conteudo` nem `explicacao`."""
+
+    id: UUID
+    assunto: Optional[str] = None
+    remetente: Optional[str] = None
+    categoria: str
+    nivel: str
+    channel: str
+    is_malicious: bool
+
+
 class RodadaDetalheResponse(RodadaResponse):
     # Na ordem canonica; o front usa para pre-selecionar os itens.
     email_ids: List[UUID] = []
+    itens: List[ItemCorpusResponse] = []
 
 
 class RodadaItensResponse(BaseModel):
