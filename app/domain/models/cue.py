@@ -1,5 +1,6 @@
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -57,3 +58,18 @@ class Cue(BaseModel):
     )
     span_start: Optional[int] = None
     span_end: Optional[int] = None
+
+
+class CueTaxonomyEntry(BaseModel):
+    """Uma LINHA da taxonomia (tabela `cues`), issue #35 -- o vocabulario
+    que o anotador humano ve. Nao e `Cue`: aquele representa uma
+    ANOTACAO (code + evidencia + span) num item, este representa uma
+    entrada do vocabulario. Reaproveita `CueCode` para o codigo.
+    """
+
+    id: UUID
+    code: CueCode
+    label_pt: str
+    descricao_pt: str
+    category: Literal["technical", "psychological"]
+    ativo: bool

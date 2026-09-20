@@ -541,6 +541,33 @@ alarme que este endpoint existe para não reforçar.
 
 ---
 
+### 2.5 Taxonomia de Pistas
+
+#### GET `/api/v1/cues`
+
+Lista as pistas de phishing ativas, com a **definição operacional** de cada uma
+(`descricao_pt`) -- escrita para que dois anotadores humanos cheguem à mesma decisão dado o
+mesmo trecho de texto. Mesmos 10 códigos e UUIDs do backend Go. Exige `X-API-Key`, como as
+demais rotas.
+
+```json
+{
+  "cues": [
+    {
+      "id": "00000000-0000-0000-0000-000000000002",
+      "code": "typosquat",
+      "label_pt": "Domínio com erro de digitação proposital (typosquatting)",
+      "descricao_pt": "Domínio com um ou mais caracteres trocados, adicionados ou removidos de propósito...",
+      "category": "technical",
+      "ativo": true
+    }
+  ]
+}
+```
+
+Ordenadas por `category` e depois por `code`. Uma pista com `ativo = false` não aparece aqui,
+mas continua válida para o histórico que a referencia (`email_cues`).
+
 ### 3. Listagem de Emails
 
 #### GET `/api/v1/emails`

@@ -22,6 +22,7 @@ from app.dto.requests import (
     UserAnswerEvaluationRequest,
 )
 from app.dto.responses import UserAnswerEvaluationResponse
+from app.infra.database.repositories.cue_repository import CueRepository
 from app.infra.database.repositories.generation_job_repository import GenerationJobRepository
 
 app = APIRouter()
@@ -272,6 +273,20 @@ async def get_batch_job(
         "updated_at": job.updated_at,
         "completed_at": job.completed_at,
     }
+
+
+@app.get("/api/v1/cues")
+@inject
+async def list_cues(
+    cue_repository: CueRepository = Depends(Provide[Container.cue_repository]),
+):
+    """Taxonomia de pistas ativas, com a definicao operacional
+    (`descricao_pt`) de cada uma (issue #35). Mesmos 10 codigos e UUIDs
+    do backend Go. Nao e sensivel ao cegamento do modulo de avaliacao:
+    e o vocabulario, nao o rotulo de nenhum item.
+    """
+    cues = await cue_repository.get_all_ativas()
+    return {"cues": [c.model_dump(mode="json") for c in cues]}
 
 
 @app.get("/api/v1/emails/statistics", response_model=EmailStatistics)

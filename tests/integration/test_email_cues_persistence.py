@@ -54,6 +54,46 @@ async def test_taxonomia_seeded_bate_com_a_do_go(db_connection):
     assert taxonomia_local == _TAXONOMIA_CANONICA_DO_GO
 
 
+async def test_todas_as_pistas_tem_descricao_e_estao_ativas(db_connection):
+    """Issue #35: definicao operacional nao-nula nas 10 linhas seedadas."""
+    async with db_connection.get_connection() as conn:
+        rows = await conn.fetch("SELECT code, descricao_pt, ativo FROM cues")
+
+    assert len(rows) == 10
+    for row in rows:
+        assert row["descricao_pt"] and row["descricao_pt"].strip(), row["code"]
+        assert row["ativo"] is True
+
+
+async def test_repositorio_lista_as_10_pistas_ativas_ordenadas(cue_repository):
+    entradas = await cue_repository.get_all_ativas()
+
+    assert {e.code.value for e in entradas} == set(_TAXONOMIA_CANONICA_DO_GO.values())
+    ordem = [(e.category, e.code.value) for e in entradas]
+    assert ordem == sorted(ordem)
+
+
+async def test_pista_desativada_some_da_listagem_mas_nao_quebra_o_historico(
+    phishing_repository, cue_repository, db_connection
+):
+    email_id = await phishing_repository.create(
+        _email_de_teste(cues=[Cue(code=CueCode.SCARCITY, evidencia="vagas limitadas")])
+    )
+    try:
+        async with db_connection.get_connection() as conn:
+            await conn.execute("UPDATE cues SET ativo = FALSE WHERE code = 'scarcity'")
+
+        listadas = {e.code for e in await cue_repository.get_all_ativas()}
+        assert CueCode.SCARCITY not in listadas
+        assert len(listadas) == 9
+
+        lido = await phishing_repository.get_by_id(email_id)
+        assert lido.cues[0].code == CueCode.SCARCITY
+    finally:
+        async with db_connection.get_connection() as conn:
+            await conn.execute("UPDATE cues SET ativo = TRUE WHERE code = 'scarcity'")
+
+
 async def test_create_persiste_e_get_by_id_recupera_as_pistas(phishing_repository):
     email = _email_de_teste(
         cues=[

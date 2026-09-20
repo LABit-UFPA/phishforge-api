@@ -24,6 +24,7 @@ from dependency_injector import providers
 
 import main as main_module
 from app.infra.database.connection import DatabaseConnection
+from app.infra.database.repositories.cue_repository import CueRepository
 from app.infra.database.repositories.generation_job_repository import GenerationJobRepository
 from app.infra.database.repositories.phishing_repository import PhishingEmailRepository
 from tests.fakes import (
@@ -58,6 +59,11 @@ async def db_connection():
 @pytest_asyncio.fixture
 async def phishing_repository(db_connection):
     return PhishingEmailRepository(db=db_connection)
+
+
+@pytest_asyncio.fixture
+async def cue_repository(db_connection):
+    return CueRepository(db=db_connection)
 
 
 @pytest_asyncio.fixture
