@@ -326,16 +326,13 @@ async def list_emails(
     ),
 ):
     try:
-        if filtros.search:
-            emails = await phishing_service.search_emails(filtros.search, filtros.limit)
-        elif filtros.categoria:
-            emails = await phishing_service.get_emails_by_categoria(
-                filtros.categoria, filtros.limit
-            )
-        elif filtros.nivel:
-            emails = await phishing_service.get_emails_by_nivel(filtros.nivel, filtros.limit)
-        else:
-            emails = await phishing_service.get_all_emails(filtros.limit, filtros.offset)
+        emails = await phishing_service.list_emails(
+            categoria=filtros.categoria or None,
+            nivel=filtros.nivel or None,
+            search=filtros.search or None,
+            limit=filtros.limit,
+            offset=filtros.offset,
+        )
 
         return {"emails": [email.dict() for email in emails], "count": len(emails)}
     except Exception as e:

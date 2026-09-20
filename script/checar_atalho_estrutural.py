@@ -117,7 +117,7 @@ async def main(limit: int) -> int:
     repo = PhishingEmailRepository(db=db)
 
     try:
-        items = await repo.get_all(limit=limit, offset=0)
+        items = await repo.list_emails(limit=limit, offset=0)
     finally:
         await db.close_pool()
 

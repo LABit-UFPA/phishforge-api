@@ -259,19 +259,16 @@ class FakePhishingRepository:
             "recent_count": 0,
         }
 
-    async def get_all(self, limit: int = 100, offset: int = 0):
-        items = list(self.storage.values())
-        return items[offset : offset + limit]
-
-    async def get_by_categoria(self, categoria: str, limit: int = 50):
-        return [e for e in self.storage.values() if e.categoria == categoria][:limit]
-
-    async def get_by_nivel(self, nivel: str, limit: int = 50):
-        return [e for e in self.storage.values() if e.nivel == nivel][:limit]
-
-    async def search_content(self, search_term: str, limit: int = 50):
-        termo = search_term.lower()
-        return [e for e in self.storage.values() if termo in e.conteudo.lower()][:limit]
+    async def list_emails(self, categoria=None, nivel=None, search=None, limit: int = 50, offset: int = 0):
+        itens = list(self.storage.values())
+        if categoria:
+            itens = [e for e in itens if e.categoria == categoria]
+        if nivel:
+            itens = [e for e in itens if e.nivel == nivel]
+        if search:
+            termo = search.lower()
+            itens = [e for e in itens if termo in (e.conteudo or "").lower()]
+        return itens[offset : offset + limit]
 
 
 class FakePhishingService:
@@ -296,17 +293,8 @@ class FakePhishingService:
     async def get_email_by_id(self, email_id):
         return await self.repository.get_by_id(email_id)
 
-    async def get_all_emails(self, limit: int = 100, offset: int = 0):
-        return await self.repository.get_all(limit, offset)
-
-    async def get_emails_by_categoria(self, categoria: str, limit: int = 50):
-        return await self.repository.get_by_categoria(categoria, limit)
-
-    async def get_emails_by_nivel(self, nivel: str, limit: int = 50):
-        return await self.repository.get_by_nivel(nivel, limit)
-
-    async def search_emails(self, search_term: str, limit: int = 50):
-        return await self.repository.search_content(search_term, limit)
+    async def list_emails(self, categoria=None, nivel=None, search=None, limit: int = 50, offset: int = 0):
+        return await self.repository.list_emails(categoria, nivel, search, limit, offset)
 
     async def get_emails_by_ids(self, email_ids: list) -> list:
         """Usado por GET /generate/batch/{job_id} (issue #11b) para
