@@ -85,8 +85,6 @@ services:
       EXPERT_FRONTEND_URL: ${EXPERT_FRONTEND_URL:-http://localhost:3000}
       # Itens exigidos para abrir uma rodada (10/10/10). Piloto menor: reduza.
       RODADA_ITENS_ESPERADOS: ${RODADA_ITENS_ESPERADOS:-30}
-      # Origem da curadoria de dev (profile `dev`); vazio = sem CORS.
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3100}
     networks:
       - phishforge_network
     depends_on:
@@ -109,28 +107,16 @@ services:
         VITE_APP_MODE: full
     environment:
       API_UPSTREAM: http://phishforge-api:8000
+      # Ambiente LOCAL: a curadoria (gerador/exemplos) tambem passa pelo proxy,
+      # com a API_KEY injetada pelo nginx (fora do bundle). Qualquer um que
+      # alcance a porta pode gerar/apagar itens, por isso ela so escuta em
+      # loopback. Em producao: CURATION_ENABLED=0 e sem publicar em rede aberta.
+      CURATION_ENABLED: ${CURATION_ENABLED:-1}
+      CURATION_API_KEY: ${API_KEY}
     container_name: phishforge-frontend
     restart: unless-stopped
     ports:
-      - "3000:3000"
-    networks:
-      - phishforge_network
-    depends_on:
-      - phishforge-api
-
-  # Curadoria (gerador/exemplos) para DEV: fala direto com a API e leva a
-  # API_KEY no bundle (publica) -- por isso so sobe com `--profile dev`.
-  phishforge-curadoria:
-    profiles: ["dev"]
-    build:
-      context: ../phishforge-frontend
-      dockerfile: Dockerfile
-      args:
-        VITE_API_BASE_URL: http://localhost:8000
-        VITE_API_KEY: ${API_KEY}
-    container_name: phishforge-curadoria
-    ports:
-      - "3100:3000"
+      - "127.0.0.1:3000:3000"
     networks:
       - phishforge_network
     depends_on:
