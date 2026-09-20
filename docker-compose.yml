@@ -107,10 +107,16 @@ services:
         VITE_APP_MODE: full
     environment:
       API_UPSTREAM: http://phishforge-api:8000
+      # Ambiente LOCAL: a curadoria (gerador/exemplos) tambem passa pelo proxy,
+      # com a API_KEY injetada pelo nginx (fora do bundle). Qualquer um que
+      # alcance a porta pode gerar/apagar itens, por isso ela so escuta em
+      # loopback. Em producao: CURATION_ENABLED=0 e sem publicar em rede aberta.
+      CURATION_ENABLED: ${CURATION_ENABLED:-1}
+      CURATION_API_KEY: ${API_KEY}
     container_name: phishforge-frontend
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     networks:
       - phishforge_network
     depends_on:
