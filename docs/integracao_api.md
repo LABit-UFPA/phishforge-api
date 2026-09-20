@@ -590,10 +590,50 @@ autenticam-se por um **JWT de sessão** (`Authorization: Bearer <token>`, HS256,
 - `503` em **todas** as rotas se `EXPERT_JWT_SECRET` estiver vazio (fail-closed: não existe segredo
   default). O console do pesquisador usa `X-API-Key` contra `RESEARCHER_API_KEY`, **distinta** de `API_KEY`.
 - `consentimento.necessario` volta a `true` quando o TCLE muda de versão no meio da coleta.
-- `progresso` é `{total, concluidas: 0, proxima_ordem: 1}` até a issue #37 introduzir as avaliações.
+- `progresso` é `{total, concluidas, proxima_ordem}`; quando tudo está concluído, `proxima_ordem` fica no último item e `concluidas == total` sinaliza o fim.
 
 Variáveis: `EXPERT_JWT_SECRET`, `EXPERT_JWT_EXPIRES_HOURS` (12), `RESEARCHER_API_KEY`,
 `EXPERT_FRONTEND_URL` — ver `.env.example`.
+
+#### Entrega cega e submissão da avaliação
+
+| Método / Path | Auth | Resumo |
+|---|---|---|
+| `GET /api/v1/expert/itens/{ordem}` | Bearer | Entrega o item **às cegas** |
+| `PUT /api/v1/expert/itens/{ordem}` | Bearer | Submete a avaliação (substituição total, idempotente) |
+| `GET /api/v1/expert/cues` | Bearer | Vocabulário de pistas com `descricao_pt` |
+
+`{ordem}` é a posição **do próprio especialista** (1..total, sorteada por ele no primeiro acesso), nunca o
+id do item: o id não sai do servidor. Sem consentimento na versão vigente do TCLE, `403`.
+
+```json
+{"ordem": 7, "total": 30,
+ "item": {"remetente": "...", "receptor": "...", "assunto": "...",
+          "conteudo_texto": "...", "links": [{"text": "...", "href": "..."}]},
+ "avaliacao": null}
+```
+
+**Cegamento.** A resposta é montada campo a campo e **nunca** contém `nivel`, `explicacao`, `is_malicious`,
+`categoria`, `cues`, `phish_scale`, `id`, `created_at` (o repositório nem lê essas colunas neste caminho).
+`avaliacao` é `null` até o especialista responder o item; depois traz o que ele mesmo enviou.
+
+**`PUT`** — corpo:
+
+```json
+{"dificuldade_percebida": "medio", "adequado_uso_educacional": true, "qualidade_geral": 4,
+ "justificativa": "...", "comentario": null, "tempo_ms": 45000,
+ "anotacoes": [{"campo": "conteudo", "cue_code": "urgency", "span_start": 2, "span_end": 19, "trecho": "..."}]}
+```
+
+- As anotações são **substituídas por inteiro** numa transação; reenviar o mesmo `PUT` não duplica nada.
+- **Offsets em code points** (o `len()` do Python), **não** em unidades UTF-16 do JavaScript: um emoji conta 1.
+- `422` quando `cue_code` não está ativo na taxonomia, `span_end` passa do tamanho do campo, o campo não
+  existe no item, ou **`trecho != campo[span_start:span_end]`** — a validação que impede coletar anotações com
+  offsets errados e só descobrir na análise.
+- `404` para `ordem` fora de 1..total; `409` se o item não for um e-mail.
+
+`DELETE /api/v1/emails/{id}` responde `409` (em vez do erro cru do driver) para um item que já está numa
+rodada de avaliação, e `404` (antes virava `500`) para um item inexistente.
 
 ### 3. Listagem de Emails
 

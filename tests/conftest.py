@@ -49,6 +49,7 @@ from tests.fakes import (
     FakeCueRepository,
     FakeDbConnection,
     FakeEvaluationRoundRepository,
+    FakeExpertEvaluationRepository,
     FakeExpertRepository,
     FakeEmbeddingClient,
     FakeGenerationJobRepository,
@@ -71,6 +72,7 @@ def _build_app_with_fakes():
     app = main_module.create_app()
     container = app.container
 
+    cue_repository = FakeCueRepository()
     fakes = {
         "db_connection": FakeDbConnection(),
         "prompt_normalizer": FakePromptNormalizer(),
@@ -86,7 +88,8 @@ def _build_app_with_fakes():
         # composto a partir deste mesmo provider, entao ganha o fake
         # automaticamente.
         "generation_job_repository": FakeGenerationJobRepository(),
-        "cue_repository": FakeCueRepository(),
+        "cue_repository": cue_repository,
+        "expert_evaluation_repository": FakeExpertEvaluationRepository(cue_repository),
         # issue #36: modulo de avaliacao por especialistas. O servico de
         # auth ganha um segredo de teste (em producao nao ha default).
         "expert_repository": FakeExpertRepository(),

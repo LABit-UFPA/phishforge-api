@@ -5,6 +5,7 @@ from app.core.config import settings
 from app.domain.services.batch_generation_worker import BatchGenerationWorker
 from app.domain.services.document_processor import DocumentProcessor
 from app.domain.services.expert_auth_service import ExpertAuthService
+from app.domain.services.expert_evaluation_service import ExpertEvaluationService
 from app.domain.services.generation_pipeline import GenerationPipeline
 from app.domain.services.openai.embedding_client import OpenAIEmbeddingClient
 from app.domain.services.phishing_service import PhishingEmailService
@@ -18,6 +19,7 @@ from app.infra.database.repositories.analytics_repository import AnalyticsReposi
 from app.infra.database.repositories.cue_repository import CueRepository
 from app.infra.database.repositories.evaluation_repository import EvaluationRepository
 from app.infra.database.repositories.evaluation_round_repository import EvaluationRoundRepository
+from app.infra.database.repositories.expert_evaluation_repository import ExpertEvaluationRepository
 from app.infra.database.repositories.expert_repository import ExpertRepository
 from app.infra.database.repositories.generation_job_repository import GenerationJobRepository
 from app.infra.database.repositories.phishing_repository import PhishingEmailRepository
@@ -111,6 +113,18 @@ class Container(containers.DeclarativeContainer):
     evaluation_round_repository = providers.Factory(
         EvaluationRoundRepository,
         db=db_connection
+    )
+
+    # issue #37: avaliacoes dos especialistas e entrega cega dos itens.
+    expert_evaluation_repository = providers.Factory(
+        ExpertEvaluationRepository,
+        db=db_connection
+    )
+
+    expert_evaluation_service = providers.Factory(
+        ExpertEvaluationService,
+        repository=expert_evaluation_repository,
+        cue_repository=cue_repository,
     )
 
     # Sem segredo default: EXPERT_JWT_SECRET vazio => `configurado` False
