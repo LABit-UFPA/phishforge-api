@@ -4,6 +4,7 @@ from qdrant_client import QdrantClient
 from app.core.config import settings
 from app.domain.services.batch_generation_worker import BatchGenerationWorker
 from app.domain.services.document_processor import DocumentProcessor
+from app.domain.services.expert_auth_service import ExpertAuthService
 from app.domain.services.generation_pipeline import GenerationPipeline
 from app.domain.services.openai.embedding_client import OpenAIEmbeddingClient
 from app.domain.services.phishing_service import PhishingEmailService
@@ -16,6 +17,8 @@ from app.infra.database.connection import DatabaseConnection, get_db_pool
 from app.infra.database.repositories.analytics_repository import AnalyticsRepository
 from app.infra.database.repositories.cue_repository import CueRepository
 from app.infra.database.repositories.evaluation_repository import EvaluationRepository
+from app.infra.database.repositories.evaluation_round_repository import EvaluationRoundRepository
+from app.infra.database.repositories.expert_repository import ExpertRepository
 from app.infra.database.repositories.generation_job_repository import GenerationJobRepository
 from app.infra.database.repositories.phishing_repository import PhishingEmailRepository
 from app.infra.qdrant.store import QdrantVectorStore
@@ -97,6 +100,25 @@ class Container(containers.DeclarativeContainer):
     cue_repository = providers.Factory(
         CueRepository,
         db=db_connection
+    )
+
+    # issue #36: modulo de avaliacao por especialistas.
+    expert_repository = providers.Factory(
+        ExpertRepository,
+        db=db_connection
+    )
+
+    evaluation_round_repository = providers.Factory(
+        EvaluationRoundRepository,
+        db=db_connection
+    )
+
+    # Sem segredo default: EXPERT_JWT_SECRET vazio => `configurado` False
+    # e o modulo responde 503 (fail-closed).
+    expert_auth_service = providers.Factory(
+        ExpertAuthService,
+        jwt_secret=config.EXPERT_JWT_SECRET,
+        expires_hours=config.EXPERT_JWT_EXPIRES_HOURS,
     )
 
     analytics_repository = providers.Factory(

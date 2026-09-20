@@ -35,6 +35,7 @@ os.environ.setdefault("OPENAI_API_KEY", "sk-test-nao-usada-em-nenhuma-chamada-re
 # testes que EXERCITAM a autenticacao em si (test_api_key_auth.py)
 # usam um client proprio, sem esse header default.
 TEST_API_KEY = "test-api-key-nao-usada-em-producao"
+TEST_EXPERT_JWT_SECRET = "segredo-jwt-de-teste-nao-usado-em-producao"
 os.environ.setdefault("API_KEY", TEST_API_KEY)
 
 import httpx
@@ -43,9 +44,12 @@ import pytest_asyncio
 from dependency_injector import providers
 
 import main as main_module
+from app.domain.services.expert_auth_service import ExpertAuthService
 from tests.fakes import (
     FakeCueRepository,
     FakeDbConnection,
+    FakeEvaluationRoundRepository,
+    FakeExpertRepository,
     FakeEmbeddingClient,
     FakeGenerationJobRepository,
     FakePhishingService,
@@ -83,6 +87,11 @@ def _build_app_with_fakes():
         # automaticamente.
         "generation_job_repository": FakeGenerationJobRepository(),
         "cue_repository": FakeCueRepository(),
+        # issue #36: modulo de avaliacao por especialistas. O servico de
+        # auth ganha um segredo de teste (em producao nao ha default).
+        "expert_repository": FakeExpertRepository(),
+        "evaluation_round_repository": FakeEvaluationRoundRepository(),
+        "expert_auth_service": ExpertAuthService(TEST_EXPERT_JWT_SECRET, expires_hours=12),
         # issue #11b: BatchGenerationWorker usa embedding_client_openai
         # (real, chamaria a OpenAI de verdade) so para a dedup por
         # similaridade de cosseno -- sem este override, todo item do
@@ -118,4 +127,17 @@ async def client(app_and_fakes):
     async with httpx.AsyncClient(
         transport=transport, base_url="http://test", headers={"X-API-Key": TEST_API_KEY}
     ) as ac:
+        yield ac
+
+
+@pytest_asyncio.fixture
+async def expert_client(app_and_fakes):
+    """Cliente SEM `X-API-Key`: as rotas do especialista (issue #36) ficam
+    fora do `require_api_key` do backend Go e se autenticam por JWT proprio.
+    Usar o `client` acima (que manda a chave) esconderia uma regressao em
+    que essas rotas voltassem a exigi-la.
+    """
+    app, _fakes = app_and_fakes
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac

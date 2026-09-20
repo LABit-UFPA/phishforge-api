@@ -65,6 +65,26 @@ class Settings(BaseSettings):
     # Sintaxe da lib `limits` (usada pelo slowapi): "<numero>/<unidade>".
     GENERATION_RATE_LIMIT: str = "20/minute"
 
+    # Modulo de avaliacao por especialistas (issue #36).
+    #
+    # Segredo HS256 dos JWTs de sessao do especialista. SEM default de
+    # proposito (diferente do fallback do backend Go): vazio => o modulo
+    # inteiro responde 503. E pesquisa com seres humanos -- um segredo
+    # hardcoded valido para qualquer um seria pior do que o modulo fora
+    # do ar.
+    EXPERT_JWT_SECRET: str = ""
+    EXPERT_JWT_EXPIRES_HOURS: int = 12
+
+    # Chave X-API-Key do pesquisador (console de gestao). DISTINTA de
+    # `API_KEY` (servidor-a-servidor com o backend Go): dar o mesmo
+    # segredo a humanos elevaria a exposicao de algo pensado para nunca
+    # sair de comunicacao entre servidores. Vazio => 503 (fail-closed).
+    RESEARCHER_API_KEY: str = ""
+
+    # Origem publica do frontend, usada para montar o link de acesso
+    # (`{EXPERT_FRONTEND_URL}/avaliacao/entrar?codigo=...`).
+    EXPERT_FRONTEND_URL: str = "http://localhost:5173"
+
     class Config:
         env_file = ".env"
 
