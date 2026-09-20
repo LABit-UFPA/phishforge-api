@@ -97,13 +97,48 @@ class ResearcherRepository:
             )
         return [dict(r) for r in rows]
 
-    async def ids_dos_itens(self, rodada_id: UUID) -> List[UUID]:
+    _CAMPOS_ITEM = "pe.id, pe.assunto, pe.remetente, pe.categoria, pe.nivel, pe.channel, pe.is_malicious"
+
+    async def itens_da_rodada(self, rodada_id: UUID) -> List[Dict[str, Any]]:
         async with self.db.get_connection() as conn:
             rows = await conn.fetch(
-                "SELECT email_id FROM avaliacao_rodada_itens WHERE rodada_id = $1 ORDER BY ordem_canonica",
+                f"""
+                SELECT {self._CAMPOS_ITEM}
+                FROM avaliacao_rodada_itens ri
+                JOIN phishing_emails pe ON pe.id = ri.email_id
+                WHERE ri.rodada_id = $1
+                ORDER BY ri.ordem_canonica
+                """,
                 rodada_id,
             )
-        return [r["email_id"] for r in rows]
+        return [dict(r) for r in rows]
+
+    async def listar_corpus(
+        self, nivel: Optional[str], busca: Optional[str], limit: int, offset: int
+    ) -> List[Dict[str, Any]]:
+        """Itens elegiveis a uma rodada (e-mail de phishing), com filtros que
+        COMPOEM e `offset` que vale sempre. `busca` escapa `%`, `_` e `\\`:
+        o termo digitado e literal, nao um padrao.
+        """
+        termo = None
+        if busca:
+            escapado = busca.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            termo = f"%{escapado}%"
+        async with self.db.get_connection() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT {self._CAMPOS_ITEM}
+                FROM phishing_emails pe
+                WHERE pe.channel = 'email' AND pe.is_malicious
+                  AND ($1::text IS NULL OR pe.nivel = $1)
+                  AND ($2::text IS NULL OR pe.assunto ILIKE $2 OR pe.remetente ILIKE $2
+                       OR pe.categoria ILIKE $2 OR pe.conteudo ILIKE $2)
+                ORDER BY pe.created_at DESC, pe.id
+                LIMIT $3 OFFSET $4
+                """,
+                nivel, termo, limit, offset,
+            )
+        return [dict(r) for r in rows]
 
     async def transicionar(
         self, rodada_id: UUID, de: str, para: str, itens_esperados: Optional[int] = None

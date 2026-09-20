@@ -645,6 +645,7 @@ especialista). Sem a chave, 401; chave não configurada no servidor, 503.
 |---|---|
 | `POST /rodadas` | `{nome, descricao?, tcle_versao, tcle_texto_md}` → 201 |
 | `GET /rodadas` \| `GET /rodadas/{id}` | lista (status, `total_itens`, sem o texto do TCLE) e detalhe (com `email_ids` na ordem canônica) |
+| `GET /corpus?nivel=&search=&limit=&offset=` | itens elegíveis (e-mail, `is_malicious`) para selecionar: `id`, `assunto`, `remetente`, `categoria`, `nivel`, `channel`, `is_malicious` (sem conteúdo nem explicação). Filtros compõem e `offset` vale sempre. `GET /rodadas/{id}` também devolve `itens` nesse formato |
 | `PUT /rodadas/{id}/itens` | `{email_ids}` (a ordem vira `ordem_canonica`) → `{total, distribuicao:{facil,medio,dificil}}`. 409 se a rodada não está em `rascunho`; 422 se algum item não existe ou não é do canal `email` |
 | `POST /rodadas/{id}/abrir` | `rascunho → aberta`. 409 se a quantidade de itens vinculados difere de `RODADA_ITENS_ESPERADOS` (padrão 30) |
 | `POST /rodadas/{id}/encerrar` | `aberta → encerrada` |

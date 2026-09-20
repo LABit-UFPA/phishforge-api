@@ -525,6 +525,8 @@ class FakeResearcherRepository:
         self.especialistas_listados: list = []
         self.recodificados: list = []
         self.pii_pedida: list = []
+        self.corpus: list = []
+        self.corpus_consultas: list = []
 
     async def substituir_itens(self, rodada_id, email_ids):
         from app.infra.database.repositories.researcher_repository import RodadaNaoEditavel, RodadaNaoEncontrada
@@ -559,8 +561,16 @@ class FakeResearcherRepository:
             for r in self.rounds.storage.values()
         ]
 
-    async def ids_dos_itens(self, rodada_id):
-        return [e for e, _ in sorted(self.rounds.itens[rodada_id], key=lambda t: t[1])]
+    async def itens_da_rodada(self, rodada_id):
+        return [
+            {"id": e, "assunto": "Assunto", "remetente": "s@x.example", "categoria": "financeiro",
+             "nivel": "facil", "channel": "email", "is_malicious": True}
+            for e, _ in sorted(self.rounds.itens[rodada_id], key=lambda t: t[1])
+        ]
+
+    async def listar_corpus(self, nivel, busca, limit, offset):
+        self.corpus_consultas.append((nivel, busca, limit, offset))
+        return self.corpus
 
     async def recodificar(self, especialista_id, codigo_hash, codigo_prefixo):
         self.recodificados.append((especialista_id, codigo_hash, codigo_prefixo))

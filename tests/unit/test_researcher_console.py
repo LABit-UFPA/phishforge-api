@@ -29,6 +29,7 @@ def _rotas(rodada_id, esp_id):
         ("post", f"/api/v1/researcher/especialistas/{esp_id}/recodificar", None),
         ("get", "/api/v1/researcher/especialistas", None),
         ("get", "/api/v1/researcher/rodadas", None),
+        ("get", "/api/v1/researcher/corpus", None),
         ("get", f"/api/v1/researcher/rodadas/{rodada_id}", None),
         ("get", f"/api/v1/researcher/rodadas/{rodada_id}/resumo", None),
         ("get", f"/api/v1/researcher/rodadas/{rodada_id}/export?dataset=avaliacoes", None),
@@ -306,4 +307,20 @@ async def test_listar_e_obter_rodada_mostram_status_e_itens(expert_client, fakes
 
     det = (await expert_client.get(f"/api/v1/researcher/rodadas/{rid}", headers=H)).json()
     assert det["email_ids"] == [b, a] and det["total_itens"] == 2 and det["status"] == "aberta"
+    assert [i["id"] for i in det["itens"]] == [b, a]
+    assert not ({"conteudo", "explicacao"} & set(det["itens"][0]))
     assert (await expert_client.get(f"/api/v1/researcher/rodadas/{uuid4()}", headers=H)).status_code == 404
+
+
+async def test_corpus_repassa_filtros_e_valida_limites(expert_client, fakes):
+    fakes["researcher_repository"].corpus = [
+        {"id": str(uuid4()), "assunto": "A", "remetente": None, "categoria": "financeiro",
+         "nivel": "facil", "channel": "email", "is_malicious": True}
+    ]
+    r = await expert_client.get("/api/v1/researcher/corpus?nivel=medio&search=%20banco%20&limit=5&offset=10", headers=H)
+    assert r.status_code == 200 and len(r.json()) == 1
+    assert fakes["researcher_repository"].corpus_consultas[-1] == ("medio", "banco", 5, 10)
+    assert not ({"conteudo", "explicacao"} & set(r.json()[0]))
+
+    for query in ("nivel=critico", "limit=0", "limit=101", "offset=-1"):
+        assert (await expert_client.get(f"/api/v1/researcher/corpus?{query}", headers=H)).status_code == 422, query

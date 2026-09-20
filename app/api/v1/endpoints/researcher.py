@@ -20,6 +20,7 @@ from app.dto.researcher_requests import (
 from app.dto.researcher_responses import (
     EspecialistaCriadoResponse,
     EspecialistaLinha,
+    ItemCorpusResponse,
     RodadaDetalheResponse,
     ResumoResponse,
     RodadaItensResponse,
@@ -94,10 +95,25 @@ async def obter_rodada(
     repo: ResearcherRepository = Depends(Provide[Container.researcher_repository]),
 ):
     rodada = await _exigir_rodada(rodada_id, rounds)
-    ids = await repo.ids_dos_itens(rodada_id)
+    itens = await repo.itens_da_rodada(rodada_id)
     return RodadaDetalheResponse(
-        **_rodada_response(rodada).model_dump(exclude={"total_itens"}), total_itens=len(ids), email_ids=ids
+        **_rodada_response(rodada).model_dump(exclude={"total_itens"}),
+        total_itens=len(itens),
+        email_ids=[i["id"] for i in itens],
+        itens=itens,
     )
+
+
+@router.get("/corpus", response_model=list[ItemCorpusResponse])
+@inject
+async def listar_corpus(
+    nivel: Optional[Literal["facil", "medio", "dificil"]] = Query(default=None),
+    search: Optional[str] = Query(default=None, max_length=200),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    repo: ResearcherRepository = Depends(Provide[Container.researcher_repository]),
+):
+    return await repo.listar_corpus(nivel, search.strip() if search else None, limit, offset)
 
 
 @router.put("/rodadas/{rodada_id}/itens", response_model=RodadaItensResponse)
