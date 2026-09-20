@@ -76,6 +76,15 @@ services:
       # fechado (503) em toda rota -- visivel na hora, nao um "sem
       # autenticacao" silencioso.
       API_KEY: ${API_KEY}
+      # Modulo de avaliacao por especialistas (issues #36-#38). Sem
+      # EXPERT_JWT_SECRET / RESEARCHER_API_KEY as rotas /expert e /researcher
+      # respondem 503 (falha fechado). Gere com `openssl rand -hex 32`.
+      EXPERT_JWT_SECRET: ${EXPERT_JWT_SECRET:-}
+      RESEARCHER_API_KEY: ${RESEARCHER_API_KEY:-}
+      # Origem publica do frontend: monta o link de acesso do especialista.
+      EXPERT_FRONTEND_URL: ${EXPERT_FRONTEND_URL:-http://localhost:3000}
+      # Itens exigidos para abrir uma rodada (10/10/10). Piloto menor: reduza.
+      RODADA_ITENS_ESPERADOS: ${RODADA_ITENS_ESPERADOS:-30}
     networks:
       - phishforge_network
     depends_on:
