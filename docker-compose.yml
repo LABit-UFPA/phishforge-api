@@ -91,7 +91,13 @@ services:
       context: ../phishforge-frontend
       dockerfile: Dockerfile
       args:
-        VITE_API_BASE_URL: http://localhost:8000
+        # Vazio = same-origin: o nginx do frontend faz proxy de /api/v1/expert e
+        # /api/v1/researcher para a API (ver phishforge-frontend/README.md).
+        # `expert` limita o build a /avaliacao/*; `full` registra todas as rotas.
+        VITE_API_BASE_URL: ""
+        VITE_APP_MODE: full
+    environment:
+      API_UPSTREAM: http://phishforge-api:8000
     container_name: phishforge-frontend
     restart: unless-stopped
     ports:
