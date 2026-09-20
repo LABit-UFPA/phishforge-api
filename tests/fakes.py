@@ -15,6 +15,7 @@ tests/integration usa Postgres de verdade e nao importa nada daqui.
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from app.domain.models.cue import CueCode, CueTaxonomyEntry
 from app.domain.models.generated_item_draft import GeneratedItemDraft
 from app.domain.models.generation_job import GenerationFailure, GenerationJob, JobStatus
 from app.domain.models.phishing_email import PhishingEmail
@@ -387,6 +388,35 @@ class FakeDbConnection:
 
     async def close_pool(self):
         return None
+
+
+class FakeCueRepository:
+    """Taxonomia em memoria (issue #35). Registra chamadas em `calls`."""
+
+    def __init__(self):
+        self.calls: list[str] = []
+        _categorias = {
+            "sender_domain_mismatch": "technical", "typosquat": "technical",
+            "homoglyph": "technical", "urgency": "psychological",
+            "authority": "psychological", "generic_greeting": "psychological",
+            "credential_request": "technical", "link_text_mismatch": "technical",
+            "unexpected_attachment": "technical", "scarcity": "psychological",
+        }
+        self.entries = [
+            CueTaxonomyEntry(
+                id=uuid4(),
+                code=CueCode(code),
+                label_pt=f"rotulo {code}",
+                descricao_pt=f"definicao operacional de {code}",
+                category=categoria,
+                ativo=True,
+            )
+            for code, categoria in _categorias.items()
+        ]
+
+    async def get_all_ativas(self):
+        self.calls.append("get_all_ativas")
+        return [e for e in self.entries if e.ativo]
 
 
 class FakeGenerationJobRepository:

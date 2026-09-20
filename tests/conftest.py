@@ -44,6 +44,7 @@ from dependency_injector import providers
 
 import main as main_module
 from tests.fakes import (
+    FakeCueRepository,
     FakeDbConnection,
     FakeEmbeddingClient,
     FakeGenerationJobRepository,
@@ -81,6 +82,7 @@ def _build_app_with_fakes():
         # composto a partir deste mesmo provider, entao ganha o fake
         # automaticamente.
         "generation_job_repository": FakeGenerationJobRepository(),
+        "cue_repository": FakeCueRepository(),
         # issue #11b: BatchGenerationWorker usa embedding_client_openai
         # (real, chamaria a OpenAI de verdade) so para a dedup por
         # similaridade de cosseno -- sem este override, todo item do

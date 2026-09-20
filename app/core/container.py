@@ -14,6 +14,7 @@ from app.domain.services.response_generator import ResponseGenerator
 from app.domain.services.user_answer_evaluator import UserAnswerEvaluator
 from app.infra.database.connection import DatabaseConnection, get_db_pool
 from app.infra.database.repositories.analytics_repository import AnalyticsRepository
+from app.infra.database.repositories.cue_repository import CueRepository
 from app.infra.database.repositories.evaluation_repository import EvaluationRepository
 from app.infra.database.repositories.generation_job_repository import GenerationJobRepository
 from app.infra.database.repositories.phishing_repository import PhishingEmailRepository
@@ -89,6 +90,12 @@ class Container(containers.DeclarativeContainer):
     # restart do processo porque vive no banco, nao em memoria.
     generation_job_repository = providers.Factory(
         GenerationJobRepository,
+        db=db_connection
+    )
+
+    # issue #35: leitura da taxonomia de pistas para uso humano.
+    cue_repository = providers.Factory(
+        CueRepository,
         db=db_connection
     )
 
