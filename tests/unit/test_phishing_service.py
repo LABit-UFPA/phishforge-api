@@ -68,7 +68,7 @@ async def test_create_email_rejeita_item_legitimo_com_pistas(monkeypatch):
 
 
 @pytest.mark.parametrize("nivel_valido", ["facil", "medio", "dificil"])
-async def test_get_emails_by_nivel_aceita_sinonimo_como_filtro(nivel_valido, monkeypatch):
+async def test_list_emails_aceita_sinonimo_de_nivel_como_filtro(nivel_valido, monkeypatch):
     """Diferente de create_email: aqui um sinonimo e conveniencia de
     busca, nao dado a persistir -- comportamento preservado (nao e o
     escopo de validacao estrita da #2).
@@ -77,13 +77,31 @@ async def test_get_emails_by_nivel_aceita_sinonimo_como_filtro(nivel_valido, mon
     chamadas = []
 
     class _RepoDeBusca:
-        async def get_by_nivel(self, nivel, limit):
+        async def list_emails(self, categoria, nivel, search, limit, offset):
             chamadas.append(nivel)
             return []
 
     service = PhishingEmailService(repository=_RepoDeBusca(), analytics_repository=None)
 
     sinonimo_em_ingles = {"facil": "easy", "medio": "medium", "dificil": "hard"}[nivel_valido]
-    await service.get_emails_by_nivel(sinonimo_em_ingles)
+    await service.list_emails(nivel=sinonimo_em_ingles)
 
     assert chamadas == [nivel_valido]
+
+
+async def test_list_emails_repassa_todos_os_filtros_juntos_com_sinonimo_normalizado():
+    """Issue #39: o servico nao escolhe um filtro; entrega todos de uma vez
+    ao repositorio (e normaliza so o sinonimo de `nivel`).
+    """
+    recebido = {}
+
+    class _Repo:
+        async def list_emails(self, categoria, nivel, search, limit, offset):
+            recebido.update(categoria=categoria, nivel=nivel, search=search, limit=limit, offset=offset)
+            return []
+
+    service = PhishingEmailService(repository=_Repo(), analytics_repository=None)
+
+    await service.list_emails(categoria="rh", nivel="HARD", search="banco", limit=10, offset=20)
+
+    assert recebido == {"categoria": "rh", "nivel": "dificil", "search": "banco", "limit": 10, "offset": 20}

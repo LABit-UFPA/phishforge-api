@@ -8,7 +8,7 @@ from app.infra.database.repositories.phishing_repository import PhishingEmailRep
 # phishing_emails_nivel_check, migration V20260517120000). Nao importa
 # app.domain.models.difficulty.Difficulty aqui de proposito: aquele
 # enum e para VALIDAR entrada na borda da API (issue #2), este e so
-# para o filtro de busca de get_emails_by_nivel aceitar sinonimo --
+# para o filtro de busca de list_emails aceitar sinonimo de nivel --
 # duas preocupacoes diferentes que nao precisam compartilhar tipo.
 _NIVEL_SEARCH_SYNONYMS = {
     'facil': 'facil',
@@ -80,30 +80,26 @@ class PhishingEmailService:
         """
         return await self.repository.get_by_ids(email_ids)
 
-    async def get_emails_by_categoria(self, categoria: str, limit: int = 50) -> List[PhishingEmail]:
-        """Busca emails por categoria"""
-        return await self.repository.get_by_categoria(categoria, limit)
+    async def list_emails(
+        self,
+        categoria: Optional[str] = None,
+        nivel: Optional[str] = None,
+        search: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[PhishingEmail]:
+        """Lista emails; os filtros presentes se combinam com E logico.
 
-    async def get_emails_by_nivel(self, nivel: str, limit: int = 50) -> List[PhishingEmail]:
-        """Busca emails por nível.
-
-        Aceita sinônimo como conveniência de busca (ex.: `?nivel=easy`)
-        -- diferente da validação de `create_email`: aqui um valor que
-        não bate com nada só devolve lista vazia, sem risco de dado
-        corrompido, então o fallback (`nivel` cru se não achar
-        sinônimo) é aceitável.
+        `nivel` aceita sinonimo como conveniencia de busca (ex.:
+        `?nivel=easy`) -- diferente da validacao de `create_email`: aqui
+        um valor que nao bate com nada so devolve lista vazia, sem risco
+        de dado corrompido, entao o fallback (`nivel` cru se nao achar
+        sinonimo) e aceitavel.
         """
-        nivel_normalizado = _NIVEL_SEARCH_SYNONYMS.get(nivel.lower().strip(), nivel)
-        return await self.repository.get_by_nivel(nivel_normalizado, limit)
-    
-    async def search_emails(self, search_term: str, limit: int = 50) -> List[PhishingEmail]:
-        """Busca emails por conteúdo"""
-        return await self.repository.search_content(search_term, limit)
-    
-    async def get_all_emails(self, limit: int = 100, offset: int = 0) -> List[PhishingEmail]:
-        """Lista todos os emails com paginação"""
-        return await self.repository.get_all(limit, offset)
-    
+        if nivel:
+            nivel = _NIVEL_SEARCH_SYNONYMS.get(nivel.lower().strip(), nivel)
+        return await self.repository.list_emails(categoria, nivel, search, limit, offset)
+
     async def get_statistics(self) -> dict:
         """Retorna estatísticas dos emails"""
         stats = await self.repository.get_stats()

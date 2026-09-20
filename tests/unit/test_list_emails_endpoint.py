@@ -93,3 +93,41 @@ async def test_limit_acima_do_maximo_e_rejeitado(client):
     response = await client.get("/api/v1/emails?limit=101")
 
     assert response.status_code == 422
+
+
+# ---- issue #39: filtros compoem e offset vale em qualquer combinacao ----
+
+async def test_search_e_nivel_compoem(client, fakes):
+    _seed(fakes, conteudo="fatura do banco", nivel="dificil")
+    _seed(fakes, conteudo="fatura do banco", nivel="facil")
+    _seed(fakes, conteudo="outro assunto", nivel="dificil")
+
+    body = (await client.get("/api/v1/emails?search=banco&nivel=dificil")).json()
+
+    assert body["count"] == 1
+    assert body["emails"][0]["nivel"] == "dificil" and "banco" in body["emails"][0]["conteudo"]
+
+
+async def test_tres_filtros_compoem(client, fakes):
+    alvo = _seed(fakes, conteudo="fatura do banco", nivel="medio", categoria="rh")
+    _seed(fakes, conteudo="fatura do banco", nivel="medio", categoria="financeiro")
+    _seed(fakes, conteudo="fatura do banco", nivel="facil", categoria="rh")
+
+    body = (await client.get("/api/v1/emails?search=banco&nivel=medio&categoria=rh")).json()
+
+    assert [e["id"] for e in body["emails"]] == [str(alvo.id)]
+
+
+async def test_offset_vale_com_categoria_e_com_busca(client, fakes):
+    for i in range(5):
+        _seed(fakes, categoria="financeiro", conteudo=f"banco {i}")
+    _seed(fakes, categoria="rh", conteudo="banco rh")
+
+    p1 = (await client.get("/api/v1/emails?categoria=financeiro&limit=2&offset=0")).json()["emails"]
+    p2 = (await client.get("/api/v1/emails?categoria=financeiro&limit=2&offset=2")).json()["emails"]
+    assert len(p1) == len(p2) == 2 and not ({e["id"] for e in p1} & {e["id"] for e in p2})
+
+    b1 = (await client.get("/api/v1/emails?search=banco&limit=4&offset=0")).json()["emails"]
+    b2 = (await client.get("/api/v1/emails?search=banco&limit=4&offset=4")).json()["emails"]
+    assert len(b1) == 4 and len(b2) == 2 and not ({e["id"] for e in b1} & {e["id"] for e in b2})
+

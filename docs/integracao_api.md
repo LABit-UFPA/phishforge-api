@@ -677,6 +677,11 @@ Lista emails de phishing gerados anteriormente.
 | `limit` | integer | Limite de resultados (máx: 100) |
 | `offset` | integer | Offset para paginação |
 
+Os filtros **se combinam** (E lógico entre os informados): `?search=banco&nivel=dificil` devolve só o que
+casa com os dois. `offset` vale em qualquer combinação. Sem `search` a ordem é a mais recente primeiro; com
+`search`, por relevância; nos dois casos o `id` desempata, então paginar com `offset` não repete nem pula itens.
+`nivel` aceita sinônimos (`easy`, `medium`, `hard`).
+
 **Response (200 OK):**
 
 ```json

@@ -1,5 +1,5 @@
 import json
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from app.domain.models.cue import Cue
@@ -125,47 +125,57 @@ class PhishingEmailRepository:
                 for row in rows
             ]
 
-    async def get_by_categoria(self, categoria: str, limit: int = 50) -> List[PhishingEmail]:
-        async with self.db.get_connection() as conn:
-            query = """
-                SELECT * FROM phishing_emails 
-                WHERE categoria = $1
-                ORDER BY created_at DESC
-                LIMIT $2
-            """
-            rows = await conn.fetch(query, categoria, limit)
-            return [self._row_to_model(row) for row in rows]
+    async def list_emails(
+        self,
+        categoria: Optional[str] = None,
+        nivel: Optional[str] = None,
+        search: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[PhishingEmail]:
+        """Listagem com filtros que COMPOEM (E logico entre os presentes) e
+        `offset` valido em qualquer combinacao (issue #39).
 
-    async def get_by_nivel(self, nivel: str, limit: int = 50) -> List[PhishingEmail]:
-        async with self.db.get_connection() as conn:
-            query = """
-                SELECT * FROM phishing_emails 
-                WHERE nivel = $1
-                ORDER BY created_at DESC
-                LIMIT $2
-            """
-            rows = await conn.fetch(query, nivel, limit)
-            return [self._row_to_model(row) for row in rows]
+        So os valores viram parametros ($n); o SQL montado aqui e feito
+        apenas de trechos constantes. Sem `search` a ordem e a mais
+        recente primeiro; com `search`, por relevancia. Nos dois casos `id`
+        desempata: sem desempate estavel, paginar com OFFSET repete ou
+        pula linhas.
 
-    async def get_all(self, limit: int = 100, offset: int = 0) -> List[PhishingEmail]:
-        async with self.db.get_connection() as conn:
-            query = """
-                SELECT * FROM phishing_emails 
-                ORDER BY created_at DESC
-                LIMIT $1 OFFSET $2
-            """
-            rows = await conn.fetch(query, limit, offset)
-            return [self._row_to_model(row) for row in rows]
+        A expressao de busca (`conteudo || ' ' || assunto`) e a mesma da
+        implementacao anterior (comportamento preservado); ela nao usa os
+        indices GIN por coluna criados na migration inicial. Itens de
+        canais nao-email tem `conteudo` NULL e nunca casam com `search`.
+        """
+        condicoes: List[str] = []
+        params: List[Any] = []
 
-    async def search_content(self, search_term: str, limit: int = 50) -> List[PhishingEmail]:
+        def novo_param(valor: Any) -> int:
+            params.append(valor)
+            return len(params)
+
+        if categoria:
+            condicoes.append(f"categoria = ${novo_param(categoria)}")
+        if nivel:
+            condicoes.append(f"nivel = ${novo_param(nivel)}")
+
+        ordem = "created_at DESC, id"
+        if search:
+            n = novo_param(search)
+            vetor = "to_tsvector('portuguese', conteudo || ' ' || assunto)"
+            consulta = f"plainto_tsquery('portuguese', ${n})"
+            condicoes.append(f"{vetor} @@ {consulta}")
+            ordem = f"ts_rank({vetor}, {consulta}) DESC, created_at DESC, id"
+
+        onde = f"WHERE {' AND '.join(condicoes)}" if condicoes else ""
+        n_limit = novo_param(limit)
+        n_offset = novo_param(offset)
+        query = (
+            f"SELECT * FROM phishing_emails {onde} ORDER BY {ordem} "
+            f"LIMIT ${n_limit} OFFSET ${n_offset}"
+        )
         async with self.db.get_connection() as conn:
-            query = """
-                SELECT * FROM phishing_emails 
-                WHERE to_tsvector('portuguese', conteudo || ' ' || assunto) @@ plainto_tsquery('portuguese', $1)
-                ORDER BY ts_rank(to_tsvector('portuguese', conteudo || ' ' || assunto), plainto_tsquery('portuguese', $1)) DESC
-                LIMIT $2
-            """
-            rows = await conn.fetch(query, search_term, limit)
+            rows = await conn.fetch(query, *params)
             return [self._row_to_model(row) for row in rows]
 
     async def get_stats(self) -> dict:
@@ -223,8 +233,8 @@ class PhishingEmailRepository:
     ) -> Dict[UUID, List[Cue]]:
         """Busca as pistas de varios emails numa unica query (issue
         #5), evitando N+1 quando get_by_ids traz uma lista inteira.
-        `get_all`/`get_by_categoria`/`get_by_nivel`/`search_content`
-        NAO chamam isto -- decisao de escopo: a issue pede as pistas
+        `list_emails`
+        NAO chama isto -- decisao de escopo: a issue pede as pistas
         expostas em GET /emails/{id} (e, por extensao, no resultado do
         lote via get_by_ids), nao nas listagens gerais.
         """
