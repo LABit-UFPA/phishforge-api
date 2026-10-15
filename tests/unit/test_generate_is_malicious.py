@@ -8,6 +8,8 @@ corretamente e persiste com o valor certo. Desde a issue #11b,
 post_batch_and_get_job para chegar no resultado final.
 """
 
+import pytest
+
 from tests.unit._batch_helpers import post_batch_and_get_job
 
 
@@ -50,27 +52,61 @@ async def test_lote_default_malicious_ratio_gera_so_phishing(client):
     assert all(item["is_malicious"] is True for item in job["examples"])
 
 
-async def test_lote_com_malicious_ratio_compoe_com_a_distribuicao(client):
-    """total=10, uma dificuldade, malicious_ratio=0.5 -> 5 maliciosos +
-    5 legitimos (issue #3: a proporcao compoe com a distribuicao de
-    dificuldades ja existente, sem alterar o divmod entre dificuldades).
+@pytest.mark.parametrize("malicious_ratio", [0.0, 0.5, 0.95])
+async def test_lote_com_malicious_ratio_menor_que_1_da_422_sem_criar_job(client, fakes, malicious_ratio):
+    """Por ora o lote gera so phishing: misturar itens legitimos e
+    recusado antes de criar job ou chamar o LLM.
     """
-    job = await post_batch_and_get_job(
-        client,
-        {
+    response = await client.post(
+        "/api/v1/generate/batch",
+        json={
             "context": "cobranca de fatura",
             "difficulties": ["facil"],
             "total": 10,
-            "malicious_ratio": 0.5,
+            "malicious_ratio": malicious_ratio,
         },
     )
 
-    assert job["total_generated"] == 10
+    assert response.status_code == 422
+    assert "apenas phishing" in response.json()["detail"]
+    assert fakes["generation_job_repository"].storage == {}
+    assert fakes["response_generator"].calls == []
 
-    maliciosos = [item for item in job["examples"] if item["is_malicious"] is True]
-    legitimos = [item for item in job["examples"] if item["is_malicious"] is False]
-    assert len(maliciosos) == 5
-    assert len(legitimos) == 5
+
+async def test_lote_com_malicious_ratio_1_explicito_gera_so_phishing(client):
+    job = await post_batch_and_get_job(
+        client,
+        {"context": "cobranca de fatura", "difficulties": ["facil"], "total": 3, "malicious_ratio": 1.0},
+    )
+
+    assert job["total_generated"] == 3
+    assert all(item["is_malicious"] is True for item in job["examples"])
+
+
+async def test_worker_ainda_compoe_malicious_ratio_com_a_distribuicao(app_and_fakes):
+    """O endpoint bloqueia a mistura, mas a composicao continua no
+    worker (issue #3) para quando for reabilitada -- testada direto nele:
+    total=10, uma dificuldade, malicious_ratio=0.5 -> 5 maliciosos + 5
+    legitimos.
+    """
+    app, fakes = app_and_fakes
+    jobs = fakes["generation_job_repository"]
+    job_id = await jobs.create(
+        context="cobranca de fatura", difficulties=["facil"], total=10, malicious_ratio=0.5
+    )
+
+    await app.container.batch_generation_worker().run(
+        job_id=job_id,
+        context="cobranca de fatura",
+        difficulties=["facil"],
+        total=10,
+        malicious_ratio=0.5,
+    )
+
+    job = await jobs.get_by_id(job_id)
+    emails = await fakes["phishing_service"].get_emails_by_ids(job.item_ids)
+    assert len(emails) == 10
+    assert sum(e.is_malicious for e in emails) == 5
 
 
 async def test_lote_malicious_ratio_fora_do_intervalo_da_422(client):

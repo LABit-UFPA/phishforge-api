@@ -32,11 +32,12 @@ async def test_is_malicious_persistido_bate_com_o_solicitado(
     assert persistido.is_malicious == is_malicious_enviado
 
 
-async def test_lote_com_malicious_ratio_persiste_os_dois_rotulos(
+async def test_lote_persiste_so_phishing(
     client_com_postgres_real, phishing_repository
 ):
-    """Desde a issue #11b, /generate/batch responde 202 -- o resultado
-    e lido via polling em GET /generate/batch/{job_id}.
+    """Por ora o lote gera so phishing (malicious_ratio != 1.0 da 422).
+    Desde a issue #11b, /generate/batch responde 202 -- o resultado e
+    lido via polling em GET /generate/batch/{job_id}.
     """
     post_response = await client_com_postgres_real.post(
         "/api/v1/generate/batch",
@@ -44,7 +45,6 @@ async def test_lote_com_malicious_ratio_persiste_os_dois_rotulos(
             "context": "cobranca de fatura",
             "difficulties": ["facil"],
             "total": 4,
-            "malicious_ratio": 0.5,
         },
     )
     assert post_response.status_code == 202
@@ -59,6 +59,5 @@ async def test_lote_com_malicious_ratio_persiste_os_dois_rotulos(
     persistidos = [await phishing_repository.get_by_id(i) for i in ids]
     assert all(p is not None for p in persistidos)
 
-    rotulos = [p.is_malicious for p in persistidos]
-    assert rotulos.count(True) == 2
-    assert rotulos.count(False) == 2
+    assert len(persistidos) == 4
+    assert all(p.is_malicious for p in persistidos)

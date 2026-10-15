@@ -20,9 +20,15 @@ class Channel(str, Enum):
     PIX_QR = "pix_qr"
 
 
-# Canais que a geracao de fato sabe produzir. EMAIL usa as colunas
+# Canais que /generate e /generate/batch aceitam. EMAIL usa as colunas
 # antigas (sem content_json); os demais usam content_json (ver
-# app/domain/models/channel_content.py). Todos os 6 membros de Channel
-# desde a issue #68 do lado Go -- antes SMS/WHATSAPP ficavam de fora
-# por exigirem valor aninhado que o Go ainda nao aceitava.
-GENERATION_SUPORTADOS = frozenset(Channel)
+# app/domain/models/channel_content.py).
+#
+# Por ora a geracao fica restrita a EMAIL: os outros 5 canais nao tem
+# cues/phish_scale e a avaliacao por especialistas so aceita e-mail. O
+# codigo deles continua no lugar (ramos `!= EMAIL` em generator.py e no
+# BatchGenerationWorker, ResponseGenerator.generate_channel_item), so
+# fica inalcancavel pelos endpoints. `Channel` segue com os 6 valores,
+# alinhado com o Go, para itens ja gravados em outros canais continuarem
+# legiveis. Para reabilitar todos: GENERATION_SUPORTADOS = frozenset(Channel)
+GENERATION_SUPORTADOS = frozenset({Channel.EMAIL})

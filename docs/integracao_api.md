@@ -77,7 +77,7 @@ Gera um único exemplo de email de phishing personalizado usando um pipeline RAG
 | `user_context` | string | Sim | Contexto/cenário para geração do item |
 | `difficulty` | string | Sim | Nível: `facil`, `medio` ou `dificil` (ver [Vocabulário de dificuldade](#vocabulário-de-dificuldade)) |
 | `is_malicious` | boolean | Não (default `true`) | `true` gera phishing; `false` gera item **legítimo** (comunicação real, sem pedido de credencial nem link malicioso -- necessário para medir taxa de falso alarme e d-prime) |
-| `channel` | string | Não (default `email`) | Canal do item -- ver [Canais suportados](#canais-suportados-channel) |
+| `channel` | string | Não (default `email`) | Canal do item. **Por ora só `email`**; outro canal dá 422 -- ver [Canais suportados](#canais-suportados-channel) |
 
 **Response (200 OK):**
 
@@ -232,11 +232,18 @@ A soma dos dois pontos decide o resultado: **0–1 → `facil`**, **2–3 → `m
 
 #### Canais suportados (`channel`)
 
-Além de email, a geração suporta os 5 outros canais do vocabulário compartilhado com o backend
-Go (issue #6, completa desde que a `phishing-quest-api` #68 desbloqueou `sms`/`whatsapp`). Cada
-canal tem seu próprio shape em `content_json` -- quando `channel` é diferente de `email`, os
-campos `receptor`/`remetente`/`assunto`/`conteudo` vêm `null` e o conteúdo real está em
-`content_json`.
+> **Por ora, `/generate` e `/generate/batch` só geram `email`.** Os outros 5 canais abaixo
+> continuam no vocabulário compartilhado com o backend Go, mas pedir qualquer um deles na geração
+> devolve **422** (`canal '<x>' desabilitado na geracao`), antes de chamar o LLM ou criar job. O
+> código de geração deles foi mantido: para reabilitar, basta voltar `GENERATION_SUPORTADOS` para
+> `frozenset(Channel)` em `app/domain/models/channel.py`. Itens já gravados nesses canais
+> continuam sendo listados normalmente. O restante desta seção documenta o formato desses canais
+> para quando forem reabilitados.
+
+Além de email, o vocabulário tem 5 outros canais (issue #6, completa desde que a
+`phishing-quest-api` #68 desbloqueou `sms`/`whatsapp`). Cada canal tem seu próprio shape em
+`content_json` -- quando `channel` é diferente de `email`, os campos `receptor`/`remetente`/
+`assunto`/`conteudo` vêm `null` e o conteúdo real está em `content_json`.
 
 | `channel` | Shape de `content_json` |
 |-----------|--------------------------|
@@ -328,8 +335,8 @@ progresso e o resultado final são obtidos por **polling** em `GET /api/v1/gener
 | `context` | string | Sim | Contexto geral para geração |
 | `difficulties` | array | Sim | Lista de dificuldades desejadas, não pode ser vazia (ver [Vocabulário de dificuldade](#vocabulário-de-dificuldade)) |
 | `total` | integer | Não | Total de itens, entre 1 e 100 (padrão: 10) |
-| `malicious_ratio` | float (0.0-1.0) | Não (default `1.0`) | Proporção de itens maliciosos vs. legítimos. Compõe com `difficulties`: dentro de cada nível, a fração `malicious_ratio` do total daquele nível é gerada como phishing e o restante como item legítimo |
-| `channel` | string | Não (default `email`) | Canal do lote **inteiro** (não misto) -- ver [Canais suportados](#canais-suportados-channel) |
+| `malicious_ratio` | float (0.0-1.0) | Não (default `1.0`) | **Por ora só `1.0` é aceito (lote só de phishing); outros valores dão 422 sem criar job** -- para item legítimo, use `/generate` com `is_malicious: false`. Quando reabilitado: proporção de itens maliciosos vs. legítimos. Compõe com `difficulties`: dentro de cada nível, a fração `malicious_ratio` do total daquele nível é gerada como phishing e o restante como item legítimo |
+| `channel` | string | Não (default `email`) | Canal do lote **inteiro** (não misto). **Por ora só `email`**; outro canal dá 422 sem criar job -- ver [Canais suportados](#canais-suportados-channel) |
 
 **Response (202 Accepted):**
 

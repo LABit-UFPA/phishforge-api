@@ -1,46 +1,34 @@
-"""Contrato multicanal (issue #6): todos os 5 canais que usam
-content_json -- website, phone_call, pix_qr, sms e whatsapp. Os dois
-ultimos foram desbloqueados pela phishing-quest-api #68
-(`buildDraftContent` passou a aceitar valor aninhado -- `links`/
-`messages` como array de objetos -- em vez de `map[string]string`,
-mesmo bloqueio registrado na #5 para o `links` de email). O canal
-email continua exatamente como antes (ver test_generate_endpoint.py,
-test_generate_is_malicious.py, etc. -- nenhum foi alterado por esta
-issue e todos continuam passando).
+"""Contrato de canal na geracao (issue #6).
+
+Por ora /generate e /generate/batch so geram `email`
+(GENERATION_SUPORTADOS em app/domain/models/channel.py). Os outros 5
+canais do vocabulario -- website, phone_call, pix_qr, sms e whatsapp --
+continuam validos no enum `Channel` (alinhado com o Go), mas pedir
+qualquer um deles na geracao da 422 antes de gastar LLM ou criar job.
+O gerador desses canais continua coberto em
+test_response_generator_channel_dispatch.py, para reabilita-los sem
+surpresa.
 """
 
 import pytest
 
 from tests.unit._batch_helpers import post_batch_and_get_job
 
-_SHAPE_POR_CANAL = {
-    "website": {"url", "title", "visible_content"},
-    "phone_call": {"caller", "transcript"},
-    "pix_qr": {"payload", "recipient", "amount", "pix_key"},
-    "sms": {"sender", "text", "links"},
-    "whatsapp": {"sender", "display_name", "messages"},
-}
-
-_CANAIS_NOVOS = ["website", "phone_call", "pix_qr", "sms", "whatsapp"]
+_CANAIS_DESABILITADOS = ["website", "phone_call", "pix_qr", "sms", "whatsapp"]
 
 
-@pytest.mark.parametrize("channel", _CANAIS_NOVOS)
-async def test_generate_em_canal_novo_devolve_content_json_no_shape_certo(client, channel):
+@pytest.mark.parametrize("channel", _CANAIS_DESABILITADOS)
+async def test_generate_em_canal_desabilitado_da_422_sem_chamar_o_llm(client, fakes, channel):
     response = await client.post(
         "/api/v1/generate",
         json={"context": "cobranca de fatura", "difficulty": "facil", "channel": channel},
     )
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["channel"] == channel
-    assert set(body["content_json"].keys()) == _SHAPE_POR_CANAL[channel]
-    # Campos de email ficam None -- nao um email disfarcado de outro canal.
-    assert body["receptor"] is None
-    assert body["remetente"] is None
-    assert body["assunto"] is None
-    assert body["conteudo"] is None
-    assert body["id"]
+    assert response.status_code == 422
+    assert "desabilitado" in response.json()["detail"]
+    # Recusado antes da pipeline: nem normalizacao, nem geracao.
+    assert fakes["prompt_normalizer"].calls == []
+    assert fakes["response_generator"].calls == []
 
 
 async def test_generate_sem_channel_continua_email_por_padrao(client):
@@ -56,6 +44,16 @@ async def test_generate_sem_channel_continua_email_por_padrao(client):
     assert body["conteudo"] is not None
 
 
+async def test_generate_com_channel_email_explicito_gera_email(client):
+    response = await client.post(
+        "/api/v1/generate",
+        json={"context": "cobranca de fatura", "difficulty": "facil", "channel": "email"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["channel"] == "email"
+
+
 async def test_generate_com_canal_invalido_da_422_do_pydantic(client):
     response = await client.post(
         "/api/v1/generate",
@@ -65,11 +63,11 @@ async def test_generate_com_canal_invalido_da_422_do_pydantic(client):
     assert response.status_code == 422
 
 
-@pytest.mark.parametrize("channel", _CANAIS_NOVOS)
-async def test_lote_em_canal_novo_gera_itens_com_content_json(client, channel):
-    job = await post_batch_and_get_job(
-        client,
-        {
+@pytest.mark.parametrize("channel", _CANAIS_DESABILITADOS)
+async def test_lote_em_canal_desabilitado_da_422_antes_de_criar_job(client, fakes, channel):
+    response = await client.post(
+        "/api/v1/generate/batch",
+        json={
             "context": "cobranca de fatura",
             "difficulties": ["facil"],
             "total": 2,
@@ -77,12 +75,10 @@ async def test_lote_em_canal_novo_gera_itens_com_content_json(client, channel):
         },
     )
 
-    assert job["channel"] == channel
-    assert job["status"] == "concluido"
-    assert job["total_generated"] == 2
-    for item in job["examples"]:
-        assert item["channel"] == channel
-        assert set(item["content_json"].keys()) == _SHAPE_POR_CANAL[channel]
+    assert response.status_code == 422
+    assert "desabilitado" in response.json()["detail"]
+    assert fakes["generation_job_repository"].storage == {}
+    assert fakes["response_generator"].calls == []
 
 
 async def test_lote_com_canal_invalido_da_422_antes_de_criar_job(client):

@@ -23,15 +23,22 @@ class BatchGenerationRequest(BaseModel):
         min_length=1, description="Lista de dificuldades desejadas (não pode ser vazia)"
     )
     total: int = Field(default=10, ge=1, le=100, description="Total de itens a serem gerados")
+    # Por ora o endpoint so aceita 1.0 (lote so de phishing) e responde
+    # 422 para os demais; o intervalo 0..1 fica aqui para quando a
+    # mistura com itens legitimos for reabilitada.
     malicious_ratio: float = Field(
         default=1.0,
         ge=0.0,
         le=1.0,
-        description="Proporção de itens maliciosos (1.0 = todos phishing, 0.0 = todos legítimos)",
+        description="Proporção de itens maliciosos. Por ora só 1.0 (todos phishing) é aceito; outros valores retornam 422.",
     )
     # Issue #6: um canal por lote (nao misto) -- mesmo escopo do
-    # endpoint unico. Default EMAIL preserva o comportamento historico.
-    channel: Channel = Channel.EMAIL
+    # endpoint unico. Por ora so EMAIL e aceito; os demais dao 422 no
+    # endpoint (ver app.domain.models.channel.GENERATION_SUPORTADOS).
+    channel: Channel = Field(
+        default=Channel.EMAIL,
+        description="Canal do lote. Por ora só 'email' é aceito; os demais retornam 422.",
+    )
 
 
 class EmailSearchRequest(BaseModel):

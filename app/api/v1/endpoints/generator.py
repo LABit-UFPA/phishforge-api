@@ -30,18 +30,16 @@ app = APIRouter()
 
 
 def _validar_canal_suportado(channel: Channel) -> None:
-    """GENERATION_SUPORTADOS cobre hoje todos os membros de `Channel`
-    (issue #6 completa, com sms/whatsapp desbloqueados pela
-    phishing-quest-api #68). Este check fica como defesa: se um canal
-    novo algum dia entrar no vocabulario (`Channel`) antes de a geracao
-    saber produzi-lo, cai aqui com 422 explicito em vez de falhar de
-    forma obscura dentro do gerador.
+    """GENERATION_SUPORTADOS esta restrito a `email` por ora (ver
+    app/domain/models/channel.py): qualquer outro canal do vocabulario
+    `Channel` cai aqui com 422 explicito, antes de gastar chamada de LLM
+    no /generate ou de criar job no /generate/batch.
     """
     if channel not in GENERATION_SUPORTADOS:
         raise HTTPException(
             status_code=422,
             detail=(
-                f"canal '{channel.value}' ainda nao suportado pela geracao. "
+                f"canal '{channel.value}' desabilitado na geracao. "
                 f"Canais disponiveis: {sorted(c.value for c in GENERATION_SUPORTADOS)}."
             ),
         )
@@ -69,11 +67,9 @@ async def generate(
     `GENERATION_RATE_LIMIT`. O corpo da requisicao passou a se chamar
     `payload` para nao colidir.
 
-    `payload.channel` (issue #6): default `email` preserva o
-    comportamento historico -- o caminho abaixo para email e o MESMO
-    de antes desta issue, byte a byte. Canais novos (website/
-    phone_call/pix_qr) entram num ramo separado, que nao usa `cues`
-    nem `phish_scale` (fora do escopo desta entrega).
+    `payload.channel` (issue #6): so `email` e aceito por ora (ver
+    GENERATION_SUPORTADOS). O ramo dos outros canais abaixo fica
+    inalcancavel enquanto eles estiverem desabilitados.
     """
     _validar_canal_suportado(payload.channel)
 
@@ -197,10 +193,25 @@ async def generate_batch(
     slowapi precisa do parametro para aplicar `GENERATION_RATE_LIMIT`
     por IP. O corpo passou a se chamar `payload`.
 
-    `payload.channel` (issue #6): um lote inteiro e de um unico canal
-    -- default `email` preserva o comportamento historico.
+    `payload.channel` (issue #6): um lote inteiro e de um unico canal,
+    e por ora so `email` e aceito (ver GENERATION_SUPORTADOS) -- outro
+    canal da 422 antes de o job ser criado.
+
+    `payload.malicious_ratio` (issue #3): por ora o lote gera so
+    phishing -- qualquer valor diferente de 1.0 da 422 antes de o job
+    ser criado. A composicao malicioso/legitimo continua no
+    BatchGenerationWorker; para reabilitar, basta remover este check.
+    Item legitimo avulso segue disponivel no /generate (is_malicious=false).
     """
     _validar_canal_suportado(payload.channel)
+    if payload.malicious_ratio != 1.0:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "o lote gera apenas phishing por ora: malicious_ratio deve ser 1.0 "
+                "(ou omitido). Para item legitimo, use /api/v1/generate com is_malicious=false."
+            ),
+        )
 
     difficulties_values = [d.value for d in payload.difficulties]
 

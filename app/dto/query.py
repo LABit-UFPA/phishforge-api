@@ -12,7 +12,7 @@ class QueryRequest(BaseModel):
     is_malicious: bool = True
     # Default EMAIL preserva o comportamento historico (issue #6).
     # Aceita os 6 valores do enum (alinhado com o Go), mas o endpoint
-    # rejeita sms/whatsapp explicitamente com 422 -- ver
+    # so gera `email` por ora e rejeita os demais com 422 -- ver
     # app.domain.models.channel.GENERATION_SUPORTADOS.
     channel: Channel = Channel.EMAIL
 

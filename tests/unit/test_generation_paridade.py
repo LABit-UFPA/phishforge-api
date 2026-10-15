@@ -43,6 +43,30 @@ async def test_generate_e_generate_batch_recebem_o_mesmo_contexto(client, fakes)
     assert chamada_unica["relevant_docs"] == chamada_lote["relevant_docs"]
 
 
+async def test_generate_unico_passa_por_todas_as_etapas_ate_persistir(client, fakes):
+    """Contraparte do teste de lote abaixo para o fluxo unico: cada
+    etapa (normalizacao, HyDE, retrieve, rerank, fusao, geracao) roda
+    exatamente uma vez, a geracao vem depois da fusao, e o item termina
+    gravado.
+    """
+    response = await client.post(
+        "/api/v1/generate",
+        json={"context": "cobranca de fatura", "difficulty": "medio"},
+    )
+
+    assert response.status_code == 200
+    assert len(fakes["prompt_normalizer"].calls) == 1
+    assert len(fakes["qdrant_store"].calls) == 1
+    assert len(fakes["reranker"].calls) == 1
+    etapas = [c["step"] for c in fakes["response_generator"].calls]
+    assert etapas == [
+        "generate_hypothetical_answer",
+        "fuse_and_summarize_context",
+        "generate_response",
+    ]
+    assert len(fakes["phishing_service"].repository.storage) == 1
+
+
 async def test_lote_reaproveita_o_pipeline_uma_vez_por_requisicao(client, fakes):
     """3 itens faceis + 3 medios (total=6): a geracao final roda 6
     vezes (uma por item, porque depende da dificuldade), mas
