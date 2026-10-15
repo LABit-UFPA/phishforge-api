@@ -1,0 +1,2 @@
+# Snapshot do Qdrant (tar): nunca converter fim de linha nem tentar diff.
+*.snapshot binary

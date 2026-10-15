@@ -63,3 +63,6 @@ Thumbs.db
 dist/
 build/
 *.whl
+# Snapshot da base vetorial: usado pelo servico phishforge-qdrant-seed do
+# compose, nao pela imagem da API.
+qdrant/

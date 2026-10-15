@@ -108,3 +108,6 @@ yarn-error.log*
 .next/
 out/
 coverage/
+
+# Saida de `docker compose run --rm phishforge-export` (dados gerados).
+exports/

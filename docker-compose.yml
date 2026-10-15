@@ -24,7 +24,10 @@ services:
       start_period: 10s
 
   phishforge-qdrant:
-    image: qdrant/qdrant:latest
+    # Versao fixa (nao `latest`): e a versao que gerou
+    # qdrant/phishing_articles.snapshot, e fixar mantem a base vetorial
+    # reproduzivel entre maquinas.
+    image: qdrant/qdrant:v1.18.0
     container_name: phishforge-qdrant
     restart: unless-stopped
     ports:
@@ -37,6 +40,44 @@ services:
       QDRANT__SERVICE__HTTP_PORT: 6333
     networks:
       - phishforge_network
+    healthcheck:
+      # A imagem nao tem curl/wget; bash + /dev/tcp basta.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.0\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q 200"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # Carga inicial da base vetorial: restaura a colecao `phishing_articles`
+  # (os artigos de data/articles ja indexados, 800 pontos, embeddings
+  # text-embedding-3-small) a partir de qdrant/phishing_articles.snapshot.
+  # Roda uma vez e sai. So restaura se a colecao NAO existir -- nunca
+  # sobrescreve uma base ja indexada (ex.: reindexada com
+  # script/run_ingestion.py). Para voltar ao snapshot: apague a colecao
+  # (ou `docker compose down -v`) e suba de novo.
+  #
+  # Nao usa `qdrant --snapshot` no proprio servico: esse modo entra em
+  # panico ("Collection already exists") em todo restart depois do
+  # primeiro, e com --force-snapshot sobrescreveria a base a cada subida.
+  phishforge-qdrant-seed:
+    image: curlimages/curl:8.10.1
+    container_name: phishforge-qdrant-seed
+    volumes:
+      - ./qdrant:/seed:ro
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        if curl -sf http://phishforge-qdrant:6333/collections/phishing_articles > /dev/null; then
+          echo "Colecao phishing_articles ja existe -- nada a restaurar."
+          exit 0
+        fi
+        echo "Restaurando phishing_articles a partir do snapshot..."
+        curl -sf -X POST "http://phishforge-qdrant:6333/collections/phishing_articles/snapshots/upload?priority=snapshot&wait=true" \
+          -F "snapshot=@/seed/phishing_articles.snapshot"
+    networks:
+      - phishforge_network
+    depends_on:
+      phishforge-qdrant:
+        condition: service_healthy
 
   phishforge-flyway:
     image: flyway/flyway:7.0.2
@@ -62,7 +103,11 @@ services:
     container_name: phishforge-api
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      # So loopback: com a API_KEY padrao de ambiente local (abaixo),
+      # publicar em todas as interfaces deixaria qualquer um da rede
+      # gastar a chave da OpenAI. O frontend e o backend Go chegam pela
+      # rede do compose, nao por esta porta.
+      - "127.0.0.1:8000:8000"
     environment:
       QDRANT_URL: http://phishforge-qdrant:6333
       DB_HOST: phishforge-postgresql
@@ -71,11 +116,13 @@ services:
       DB_PASSWORD: phishforge
       DB_NAME: phishforge
       OPENAI_API_KEY: ${OPENAI_API_KEY}
-      # Issue #7: autenticacao entre servicos. Sem valor no .env, o
-      # container sobe com API_KEY vazia e require_api_key falha
-      # fechado (503) em toda rota -- visivel na hora, nao um "sem
-      # autenticacao" silencioso.
-      API_KEY: ${API_KEY}
+      # Issue #7: autenticacao entre servicos. Este compose e ambiente
+      # LOCAL: sem API_KEY no .env, usa um valor padrao conhecido para
+      # o gerador funcionar de primeira (o nginx do frontend injeta a
+      # mesma chave). Por isso API e frontend so escutam em loopback.
+      # Fora do ambiente local, defina API_KEY no .env
+      # (`openssl rand -hex 32`).
+      API_KEY: ${API_KEY:-phishforge-local}
       # Modulo de avaliacao por especialistas (issues #36-#38). Sem
       # EXPERT_JWT_SECRET / RESEARCHER_API_KEY as rotas /expert e /researcher
       # respondem 503 (falha fechado). Gere com `openssl rand -hex 32`.
@@ -91,7 +138,9 @@ services:
       phishforge-postgresql:
         condition: service_healthy
       phishforge-qdrant:
-        condition: service_started
+        condition: service_healthy
+      phishforge-qdrant-seed:
+        condition: service_completed_successfully
       phishforge-flyway:
         condition: service_completed_successfully
 
@@ -112,7 +161,7 @@ services:
       # alcance a porta pode gerar/apagar itens, por isso ela so escuta em
       # loopback. Em producao: CURATION_ENABLED=0 e sem publicar em rede aberta.
       CURATION_ENABLED: ${CURATION_ENABLED:-1}
-      CURATION_API_KEY: ${API_KEY}
+      CURATION_API_KEY: ${API_KEY:-phishforge-local}
     container_name: phishforge-frontend
     restart: unless-stopped
     ports:
@@ -121,6 +170,30 @@ services:
       - phishforge_network
     depends_on:
       - phishforge-api
+
+  # Exporta os exemplos gerados para CSV em ./exports (exemplos.csv e
+  # pistas.csv), para analise fora do sistema. Nao sobe com `up`
+  # (profile `export`); roda sob demanda e sai:
+  #   docker compose run --rm phishforge-export
+  # Usa o psql da propria imagem do Postgres: funciona igual em Linux,
+  # macOS e Windows, sem psql instalado e sem redirecionamento de shell.
+  phishforge-export:
+    image: postgres:16.4
+    container_name: phishforge-export
+    profiles: ["export"]
+    environment:
+      PGPASSWORD: phishforge
+    volumes:
+      - ./script/exportar_exemplos.sql:/sql/exportar_exemplos.sql:ro
+      - ./exports:/exports
+    command: >
+      psql -h phishforge-postgresql -U phishforge -d phishforge
+      -v ON_ERROR_STOP=1 -f /sql/exportar_exemplos.sql
+    networks:
+      - phishforge_network
+    depends_on:
+      phishforge-postgresql:
+        condition: service_healthy
 
 networks:
   phishforge_network:
