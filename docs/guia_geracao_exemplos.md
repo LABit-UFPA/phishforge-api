@@ -13,6 +13,10 @@ OpenAI.
 
 ## O que você precisa
 
+Funciona em **Windows 10/11, macOS (Intel ou Apple Silicon) e Linux**
+(x86-64 ou ARM64). Os comandos abaixo são os mesmos nos três sistemas,
+exceto quando indicado. No Windows, use o PowerShell.
+
 - **Docker**
   - Windows ou macOS: [Docker Desktop](https://www.docker.com/products/docker-desktop/).
     No Windows, aceite a opção de usar o WSL 2 durante a instalação.

@@ -1,2 +1,9 @@
-# Snapshot do Qdrant (tar): nunca converter fim de linha nem tentar diff.
+# LF em todo arquivo de texto, inclusive em clones no Windows (onde o Git
+# converte para CRLF por padrao): docker-compose.yml, Dockerfile, .env,
+# migrations e script/exportar_exemplos.sql sao lidos dentro de containers
+# Linux, e CRLF quebra comandos de psql/shell de forma silenciosa.
+* text=auto eol=lf
+
+# Binarios: nunca converter fim de linha nem tentar diff.
 *.snapshot binary
+*.pdf binary

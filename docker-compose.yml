@@ -80,7 +80,11 @@ services:
         condition: service_healthy
 
   phishforge-flyway:
-    image: flyway/flyway:7.0.2
+    # 10.22.0 e multiplataforma (amd64/arm64): a 7.0.2 so existia para
+    # amd64 e rodava emulada em Mac Apple Silicon / Windows ARM (e nem
+    # roda em Linux ARM sem emulacao). Testado: migra um banco do zero e
+    # valida sem erro de checksum um banco ja migrado pela 7.0.2.
+    image: flyway/flyway:10.22.0
     container_name: phishforge-flyway
     command: >
       -configFiles=/flyway/conf/flyway.config
