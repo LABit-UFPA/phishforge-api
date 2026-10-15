@@ -211,7 +211,7 @@ I trust you understand the importance of this.
 ## 6. Dados Brutos
 
 ### 6.1 Arquivo JSON
-Os resultados completos estão disponíveis em: `zero_shot_vs_cot_20260115_234820.json`
+Os resultados completos estão disponíveis em: `avaliacoes_antigas/resultados/zero_shot_vs_cot_20260115_234820.json`
 
 ### 6.2 Resumo Numérico
 

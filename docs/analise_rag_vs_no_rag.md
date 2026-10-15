@@ -250,8 +250,8 @@ Para casos de uso que priorizam velocidade (demos, testes), a opção SEM RAG po
 
 ### 6.1 Arquivos Gerados
 
-- **COM RAG**: `with_rag_evaluation_20260116_001335.json`
-- **SEM RAG**: `no_rag_evaluation_20260116_000722.json`
+- **COM RAG**: `avaliacoes_antigas/resultados/with_rag_evaluation_20260116_001335.json`
+- **SEM RAG**: `avaliacoes_antigas/resultados/no_rag_evaluation_20260116_000722.json`
 
 ### 6.2 Resumo Numérico
 
