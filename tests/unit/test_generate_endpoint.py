@@ -21,7 +21,7 @@ async def test_generate_retorna_o_email_persistido(client, fakes):
     assert response.status_code == 200
     body = response.json()
     assert body["id"]
-    assert body["assunto"] == "Assunto de teste"
+    assert body["assunto"] == "Assunto de teste #1"
     assert body["conteudo"]
 
     # Prova de que o pipeline realmente passou pelas etapas: o fake

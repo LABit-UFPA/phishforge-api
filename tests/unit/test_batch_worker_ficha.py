@@ -36,6 +36,7 @@ class _ConteudoFixo(FakeResponseGenerator):
             difficulty, context, relevant_docs, is_malicious, variacao
         )
         draft.conteudo = "CONTEUDO IDENTICO EM TODA CHAMADA"
+        draft.assunto = "Assunto identico em toda chamada"
         return draft
 
 
@@ -240,3 +241,45 @@ async def test_run_metadata_registra_versao_do_gerador():
     job = await _rodar(worker, jobs, total=1)
     assert job.run_metadata["versao_gerador"] == VERSAO_GERADOR
     assert "anotacao_cega" in job.run_metadata
+
+
+class _AssuntoFixo(FakeResponseGenerator):
+    """Corpo diferente a cada chamada (similaridade baixa), mas sempre o
+    mesmo assunto -- o caso que passava pela dedup no piloto 3.
+    """
+
+    async def generate_response(
+        self, difficulty, context, relevant_docs, is_malicious=True, variacao=None, **kwargs
+    ):
+        draft = await super().generate_response(
+            difficulty, context, relevant_docs, is_malicious, variacao
+        )
+        draft.assunto = "Pendência na Matrícula!"
+        return draft
+
+
+async def test_assunto_identico_conta_como_repeticao_mesmo_com_corpo_diferente():
+    worker, jobs, _, _ = _montar(response_generator=_AssuntoFixo())
+
+    job = await _rodar(worker, jobs, total=2)
+
+    assert job.total_generated == 1
+    assert job.total_discarded == 1
+    segundo = [t for t in job.attempt_log if t["item"] == 2]
+    assert [t["resultado"] for t in segundo] == ["repetido", "repetido", "descartado"]
+    assert all(t["assunto_repetido"] for t in segundo)
+    assert all(t["similaridade_max"] < 0.95 for t in segundo)
+
+
+async def test_assunto_de_lote_anterior_indicado_tambem_conta():
+    jobs = FakeGenerationJobRepository()
+    service = FakePhishingService()
+
+    worker_a, _, _, _ = _montar(response_generator=_AssuntoFixo(), jobs=jobs, service=service)
+    lote_a = await _rodar(worker_a, jobs, total=1)
+
+    worker_b, _, _, _ = _montar(response_generator=_AssuntoFixo(), jobs=jobs, service=service)
+    lote_b = await _rodar(worker_b, jobs, total=1, dedup_job_ids=[lote_a.id])
+
+    assert lote_b.total_generated == 0
+    assert lote_b.total_discarded == 1

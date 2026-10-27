@@ -125,14 +125,16 @@ class FakeResponseGenerator:
         # `conteudo` inclui um contador para ser unico por chamada: com
         # FakeEmbeddingClient (deriva o embedding do texto), conteudo
         # identico em toda chamada faria a dedup por similaridade de
-        # cosseno da #11b descartar todos os itens exceto o primeiro.
+        # cosseno da #11b descartar todos os itens exceto o primeiro. O
+        # `assunto` tambem: assunto identico a um item aceito conta como
+        # repeticao na dedup (lote-piloto 3).
         self._contador += 1
         return ValidatedItemDraft(
             target_cues=list(variacao.pistas_alvo) if (variacao and is_malicious) else None,
             variation_spec=variacao.model_dump(mode="json") if variacao else None,
             receptor="alvo@example.com",
             remetente="fake@example.com",
-            assunto="Assunto de teste",
+            assunto=f"Assunto de teste #{self._contador}",
             conteudo=f"Conteudo de teste gerado pelo fake #{self._contador}, sem chamada de LLM.",
             explicacao="Explicacao de teste.",
             categoria="teste",

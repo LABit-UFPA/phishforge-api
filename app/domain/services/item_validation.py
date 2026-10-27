@@ -24,6 +24,31 @@ Lote-piloto 2 (27/10/2026):
 7. Pistas de dominio cuja evidencia nao tem dominio (um nome de setor
    anotado como sender_domain_mismatch): removidas.
 8. Assunto repetido como primeira linha do corpo: removido do corpo.
+
+Teste local da versao do piloto 3 (27/10/2026):
+
+9. Instituicao real (dominios da UFRJ num cenario sem nome de
+   organizacao): o prompt pedia organizacao ficticia, mas nada conferia.
+   O item e gerado de novo (ver instituicoes_reais.py).
+10. "Acao Necessaria" no meio do assunto (2 de 3 itens): o prompt so
+    proibia comecar com a formula. Em qualquer posicao, o item e gerado
+    de novo.
+
+Lote-piloto 3 (27/10/2026, 50 itens faceis, rodado antes dos itens 9-10):
+
+11. "Prezados Alunos," no campo do destinatario (49 de 50): o item e
+    gerado de novo se o destinatario nao for um endereco de e-mail. A
+    saudacao vai no corpo, onde a pista generic_greeting ganha posicao.
+12. Dominios caricatos ("fake", "donotclickhere", "universidade123"),
+    puxados pelo proprio exemplo do prompt: o item e gerado de novo.
+13. Links em Markdown no corpo (28 itens): "[texto](url)" vira so o
+    texto e o destino vai para `links`, que e como o especialista ve o
+    link (issue #51).
+14. Contexto fundido do RAG com um e-mail pronto assinado pela UFRJ e
+    marcadores "[Seu Nome]" (lote local de 27/10): a etapa de fusao
+    escrevia o e-mail em vez de extrair conhecimento, e o mesmo modelo ia
+    para todos os itens do lote. Alem do prompt, as linhas com
+    instituicao real e os marcadores sao tirados do contexto fundido.
 """
 
 import re
@@ -33,6 +58,14 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from pydantic import BaseModel, Field
 
 from app.domain.models.cue import CampoDaPista, Cue, CueCode
+from app.domain.models.link_ref import LinkRef
+from app.domain.services.instituicoes_reais import (
+    DOMINIOS_REAIS,
+    ESTADOS,
+    NOMES_DE_INSTITUICOES,
+    SIGLAS_DE_ENSINO,
+    SIGLAS_SO_EM_MAIUSCULAS,
+)
 
 # Qualquer trecho entre colchetes ou chaves. Num e-mail real isso quase
 # nunca aparece; no texto gerado, e quase sempre um campo de template que
@@ -43,10 +76,18 @@ _CHAVES = re.compile(r"\{([^{}\n]{1,80})\}")
 
 # Nomes de exemplo. Case-sensitive de proposito: "por exemplo" e texto
 # normal; "Universidade Exemplo" e marcador.
-_NOME_GENERICO = re.compile(r"\b(?:Exemplo|Example|XYZ|Fulano|Ciclano|Beltrano|Lorem ipsum)\b")
+# "Ficticia" entrou no lote local de 27/10 ("Universidade Ficticia"): o
+# modelo levou ao pe da letra a instrucao de inventar um nome ficticio.
+_NOME_GENERICO = re.compile(
+    r"\b(?:Exemplo|Example|XYZ|Fulano|Ciclano|Beltrano|Lorem ipsum|Fict[ií]ci[oa])\b"
+)
+# Endereco com nome de exemplo antes do arroba ("universidadeficticia@...").
+_ENDERECO_DE_EXEMPLO = re.compile(
+    r"\b[\w.+-]*(?:exemplo|example|ficticio|ficticia)[\w.+-]*@", re.IGNORECASE
+)
 # Dominio de exemplo ("exemplo.com", "universidade-exemplo.edu.br").
 _DOMINIO_DE_EXEMPLO = re.compile(
-    r"\b[\w-]*(?:exemplo|example)[\w-]*(?:\.[\w-]+)*\.[a-z]{2,6}\b", re.IGNORECASE
+    r"\b[\w-]*(?:exemplo|example|ficticio|ficticia)[\w-]*(?:\.[\w-]+)*\.[a-z]{2,6}\b", re.IGNORECASE
 )
 
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
@@ -60,6 +101,56 @@ PISTAS_DE_DOMINIO = (CueCode.SENDER_DOMAIN_MISMATCH, CueCode.TYPOSQUAT)
 _ORDEM_DOS_CAMPOS: Tuple[CampoDaPista, ...] = ("conteudo", "assunto", "remetente")
 
 _ASPAS = "\"'“”‘’«»"
+
+
+def _alternativas(termos: Iterable[str]) -> str:
+    # Mais longos primeiro: "mato grosso do sul" antes de "mato grosso".
+    return "|".join(re.escape(t) for t in sorted(termos, key=len, reverse=True))
+
+
+# Instituicoes reais, sobre o texto normalizado (sem acento, minusculas).
+# Fronteira de termo: qualquer caractere que nao seja letra ou digito
+# (espaco, ponto, arroba, hifen, sublinhado), para "ufrj" casar com
+# "@ufrj.edu.br" e "ufrj-portal.com".
+_INSTITUICAO_POR_TERMO = re.compile(
+    r"(?<![0-9a-z])(?:"
+    + _alternativas(SIGLAS_DE_ENSINO + NOMES_DE_INSTITUICOES)
+    + r")(?![0-9a-z])"
+)
+_INSTITUICAO_POR_ESTADO = re.compile(
+    r"(?<![0-9a-z])(?:universidade|instituto)(?: federal| estadual)? (?:de|do|da|dos) (?:"
+    + _alternativas(ESTADOS)
+    + r")(?![0-9a-z])"
+)
+# Dominio real, com ou sem subdominio ("receita.gov.br"), mas nao como
+# parte de outro dominio ("suportevivo.com.br" e ficticio).
+_DOMINIO_REAL = re.compile(
+    r"(?<![0-9a-z.-])(?:[0-9a-z-]+\.)*(?:"
+    + _alternativas(DOMINIOS_REAIS)
+    + r")(?![0-9a-z-]|\.[0-9a-z])"
+)
+# Siglas que so contam em maiusculas (sobre o texto sem acento, com caixa).
+_SIGLA_MAIUSCULA = re.compile(
+    r"(?<![0-9A-Za-z])(?:" + _alternativas(SIGLAS_SO_EM_MAIUSCULAS) + r")(?![0-9A-Za-z])"
+)
+
+# Dominio que se denuncia sozinho (piloto 3: "fake", "donotclickhere",
+# "universidade123"). Ficam de fora, de proposito, termos de golpe
+# realista: "seguranca-antifraude.com" e "antivirus-atualizacao.net" sao o
+# tipo de dominio que o corpus deve ter.
+_DOMINIO_CARICATO = re.compile(
+    r"fake|fals[oa]|phish|golpe|do-?not-?click|dont-?click|nao-?cli(?:que|car)|malicio|hacker|123"
+)
+
+# Sintaxe Markdown no corpo (issue #51; piloto 3: 28 de 50 itens).
+_LINK_MARKDOWN = re.compile(r"\[([^\[\]\n]{1,200})\]\(\s*(https?://[^\s)]+)\s*\)")
+_NEGRITO_MARKDOWN = re.compile(r"\*\*([^*\n]{1,200})\*\*")
+
+# "Acao Necessaria", "Acao Requerida", "Acao Imediata Necessaria" (no
+# singular ou plural), em qualquer posicao do assunto normalizado.
+_FORMULA_DE_ASSUNTO = re.compile(
+    r"(?<![0-9a-z])ac(?:ao|oes) (?:imediatas? )?(?:necessarias?|requeridas?|obrigatorias?)(?![0-9a-z])"
+)
 
 
 class PistaRemovida(BaseModel):
@@ -81,6 +172,14 @@ class RelatorioValidacao(BaseModel):
     # Quantas vezes o item foi gerado de novo, por motivo.
     regeneracoes_por_marcador: int = 0
     regeneracoes_por_remetente: int = 0
+    regeneracoes_por_destinatario: int = 0
+    regeneracoes_por_instituicao_real: int = 0
+    regeneracoes_por_dominio_caricato: int = 0
+    regeneracoes_por_assunto: int = 0
+    # Sintaxe Markdown tirada do corpo: links "[texto](url)" convertidos
+    # em texto (o destino vai para `links`) e negritos "**x**".
+    links_markdown_convertidos: int = 0
+    negritos_markdown_removidos: int = 0
     # O assunto aparecia de novo como primeira linha do corpo e foi tirado.
     assunto_removido_do_corpo: bool = False
     # True quando `cues` e `premise_alignment` vieram do anotador as
@@ -127,6 +226,7 @@ def encontrar_marcadores(
         if nomes_genericos:
             achados.extend(m.group(0) for m in _NOME_GENERICO.finditer(texto))
             achados.extend(m.group(0) for m in _DOMINIO_DE_EXEMPLO.finditer(texto))
+            achados.extend(m.group(0) for m in _ENDERECO_DE_EXEMPLO.finditer(texto))
     return achados
 
 
@@ -137,6 +237,111 @@ def endereco_de_email(texto: Optional[str]) -> Optional[str]:
     if not texto:
         return None
     m = _EMAIL.search(texto)
+    return m.group(0) if m else None
+
+
+def _sem_acento(texto: str) -> str:
+    decomposto = unicodedata.normalize("NFKD", texto)
+    return "".join(c for c in decomposto if not unicodedata.combining(c))
+
+
+def encontrar_instituicoes_reais(*textos: Optional[str]) -> List[str]:
+    """Nomes, siglas e dominios de instituicoes reais em qualquer dos
+    textos ("UFRJ", "suporte@ufrj.edu.br", "Universidade Federal do
+    Para", "receita.gov.br"), sem repeticao. Lista vazia = nada a
+    corrigir. O criterio da lista esta em instituicoes_reais.py.
+    """
+    achados: List[str] = []
+    for texto in textos:
+        if not texto:
+            continue
+        normalizado = _normalizar(texto)
+        for padrao in (_INSTITUICAO_POR_TERMO, _INSTITUICAO_POR_ESTADO, _DOMINIO_REAL):
+            achados.extend(m.group(0) for m in padrao.finditer(normalizado))
+        achados.extend(m.group(0) for m in _SIGLA_MAIUSCULA.finditer(_sem_acento(texto)))
+    return list(dict.fromkeys(achados))
+
+
+def encontrar_dominios_caricatos(*textos: Optional[str]) -> List[str]:
+    """Dominios (de endereco, link ou citados no corpo) que se denunciam
+    sozinhos: "fake", "falso", "phishing", "golpe", "donotclick", "123"...
+    Golpe real nao anuncia que e golpe no dominio. Lista vazia = nada a
+    corrigir.
+    """
+    achados: List[str] = []
+    for texto in textos:
+        if not texto:
+            continue
+        for m in _DOMINIO.finditer(texto):
+            dominio = m.group(0).casefold()
+            if _DOMINIO_CARICATO.search(dominio):
+                achados.append(dominio)
+    return list(dict.fromkeys(achados))
+
+
+def normalizar_assunto(assunto: Optional[str]) -> str:
+    """Assunto para comparacao de igualdade: sem acento, minusculas,
+    espacos colapsados e sem pontuacao final.
+    """
+    return _normalizar(assunto or "").rstrip(" .:!?")
+
+
+def converter_markdown(
+    conteudo: str, links: Sequence[LinkRef]
+) -> Tuple[str, List[LinkRef], int, int]:
+    """Tira a sintaxe Markdown do corpo. "[texto](url)" vira so "texto" e,
+    se o destino ainda nao estiver em `links`, entra la -- e assim que o
+    especialista ve um link (lista a parte, texto exibido e destino).
+    "**x**" vira "x". Devolve (corpo, links, links convertidos, negritos
+    removidos).
+    """
+    novos_links = list(links)
+    destinos = {link.href for link in novos_links}
+    convertidos = 0
+
+    def trocar(m: "re.Match[str]") -> str:
+        nonlocal convertidos
+        texto, destino = m.group(1).strip(), m.group(2)
+        if destino not in destinos:
+            novos_links.append(LinkRef(text=texto, href=destino))
+            destinos.add(destino)
+        convertidos += 1
+        return texto
+
+    conteudo = _LINK_MARKDOWN.sub(trocar, conteudo)
+    conteudo, negritos = _NEGRITO_MARKDOWN.subn(r"\1", conteudo)
+    return conteudo, novos_links, convertidos, negritos
+
+
+def limpar_contexto_fundido(texto: str) -> Tuple[str, List[str]]:
+    """Tira do contexto fundido do RAG (que vai igual para todos os itens
+    do lote) as linhas que citam instituicao real e os trechos entre
+    colchetes ou chaves ("[Seu Nome]"). Nomes de exemplo nao contam aqui:
+    "Exemplo:" e comum num resumo de conhecimento. Devolve o texto limpo e
+    o que foi tirado, para log.
+    """
+    removidos: List[str] = []
+    linhas = []
+    for linha in texto.split("\n"):
+        if encontrar_instituicoes_reais(linha):
+            removidos.append(linha.strip())
+            continue
+        for marcador in encontrar_marcadores(linha, nomes_genericos=False):
+            linha = linha.replace(marcador, "")
+            removidos.append(marcador)
+        linhas.append(linha.rstrip())
+    return "\n".join(linhas).strip(), removidos
+
+
+def formula_proibida_no_assunto(assunto: Optional[str]) -> Optional[str]:
+    """A formula "Acao Necessaria" (e variacoes) em qualquer posicao do
+    assunto, ou None. Os 9 assuntos do piloto 2 comecavam com ela e, mesmo
+    proibida no inicio, ela voltou no meio ("Protocolo #123456: Acao
+    Necessaria sobre...").
+    """
+    if not assunto:
+        return None
+    m = _FORMULA_DE_ASSUNTO.search(_normalizar(assunto))
     return m.group(0) if m else None
 
 

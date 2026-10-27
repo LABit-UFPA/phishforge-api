@@ -11,6 +11,7 @@ import pytest
 
 from app.domain.models.cue import DEFINICOES_OPERACIONAIS, Cue, CueCode
 from app.domain.models.generated_item_draft import GeneratedItemDraft, ValidatedItemDraft
+from app.domain.models.link_ref import LinkRef
 from app.domain.models.phish_scale import PremiseAlignment
 from app.domain.models.phishing_email import PhishingEmail
 from app.domain.models.variation_spec import VariationSpec
@@ -258,7 +259,13 @@ def test_prompts_de_email_trazem_as_regras_de_forma():
     for template in (generator.prompt_template.template, generator.legitimate_prompt_template.template):
         assert "REGRAS DE FORMA" in template
         assert "Ação Necessária" in template
+        assert "em nenhuma parte do assunto" in template
         assert "nome fictício e plausível" in template
+        assert "instituição real" in template
+        assert "Se o cenário não dá o nome" not in template
+        assert "`receptor` é SEMPRE o endereço de e-mail" in template
+        assert "sem Markdown" in template
+        assert "empresa123" not in template
 
 
 def test_prompt_do_anotador_usa_as_definicoes_dos_especialistas_e_nao_ve_a_ficha():
@@ -387,7 +394,7 @@ async def test_universidade_exemplo_faz_gerar_de_novo():
 
 
 async def test_assunto_repetido_no_corpo_e_removido():
-    assunto = "Ação Necessária: Divergência em Seus Dados"
+    assunto = "Divergência em Seus Dados"
     gerado = _draft(f"{assunto}\n\nPrezada Larissa Monteiro,\n\nTexto.", assunto=assunto)
 
     resultado = await _generator(_ChainSequencia(gerado)).generate_response(
@@ -408,3 +415,162 @@ async def test_pista_de_dominio_sem_dominio_sai_do_item():
     )
     assert resultado.cues == []
     assert resultado.validacao["pistas_removidas"][0]["motivo"] == "pista_de_dominio_sem_dominio"
+
+
+async def test_instituicao_real_no_remetente_faz_gerar_de_novo():
+    """Teste da versao do piloto 3: dominios da UFRJ num cenario que so
+    dizia 'universidade federal brasileira'.
+    """
+    real = _draft("Texto.", remetente="Suporte Acadêmico <suporte@educacao.ufrj.br>")
+    chain = _ChainSequencia(real, _draft("Texto."))
+
+    resultado = await _generator(chain).generate_response(
+        difficulty="medio", context="ctx", relevant_docs="docs", variacao=_ficha_medio()
+    )
+
+    assert len(chain.entradas) == 2
+    assert resultado.validacao["regeneracoes_por_instituicao_real"] == 1
+    assert "ufrj" not in resultado.remetente
+
+
+async def test_instituicao_real_no_link_tambem_conta():
+    real = _draft("Texto.")
+    real.links = [LinkRef(text="Portal do Aluno", href="https://portal.usp.br/login")]
+    chain = _ChainSequencia(real, _draft("Texto."))
+
+    await _generator(chain).generate_response(
+        difficulty="medio", context="ctx", relevant_docs="docs", variacao=_ficha_medio()
+    )
+
+    assert len(chain.entradas) == 2
+
+
+async def test_acao_necessaria_no_meio_do_assunto_faz_gerar_de_novo():
+    """O piloto 3 local teve 'Protocolo #123456: Ação Necessária sobre...':
+    a proibicao so valia para o inicio do assunto.
+    """
+    formula = _draft("Texto.", assunto="Protocolo #4471: Ação Necessária sobre o Portal")
+    chain = _ChainSequencia(formula, _draft("Texto."))
+
+    resultado = await _generator(chain).generate_response(
+        difficulty="medio", context="ctx", relevant_docs="docs", variacao=_ficha_medio()
+    )
+
+    assert len(chain.entradas) == 2
+    assert resultado.validacao["regeneracoes_por_assunto"] == 1
+    assert resultado.assunto == "Pendência no cadastro"
+
+
+async def test_regras_de_forma_valem_para_o_item_legitimo():
+    """Paridade: se so o phishing fosse barrado, 'Acao Necessaria' ou
+    instituicao real virariam atalho para o rotulo legitimo.
+    """
+    chain = _ChainSequencia(
+        _draft("Texto.", assunto="Ação Requerida: atualização"),
+        _draft("Texto.", remetente="Banco do Brasil <avisos@bb.com.br>"),
+        _draft("Texto."),
+    )
+
+    resultado = await _generator(chain, is_malicious=False).generate_response(
+        difficulty="medio", context="ctx", relevant_docs="docs", is_malicious=False,
+        variacao=_ficha_medio(),
+    )
+
+    assert len(chain.entradas) == 3
+    assert resultado.validacao["regeneracoes_por_assunto"] == 1
+    assert resultado.validacao["regeneracoes_por_instituicao_real"] == 1
+
+
+async def test_instituicao_real_que_persiste_vira_item_invalido():
+    chain = _ChainSequencia(_draft("Recadastramento obrigatório no Itaú."))
+    with pytest.raises(ItemInvalidoError, match="instituicao_real"):
+        await _generator(chain).generate_response(
+            difficulty="medio", context="ctx", relevant_docs="docs", variacao=_ficha_medio()
+        )
+    assert len(chain.entradas) == 3
+
+
+
+async def test_destinatario_sem_email_faz_gerar_de_novo():
+    """Piloto 3: 'Prezados Alunos,' no destinatario em 49 de 50 itens."""
+    saudacao = _draft("Texto.", receptor="Prezados Alunos,")
+    chain = _ChainSequencia(saudacao, _draft("Prezados alunos,\n\nTexto."))
+
+    resultado = await _generator(chain).generate_response(
+        difficulty="medio", context="ctx", relevant_docs="docs", variacao=_ficha_medio()
+    )
+
+    assert len(chain.entradas) == 2
+    assert resultado.validacao["regeneracoes_por_destinatario"] == 1
+
+
+async def test_dominio_caricato_faz_gerar_de_novo():
+    caricato = _draft("Texto.", remetente="Financeiro <noreply@universidade123.com>")
+    chain = _ChainSequencia(caricato, _draft("Texto."))
+
+    resultado = await _generator(chain).generate_response(
+        difficulty="facil", context="ctx", relevant_docs="docs", variacao=_ficha_medio()
+    )
+
+    assert len(chain.entradas) == 2
+    assert resultado.validacao["regeneracoes_por_dominio_caricato"] == 1
+
+
+class _AnotadorQueRegistra:
+    def __init__(self):
+        self.entradas = []
+
+    async def ainvoke(self, args):
+        self.entradas.append(args)
+        return AnotacaoCega(pistas=[], premise_alignment=PremiseAlignment.MEDIO)
+
+
+async def test_markdown_vira_texto_antes_da_anotacao_e_o_link_vai_para_a_lista():
+    """Piloto 3: '[Regularizar Pagamento](http://...)' cru no corpo em 28
+    itens; o especialista ve o corpo como texto puro.
+    """
+    corpo = "Prezada Larissa Monteiro,\n\nUse [Regularizar Pagamento](http://pagar-uni.com/x)."
+    generator = _generator(_ChainSequencia(_draft(corpo)))
+    generator.anotacao_cega = True
+    anotador = _AnotadorQueRegistra()
+    generator.annotation_chain = anotador
+
+    resultado = await generator.generate_response(
+        difficulty="facil", context="ctx", relevant_docs="docs", variacao=_ficha_medio()
+    )
+
+    assert "](" not in resultado.conteudo
+    assert "Use Regularizar Pagamento." in resultado.conteudo
+    assert [(link.text, link.href) for link in resultado.links] == [
+        ("Regularizar Pagamento", "http://pagar-uni.com/x")
+    ]
+    assert "](" not in anotador.entradas[0]["conteudo"]
+    assert "http://pagar-uni.com/x" in anotador.entradas[0]["links"]
+    assert resultado.validacao["links_markdown_convertidos"] == 1
+
+
+
+async def test_fusao_nao_deixa_passar_email_pronto_de_instituicao_real():
+    """Lote local de 27/10: a fusao devolveu um e-mail assinado pela UFRJ
+    com '[Seu Nome]', que ia igual para todos os itens do lote.
+    """
+    from langchain_core.messages import AIMessage
+    from langchain_core.runnables import RunnableLambda
+
+    recebido = {}
+
+    def fusao_falsa(prompt_value):
+        recebido["prompt"] = prompt_value.to_string()
+        return AIMessage(
+            content="- Urgencia: prazo curto.\nAtenciosamente,\n[Seu Nome]\nUniversidade Federal do Rio de Janeiro"
+        )
+
+    generator = ResponseGenerator(api_key="sk-nao-usada-neste-teste")
+    generator.text_llm = RunnableLambda(fusao_falsa)
+
+    fundido = await generator.fuse_and_summarize_context("cenario", ["doc da UFRJ sobre o Saphish"])
+
+    assert "Rio de Janeiro" not in fundido and "[Seu Nome]" not in fundido
+    assert "- Urgencia: prazo curto." in fundido
+    assert "NÃO escreve o e-mail" in recebido["prompt"]
+    assert "TAREFA CRIATIVA" not in recebido["prompt"]

@@ -42,6 +42,7 @@ class _ConteudoFixoResponseGenerator(FakeResponseGenerator):
             difficulty, context, relevant_docs, is_malicious, variacao
         )
         draft.conteudo = "CONTEUDO IDENTICO EM TODA CHAMADA, PARA FORCAR A DEDUP"
+        draft.assunto = "Assunto identico em toda chamada"
         return draft
 
 
