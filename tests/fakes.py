@@ -25,7 +25,7 @@ from app.domain.models.expert_evaluation import (
     ItemParaAvaliacao,
     ProgressoAvaliacao,
 )
-from app.domain.models.generated_item_draft import GeneratedItemDraft
+from app.domain.models.generated_item_draft import ValidatedItemDraft
 from app.domain.models.generation_job import GenerationFailure, GenerationJob, JobStatus
 from app.domain.models.phishing_email import PhishingEmail
 from app.dto.query import QueryResponse
@@ -101,10 +101,12 @@ class FakeResponseGenerator:
         relevant_docs,
         is_malicious: bool = True,
         variacao=None,
-    ) -> GeneratedItemDraft:
+        sortear_variacao=None,
+    ) -> ValidatedItemDraft:
         # `variacao` (ficha sorteada por item, lote-piloto de 26/10/2026)
         # fica registrada para os testes provarem que cada item recebe a
-        # sua -- o fake nao a usa para nada alem disso.
+        # sua, e volta no draft como o gerador real devolve
+        # (target_cues/variation_spec).
         self.calls.append(
             {
                 "step": "generate_response",
@@ -113,6 +115,7 @@ class FakeResponseGenerator:
                 "relevant_docs": relevant_docs,
                 "is_malicious": is_malicious,
                 "variacao": variacao,
+                "sortear_variacao": sortear_variacao,
             }
         )
         # Sem `nivel`: o draft nunca inclui dificuldade (issue #11) --
@@ -124,7 +127,9 @@ class FakeResponseGenerator:
         # identico em toda chamada faria a dedup por similaridade de
         # cosseno da #11b descartar todos os itens exceto o primeiro.
         self._contador += 1
-        return GeneratedItemDraft(
+        return ValidatedItemDraft(
+            target_cues=list(variacao.pistas_alvo) if (variacao and is_malicious) else None,
+            variation_spec=variacao.model_dump(mode="json") if variacao else None,
             receptor="alvo@example.com",
             remetente="fake@example.com",
             assunto="Assunto de teste",

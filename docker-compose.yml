@@ -126,6 +126,8 @@ services:
       # codigo -- fixar o snapshot no .env nao tinha efeito nenhum.
       MODEL_NAME_LLM: ${MODEL_NAME_LLM:-gpt-4o-mini}
       LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.7}
+      # Anotacao as cegas das pistas (2a chamada de LLM por item).
+      ANOTACAO_CEGA: ${ANOTACAO_CEGA:-true}
       # Issue #7: autenticacao entre servicos. Este compose e ambiente
       # LOCAL: sem API_KEY no .env, usa um valor padrao conhecido para
       # o gerador funcionar de primeira (o nginx do frontend injeta a

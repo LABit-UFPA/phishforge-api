@@ -90,14 +90,15 @@ class PhishingEmailRepository:
                         await conn.execute(
                             """
                             INSERT INTO email_cues
-                            (email_id, cue_id, span_start, span_end, evidencia)
-                            VALUES ($1, $2, $3, $4, $5)
+                            (email_id, cue_id, span_start, span_end, evidencia, campo)
+                            VALUES ($1, $2, $3, $4, $5, $6)
                             """,
                             email_id,
                             cue_id,
                             cue.span_start,
                             cue.span_end,
                             cue.evidencia,
+                            cue.campo,
                         )
 
                 return email_id
@@ -259,7 +260,7 @@ class PhishingEmailRepository:
             return {}
         rows = await conn.fetch(
             """
-            SELECT ec.email_id, c.code, ec.span_start, ec.span_end, ec.evidencia
+            SELECT ec.email_id, c.code, ec.span_start, ec.span_end, ec.evidencia, ec.campo
             FROM email_cues ec
             JOIN cues c ON c.id = ec.cue_id
             WHERE ec.email_id = ANY($1::uuid[])
@@ -275,6 +276,7 @@ class PhishingEmailRepository:
                     span_start=row["span_start"],
                     span_end=row["span_end"],
                     evidencia=row["evidencia"],
+                    campo=row["campo"],
                 )
             )
         return cues_por_email

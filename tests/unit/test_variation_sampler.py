@@ -14,8 +14,17 @@ from app.domain.services.variation_sampler import (
     ACAO_ANEXO,
     ACOES_COM_LINK,
     ACOES_SEM_LINK,
+    ASSINATURA_PESSOA,
+    COMO_REALIZAR,
+    ENDERECO_DOMINIO_ERRADO,
+    ENDERECO_LIVRE,
+    ENDERECO_PLAUSIVEL,
+    ENDERECO_TYPOSQUAT,
+    ESTILOS_DE_ASSUNTO,
     ESTRUTURAS_COMPLETAS,
+    PISTA_FIXA_FACIL,
     POOL_DIFICIL,
+    POOL_FACIL,
     POOL_MEDIO,
     VariationSampler,
     renderizar_ficha,
@@ -140,3 +149,74 @@ def test_renderizar_ficha_sem_nome_pede_saudacao_generica():
 
 def test_renderizar_sem_ficha_devolve_instrucao_de_escolha_livre():
     assert "Nenhuma ficha" in renderizar_ficha(None)
+
+
+# ---------------------------------------------------------------------------
+# Lote-piloto 2 (27/10/2026)
+# ---------------------------------------------------------------------------
+
+
+def test_estilo_do_assunto_varia_dentro_do_lote():
+    """Piloto 2: os 9 assuntos comecavam com 'Acao Necessaria:'."""
+    sampler = _sampler()
+    estilos = [sampler.sortear("medio").estilo_assunto for _ in range(len(ESTILOS_DE_ASSUNTO))]
+    assert set(estilos) == set(ESTILOS_DE_ASSUNTO)
+
+
+def test_nome_de_quem_assina_so_quando_a_assinatura_e_uma_pessoa():
+    sampler = _sampler()
+    for _ in range(20):
+        ficha = sampler.sortear("medio")
+        if ficha.assinatura == ASSINATURA_PESSOA:
+            assert ficha.nome_remetente and ficha.nome_remetente != ficha.nome_destinatario
+        else:
+            assert ficha.nome_remetente is None
+
+
+def test_endereco_do_remetente_segue_as_pistas_alvo_do_medio():
+    sampler = _sampler()
+    for _ in range(42):
+        ficha = sampler.sortear("medio")
+        if CueCode.SENDER_DOMAIN_MISMATCH in ficha.pistas_alvo:
+            assert ficha.endereco_remetente == ENDERECO_DOMINIO_ERRADO
+        elif CueCode.TYPOSQUAT in ficha.pistas_alvo:
+            assert ficha.endereco_remetente == ENDERECO_TYPOSQUAT
+        else:
+            assert ficha.endereco_remetente == ENDERECO_PLAUSIVEL
+
+
+def test_dificil_mantem_o_orcamento_de_uma_pista():
+    sampler = _sampler()
+    for _ in range(4):
+        ficha = sampler.sortear("dificil")
+        if ficha.pistas_alvo == [CueCode.TYPOSQUAT]:
+            # O typosquat vai no link obrigatorio; o remetente fica plausivel.
+            assert ficha.endereco_remetente == ENDERECO_PLAUSIVEL
+        else:
+            assert "link obrigatório aponta para esse mesmo domínio" in ficha.endereco_remetente
+
+
+def test_facil_sem_pista_de_dominio_deixa_o_remetente_livre():
+    sampler = _sampler()
+    for _ in range(21):
+        ficha = sampler.sortear("facil")
+        if not {CueCode.SENDER_DOMAIN_MISMATCH, CueCode.TYPOSQUAT} & set(ficha.pistas_alvo):
+            assert ficha.endereco_remetente == ENDERECO_LIVRE
+
+
+def test_ficha_renderizada_diz_como_realizar_cada_pista_alvo():
+    ficha = _sampler().sortear("medio")
+    texto = renderizar_ficha(ficha)
+    for pista in ficha.pistas_alvo:
+        assert f"`{pista.value}`: {COMO_REALIZAR[pista]}" in texto
+    assert ficha.estilo_assunto in texto
+    assert ficha.endereco_remetente in texto
+
+
+def test_toda_pista_dos_pools_tem_instrucao_de_como_realizar():
+    for pista in {*POOL_MEDIO, *POOL_DIFICIL, *POOL_FACIL, PISTA_FIXA_FACIL}:
+        assert COMO_REALIZAR[pista]
+
+
+def test_scarcity_e_explicada_como_quantidade_e_nao_prazo():
+    assert "não é prazo" in COMO_REALIZAR[CueCode.SCARCITY]

@@ -36,7 +36,7 @@ class _ConteudoFixoResponseGenerator(FakeResponseGenerator):
     """
 
     async def generate_response(
-        self, difficulty, context, relevant_docs, is_malicious=True, variacao=None
+        self, difficulty, context, relevant_docs, is_malicious=True, variacao=None, **kwargs
     ):
         draft = await super().generate_response(
             difficulty, context, relevant_docs, is_malicious, variacao
@@ -56,7 +56,7 @@ class _FalhaNaSegundaChamadaResponseGenerator(FakeResponseGenerator):
         self._chamadas_generate_response = 0
 
     async def generate_response(
-        self, difficulty, context, relevant_docs, is_malicious=True, variacao=None
+        self, difficulty, context, relevant_docs, is_malicious=True, variacao=None, **kwargs
     ):
         self._chamadas_generate_response += 1
         if self._chamadas_generate_response == 2:

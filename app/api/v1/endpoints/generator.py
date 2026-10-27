@@ -144,23 +144,25 @@ async def generate(
     # uma tambem, para os dois fluxos usarem o mesmo prompt e o item
     # avulso ficar com a mesma rastreabilidade do item de lote. Sem
     # semente: o item avulso nao tem um lote a reproduzir.
-    ficha = VariationSampler(random.Random()).sortear(
-        payload.difficulty.value, payload.is_malicious
-    )
+    sampler = VariationSampler(random.Random())
+
+    def sortear():
+        return sampler.sortear(payload.difficulty.value, payload.is_malicious)
+
     try:
         draft = await response_generator.generate_response(
             difficulty=payload.difficulty.value,
             context=built.generation_context,
             relevant_docs=built.fused_context,
             is_malicious=payload.is_malicious,
-            variacao=ficha,
+            variacao=sortear(),
+            sortear_variacao=sortear,
         )
+        # Ficha usada e pistas-alvo vem no draft (target_cues/variation_spec).
         phishing_example = PhishingEmail(
             **draft.model_dump(),
             nivel=payload.difficulty.value,
             is_malicious=payload.is_malicious,
-            target_cues=list(ficha.pistas_alvo) if payload.is_malicious else None,
-            variation_spec=ficha.model_dump(mode="json"),
         )
     except Exception as e:
         raise HTTPException(

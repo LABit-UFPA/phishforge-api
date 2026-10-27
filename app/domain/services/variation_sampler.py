@@ -43,14 +43,74 @@ SOBRENOMES: Tuple[str, ...] = (
     "Vasconcelos", "Vieira",
 )
 
+ASSINATURA_PESSOA = "uma pessoa com nome e cargo dentro da organização do cenário"
 ASSINATURAS: Tuple[str, ...] = (
     "um setor ou departamento da organização do cenário, com assinatura "
     "institucional e sem nome de pessoa",
-    "uma pessoa com nome e cargo dentro da organização do cenário",
+    ASSINATURA_PESSOA,
     "uma notificação automática de sistema da organização do cenário, sem "
     "pessoa e com tom de sistema",
     "um serviço terceirizado ou parceiro que atende a organização do cenário",
 )
+
+# Estilo do assunto (piloto 2: os 9 assuntos comecavam com "Acao
+# Necessaria:", com dois pares identicos -- a ficha variava o corpo, nao
+# o assunto).
+ESTILOS_DE_ASSUNTO: Tuple[str, ...] = (
+    "só o tema, curto, sem verbo no imperativo (ex.: 'Pendência no cadastro')",
+    "com um número de protocolo ou de referência",
+    "em forma de pergunta",
+    "como notificação automática de sistema",
+    "citando uma data ou um prazo",
+    "citando o setor ou o serviço que envia",
+)
+
+# Como realizar cada pista-alvo no texto (piloto 2: pistas pedidas sem
+# instrucao concreta viravam anotacao sem lastro -- typosquat com
+# evidencia "Universidade Exemplo", scarcity com evidencia de prazo).
+# Coerente com DEFINICOES_OPERACIONAIS (cue.py).
+COMO_REALIZAR: Dict[CueCode, str] = {
+    CueCode.URGENCY: "um prazo curto ou vago para agir, ou uma consequência iminente",
+    CueCode.AUTHORITY: (
+        "invocar uma autoridade (direção, órgão, chefia, norma ou sanção) para exigir a ação"
+    ),
+    CueCode.CREDENTIAL_REQUEST: (
+        "pedir diretamente senha, código de verificação, dado de cartão ou login"
+    ),
+    CueCode.UNEXPECTED_ATTACHMENT: (
+        "um anexo a abrir ou preencher, com nome de arquivo, que a pessoa não esperava"
+    ),
+    CueCode.SENDER_DOMAIN_MISMATCH: (
+        "o nome exibido no remetente finge ser a organização, mas o endereço usa um domínio "
+        "de e-mail gratuito ou de outra entidade"
+    ),
+    CueCode.TYPOSQUAT: (
+        "um domínio que imita o da organização com um caractere trocado, a mais ou a menos "
+        "(no endereço do remetente, ou no destino do link quando houver link)"
+    ),
+    CueCode.SCARCITY: (
+        "quantidade ou oferta limitada (poucas vagas, só para os primeiros, benefício que "
+        "acaba) -- não é prazo, prazo é urgency"
+    ),
+    CueCode.GENERIC_GREETING: "saudação genérica, sem nome de pessoa",
+    CueCode.LINK_TEXT_MISMATCH: (
+        "o texto do link sugere um destino oficial, mas o destino real (href) é outro domínio"
+    ),
+    CueCode.HOMOGLYPH: "um caractere visualmente parecido trocado num domínio ou nome",
+}
+
+ENDERECO_TYPOSQUAT = (
+    "use um domínio que imita o da organização com um caractere trocado, a mais ou a menos"
+)
+ENDERECO_DOMINIO_ERRADO = (
+    "o nome exibido finge ser a organização, mas o endereço usa um domínio de e-mail "
+    "gratuito ou de outra entidade"
+)
+ENDERECO_PLAUSIVEL = (
+    "use um domínio plausível da própria organização, sem erro de digitação: as pistas-alvo "
+    "não incluem pista de domínio"
+)
+ENDERECO_LIVRE = "livre, conforme o nível"
 
 ANGULOS_DE_PRETEXTO: Tuple[str, ...] = (
     "um documento ou comprovante que estaria faltando ou vencido",
@@ -197,8 +257,11 @@ class VariationSampler:
             raise ValueError(f"dificuldade fora do vocabulario: '{difficulty}'")
 
         estruturas = ESTRUTURAS_FACIL if difficulty == "facil" else ESTRUTURAS_COMPLETAS
+        assinatura = self._proximo("assinatura", ASSINATURAS)
         comum = dict(
-            assinatura=self._proximo("assinatura", ASSINATURAS),
+            assinatura=assinatura,
+            nome_remetente=self._nome() if assinatura == ASSINATURA_PESSOA else None,
+            estilo_assunto=self._proximo("estilo_assunto", ESTILOS_DE_ASSUNTO),
             angulo_pretexto=self._proximo("angulo", ANGULOS_DE_PRETEXTO),
             tom=self._proximo("tom", TONS),
             estrutura=self._proximo(f"estrutura_{difficulty}", estruturas),
@@ -207,8 +270,13 @@ class VariationSampler:
 
         if not is_malicious:
             # Item legitimo: sempre personalizado (sinal de confianca do
-            # prompt legitimo), sem acao sorteada e sem pista.
-            return VariationSpec(nome_destinatario=self._nome(), **comum)
+            # prompt legitimo), sem acao sorteada e sem pista; o
+            # remetente e sempre da propria organizacao.
+            return VariationSpec(
+                nome_destinatario=self._nome(),
+                endereco_remetente="use o domínio oficial da própria organização",
+                **comum,
+            )
 
         pistas = self._pistas_alvo(difficulty)
         if difficulty == "medio":
@@ -221,7 +289,35 @@ class VariationSampler:
             acao = self._proximo("acao_com_link", ACOES_COM_LINK)
 
         nome = None if PISTA_FIXA_FACIL in pistas else self._nome()
-        return VariationSpec(nome_destinatario=nome, acao=acao, pistas_alvo=pistas, **comum)
+        return VariationSpec(
+            nome_destinatario=nome,
+            endereco_remetente=_instrucao_de_endereco(difficulty, pistas),
+            acao=acao,
+            pistas_alvo=pistas,
+            **comum,
+        )
+
+
+def _instrucao_de_endereco(difficulty: str, pistas: Sequence[CueCode]) -> str:
+    """Dominio do remetente coerente com as pistas-alvo. No dificil, o
+    typosquat vai no link obrigatorio, entao o remetente fica plausivel.
+    No facil, sem pista de dominio no alvo, o nivel ja pede remetente
+    suspeito -- fica livre.
+    """
+    if CueCode.SENDER_DOMAIN_MISMATCH in pistas:
+        if difficulty == "dificil":
+            # O link obrigatorio do dificil iria para um typosquat por
+            # padrao, criando uma 2a pista alem do orcamento de 1.
+            return (
+                ENDERECO_DOMINIO_ERRADO + "; o link obrigatório aponta para esse mesmo domínio, "
+                "sem imitar o oficial com erro de digitação"
+            )
+        return ENDERECO_DOMINIO_ERRADO
+    if CueCode.TYPOSQUAT in pistas and difficulty != "dificil":
+        return ENDERECO_TYPOSQUAT
+    if difficulty == "facil":
+        return ENDERECO_LIVRE
+    return ENDERECO_PLAUSIVEL
 
 
 def renderizar_ficha(ficha: Optional[VariationSpec]) -> str:
@@ -243,9 +339,14 @@ def renderizar_ficha(ficha: Optional[VariationSpec]) -> str:
             "(ex.: 'Prezado(a) cliente'), sem nenhum nome de pessoa"
         )
 
+    quem_assina = ficha.assinatura
+    if ficha.nome_remetente:
+        quem_assina += f" -- o nome de quem assina é {ficha.nome_remetente}"
     linhas = [
         f"- Destinatário: {destinatario}",
-        f"- Quem assina: {ficha.assinatura}",
+        f"- Quem assina (na assinatura, no fim do corpo): {quem_assina}",
+        f"- Endereço do remetente (`remetente`, sempre um e-mail): {ficha.endereco_remetente}",
+        f"- Estilo do assunto: {ficha.estilo_assunto}",
         f"- Detalhe concreto do pretexto (dentro do cenário pedido, sem trocá-lo): "
         f"{ficha.angulo_pretexto}",
     ]
@@ -257,8 +358,10 @@ def renderizar_ficha(ficha: Optional[VariationSpec]) -> str:
         f"- Abertura: {ficha.abertura}",
     ]
     if ficha.pistas_alvo:
-        codigos = ", ".join(f"`{p.value}`" for p in ficha.pistas_alvo)
-        linhas.append(f"- Pistas-alvo (o e-mail deve conter estas pistas da taxonomia): {codigos}")
+        linhas.append("- Pistas-alvo (o e-mail deve conter cada uma, de forma reconhecível):")
+        linhas.extend(
+            f"    - `{p.value}`: {COMO_REALIZAR[p]}" for p in ficha.pistas_alvo
+        )
     else:
         linhas.append("- Pistas-alvo: nenhuma (item legítimo)")
     return "\n".join(linhas)
