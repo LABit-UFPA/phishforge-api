@@ -110,7 +110,14 @@ ENDERECO_PLAUSIVEL = (
     "use um domínio plausível da própria organização, sem erro de digitação: as pistas-alvo "
     "não incluem pista de domínio"
 )
-ENDERECO_LIVRE = "livre, conforme o nível"
+# Facil sem pista de dominio no alvo (piloto 3): "livre" puxava dominios
+# caricatos ("universidade123", "donotclickhere"), ecoando o exemplo do
+# prompt. O nivel pede remetente fora da organizacao, mas realista.
+ENDERECO_LIVRE = (
+    "um endereço claramente fora da organização, mas realista: e-mail gratuito (gmail, "
+    "outlook, hotmail) com nome de setor, ou o domínio de uma empresa sem relação com o "
+    "cenário"
+)
 
 ANGULOS_DE_PRETEXTO: Tuple[str, ...] = (
     "um documento ou comprovante que estaria faltando ou vencido",
@@ -302,7 +309,7 @@ def _instrucao_de_endereco(difficulty: str, pistas: Sequence[CueCode]) -> str:
     """Dominio do remetente coerente com as pistas-alvo. No dificil, o
     typosquat vai no link obrigatorio, entao o remetente fica plausivel.
     No facil, sem pista de dominio no alvo, o nivel ja pede remetente
-    suspeito -- fica livre.
+    fora da organizacao -- realista, nunca caricato (ENDERECO_LIVRE).
     """
     if CueCode.SENDER_DOMAIN_MISMATCH in pistas:
         if difficulty == "dificil":

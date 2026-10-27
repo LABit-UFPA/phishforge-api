@@ -4,13 +4,22 @@
 sem e-mail, pistas de dominio sem dominio e assunto repetido no corpo.
 """
 
+import pytest
+
 from app.domain.models.cue import Cue, CueCode
+from app.domain.models.link_ref import LinkRef
 from app.domain.services.item_validation import (
     RelatorioValidacao,
     calcular_spans,
+    converter_markdown,
+    encontrar_dominios_caricatos,
+    encontrar_instituicoes_reais,
     encontrar_marcadores,
     endereco_de_email,
+    formula_proibida_no_assunto,
+    limpar_contexto_fundido,
     localizar_evidencia,
+    normalizar_assunto,
     registrar_aderencia,
     remover_assunto_repetido,
     remover_pistas_de_dominio_sem_dominio,
@@ -224,3 +233,183 @@ def test_sem_pistas_alvo_aderencia_nao_registra_nada():
     registrar_aderencia([Cue(code=CueCode.URGENCY, evidencia="x")], [], relatorio)
     assert relatorio.pistas_alvo_ausentes == []
     assert relatorio.pistas_fora_do_alvo == []
+
+
+# ---- Teste local da versao do piloto 3 (27/10/2026) ----------------------
+
+@pytest.mark.parametrize(
+    "texto, esperado",
+    [
+        ("Suporte Acadêmico <suporte@educacao.ufrj.br>", "ufrj"),
+        ("bruno.oliveira@ufrj.edu.br", "ufrj"),
+        ("Secretaria da UFPA informa", "ufpa"),
+        ("Universidade Federal do Pará", "universidade federal do para"),
+        ("a Universidade de São Paulo", "universidade de sao paulo"),
+        ("Instituto Federal de Mato Grosso do Sul", "instituto federal de mato grosso do sul"),
+        ("Atualize seu cadastro no Itaú", "itau"),
+        ("Banco do Brasil", "banco do brasil"),
+        ("https://bancodobrasil-seguro.com/login", "bancodobrasil"),
+        ("acesse receita.gov.br/restituicao", "receita.gov.br"),
+        ("Sua encomenda nos Correios", "correios"),
+        ("avisos@claro.com.br", "claro.com.br"),
+        ("Sua fatura TIM venceu", "TIM"),
+        ("Portal Puc-Rio", "puc"),
+        ("contato@univesp.edu.br", "univesp"),
+    ],
+)
+def test_encontra_instituicao_real(texto, esperado):
+    assert esperado in encontrar_instituicoes_reais(texto)
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "Secretaria Acadêmica <secretaria@unifloresta.edu.br>",
+        "suporteuniversidade123@gmail.com",
+        "Verifique sua caixa de entrada",
+        "Claro, posso ajudar. Estamos ao vivo hoje.",
+        "Oi, Maria! Tudo bem?",
+        "Universidade Federal Nova Esperança",
+        "Universidade Federal Brasileira",
+        "empresas americanas e europeias",
+        "a central telefônica da faculdade",
+        "precisamos unir esforços",
+        "o tim-tim da comemoração",
+        "suporte@suportevivo.com.br",
+        "envie pelo WhatsApp",
+    ],
+)
+def test_nao_confunde_palavra_comum_ou_organizacao_ficticia(texto):
+    assert encontrar_instituicoes_reais(texto) == []
+
+
+def test_instituicoes_sem_repeticao_e_varios_textos():
+    achados = encontrar_instituicoes_reais("UFRJ informa", "suporte@ufrj.br", None, "")
+    assert achados == ["ufrj"]
+
+
+@pytest.mark.parametrize(
+    "assunto",
+    [
+        "Ação Necessária: atualize seus dados",
+        "Protocolo #123456: Ação Necessária sobre o Portal do Estudante",
+        "Atualizações do Portal do Estudante – Ação Necessária",
+        "AÇÃO IMEDIATA NECESSÁRIA",
+        "acao requerida no cadastro",
+        "Ações necessárias para a matrícula",
+    ],
+)
+def test_formula_proibida_em_qualquer_posicao_do_assunto(assunto):
+    assert formula_proibida_no_assunto(assunto) is not None
+
+
+@pytest.mark.parametrize(
+    "assunto",
+    [
+        "Atualização necessária no cadastro",
+        "Ações do semestre",
+        "Sua ação foi registrada",
+        "",
+        None,
+    ],
+)
+def test_assunto_sem_formula_proibida(assunto):
+    assert formula_proibida_no_assunto(assunto) is None
+
+
+
+# ---- Lote-piloto 3 (27/10/2026, 50 itens faceis) -------------------------
+
+@pytest.mark.parametrize(
+    "texto, esperado",
+    [
+        ("noreply@universidade123.com", "universidade123.com"),
+        ("Suporte <suporte@fake-portal.com>", "fake-portal.com"),
+        ("http://donotclickhere.net/login", "donotclickhere.net"),
+        ("acesse portal-falso.com.br", "portal-falso.com.br"),
+        ("http://golpe-matricula.com", "golpe-matricula.com"),
+        ("seguranca@phishing-test.org", "phishing-test.org"),
+    ],
+)
+def test_encontra_dominio_caricato(texto, esperado):
+    assert esperado in encontrar_dominios_caricatos(texto)
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "secretaria.unifloresta@gmail.com",
+        "https://seguranca-antifraude.com/verificar",
+        "http://antivirus-atualizacao.net",
+        "Cuidado com golpes: nunca informe sua senha.",
+        "Protocolo 12345 registrado",
+        "portal.unifloresta.edu.br",
+    ],
+)
+def test_dominio_realista_ou_texto_comum_nao_e_caricato(texto):
+    assert encontrar_dominios_caricatos(texto) == []
+
+
+def test_normalizar_assunto_ignora_caixa_acento_espaco_e_pontuacao_final():
+    assert normalizar_assunto("Pendência  na MATRÍCULA!") == normalizar_assunto("pendencia na matricula")
+    assert normalizar_assunto(None) == ""
+
+
+def test_converter_markdown_tira_a_sintaxe_e_leva_o_destino_para_links():
+    corpo = "Clique em [Regularizar Pagamento](http://pagamentos-uni.com/r) hoje."
+    novo, links, convertidos, negritos = converter_markdown(corpo, [])
+
+    assert novo == "Clique em Regularizar Pagamento hoje."
+    assert links == [LinkRef(text="Regularizar Pagamento", href="http://pagamentos-uni.com/r")]
+    assert (convertidos, negritos) == (1, 0)
+
+
+def test_converter_markdown_nao_duplica_link_que_ja_esta_na_lista():
+    existente = LinkRef(text="Portal", href="https://portal-uni.com")
+    corpo = "Acesse [o portal](https://portal-uni.com) e [o guia](https://guia-uni.com)."
+    novo, links, convertidos, _ = converter_markdown(corpo, [existente])
+
+    assert novo == "Acesse o portal e o guia."
+    assert links == [existente, LinkRef(text="o guia", href="https://guia-uni.com")]
+    assert convertidos == 2
+
+
+def test_converter_markdown_tira_negrito_e_preserva_texto_comum():
+    novo, links, convertidos, negritos = converter_markdown(
+        "Prazo: **sexta-feira**. Valor [R$ 50] e 2*3=6.", []
+    )
+    assert novo == "Prazo: sexta-feira. Valor [R$ 50] e 2*3=6."
+    assert (links, convertidos, negritos) == ([], 0, 1)
+
+
+
+def test_ficticia_conta_como_nome_de_exemplo():
+    """O modelo levou ao pe da letra 'invente um nome ficticio'."""
+    assert encontrar_marcadores("Universidade Fictícia informa") == ["Fictícia"]
+    assert encontrar_marcadores("contato@universidadeficticia.com.br")
+    assert encontrar_marcadores("Secretaria <universidadeficticia@gmail.com>")
+    assert encontrar_marcadores("um caso fictício citado no artigo") == []
+
+
+def test_limpar_contexto_fundido_tira_assinatura_real_e_marcadores():
+    fundido = (
+        "- Urgencia: prazo curto para regularizar a matricula.\n"
+        "- Exemplo: o remetente imita a secretaria academica.\n"
+        "[Seu Nome]\n"
+        "Universidade Federal do Rio de Janeiro\n"
+        "- Saphish: app gamificado [1] de conscientizacao."
+    )
+
+    limpo, removidos = limpar_contexto_fundido(fundido)
+
+    assert "Rio de Janeiro" not in limpo and "[" not in limpo
+    assert "- Urgencia: prazo curto para regularizar a matricula." in limpo
+    assert "- Exemplo: o remetente imita a secretaria academica." in limpo
+    assert "- Saphish: app gamificado  de conscientizacao." in limpo
+    assert "Universidade Federal do Rio de Janeiro" in removidos
+    assert "[Seu Nome]" in removidos
+
+
+def test_limpar_contexto_fundido_sem_problema_nao_muda_nada():
+    texto = "- Autoridade: e-mail se passa pela coordenacao do curso."
+    assert limpar_contexto_fundido(texto) == (texto, [])

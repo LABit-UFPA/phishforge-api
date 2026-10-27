@@ -226,7 +226,7 @@ LibreOffice, Google Sheets, pandas ou R. Use a codificação UTF-8 ao importar.
 | `pistas` | códigos das pistas anotadas (pelo anotador às cegas, quando ligado), separados por `;` |
 | `pistas_alvo` | códigos das pistas que a ficha mandou incluir, separados por `;` (vazio em exemplos anteriores à ficha) |
 | `ficha` | a ficha sorteada para o exemplo (JSON) |
-| `validacao` | o que a validação automática corrigiu (JSON): evidências que não são trecho literal do texto, pistas removidas, regenerações (marcador como `[Nome]` ou remetente sem e-mail), assunto tirado do corpo, pistas-alvo que não foram encontradas e, com anotação às cegas, o que o próprio gerador tinha declarado (`cues_autodeclaradas`) |
+| `validacao` | o que a validação automática corrigiu (JSON): evidências que não são trecho literal do texto, pistas removidas, regenerações (marcador como `[Nome]`, remetente ou destinatário sem e-mail, instituição real, domínio caricato ou "Ação Necessária" no assunto), links Markdown convertidos, assunto tirado do corpo, pistas-alvo que não foram encontradas e, com anotação às cegas, o que o próprio gerador tinha declarado (`cues_autodeclaradas`) |
 | `lote_id`, `contexto_lote` | o lote e o contexto que geraram o exemplo (vazios no modo Único) |
 
 **`pistas.csv`**: uma pista por linha (um e-mail pode ter várias).
@@ -293,7 +293,12 @@ docker compose logs --tail 100 phishforge-api
    `text-embedding-3-small`.
 4. **Reordenação** desses trechos por um *cross-encoder*
    (`ms-marco-MiniLM-L-6-v2`).
-5. **Fusão**: os 3 melhores trechos são resumidos num contexto acadêmico.
+5. **Fusão**: os 3 melhores trechos são resumidos em tópicos de conhecimento
+   técnico (táticas, gatilhos, sinais por nível), sem escrever e-mail nem
+   citar instituições ou pessoas dos artigos. Linhas com instituição real e
+   texto entre colchetes são tiradas desse resumo, que vai igual para todos
+   os exemplos do lote. Até a versão `2026-10-27-piloto3`, essa etapa podia
+   devolver um e-mail pronto (ver `run_metadata.fused_context` dos lotes).
 6. **Ficha**: o sistema sorteia, para o exemplo, destinatário, quem assina,
    detalhe do pretexto, ação, tom, estrutura, abertura e as pistas-alvo do
    nível. O sorteio é balanceado: dentro de um lote, cada valor (e cada par de
@@ -303,8 +308,14 @@ docker compose logs --tail 100 phishforge-api
    estimativa pelo NIST Phish Scale.
 8. **Validação de forma**: exemplo gerado de novo, com outra ficha (até 2
    vezes), se vier com texto entre colchetes ou chaves, nome de exemplo
-   ("Universidade Exemplo") ou remetente sem endereço de e-mail. Persistindo,
-   conta como falha. O assunto repetido na primeira linha do corpo é tirado.
+   ("Universidade Exemplo"), remetente ou destinatário sem endereço de
+   e-mail, nome, sigla ou domínio de instituição real (lista versionada em
+   `app/domain/services/instituicoes_reais.py`; a organização do e-mail é
+   sempre fictícia), domínio caricato ("fake", "golpe", "donotclick", "123"
+   e parecidos) ou a fórmula "Ação Necessária" em qualquer parte do assunto.
+   Vale também para itens legítimos. Persistindo, conta como falha. O corpo
+   perde a sintaxe Markdown ("[texto](url)" vira só o texto, e o destino vai
+   para a lista de links) e o assunto repetido na primeira linha do corpo.
 9. **Anotação às cegas**: uma segunda chamada ao LLM, que vê só o e-mail
    pronto e o cenário, anota as pistas (com campo e trecho) e o alinhamento
    de premissa, com as mesmas definições operacionais dos especialistas.
@@ -314,9 +325,10 @@ docker compose logs --tail 100 phishforge-api
     evidência. Daí sai a estimativa pelo NIST Phish Scale.
 11. **Checagem de repetição**: similaridade de cosseno (embeddings
     `text-embedding-3-small`) de assunto + corpo com os exemplos já aceitos
-    no lote e nos lotes indicados em `dedup_job_ids`. Acima de 0,95, o
-    exemplo é gerado de novo com outra ficha, até 2 vezes; depois disso, é
-    descartado.
+    no lote e nos lotes indicados em `dedup_job_ids`. Acima de 0,95, ou com
+    assunto idêntico ao de um exemplo já aceito (ignorando maiúsculas, acentos
+    e pontuação final), o exemplo é gerado de novo com outra ficha, até 2
+    vezes; depois disso, é descartado.
 
 No lote, os passos 1 a 5 rodam uma vez e os passos 6 a 11 rodam uma vez por
 exemplo. A versão do gerador fica registrada em `run_metadata.versao_gerador`

@@ -20,8 +20,13 @@ from app.domain.services.item_validation import (
     PistaRemovida,
     RelatorioValidacao,
     calcular_spans,
+    converter_markdown,
+    encontrar_dominios_caricatos,
+    encontrar_instituicoes_reais,
     encontrar_marcadores,
     endereco_de_email,
+    formula_proibida_no_assunto,
+    limpar_contexto_fundido,
     registrar_aderencia,
     remover_assunto_repetido,
     remover_pistas_de_dominio_sem_dominio,
@@ -35,18 +40,33 @@ from pydantic import BaseModel, Field
 # generation_jobs.run_metadata de cada lote. Mudar prompt ou validacao =
 # mudar esta string, para os lotes de versoes diferentes nao se
 # misturarem na analise.
-VERSAO_GERADOR = "2026-10-27-piloto3"
+VERSAO_GERADOR = "2026-10-27-piloto4"
 
 # Quantas vezes gerar o item de novo quando ele volta estruturalmente
-# invalido (marcador de template, remetente sem e-mail). Esgotado,
+# invalido (marcador de template, remetente ou destinatario sem e-mail,
+# instituicao real, dominio caricato, "Acao Necessaria" no assunto). Esgotado,
 # generate_response levanta ItemInvalidoError (falha de geracao, nao
 # descarte por duplicidade).
 MAX_REGENERACOES_POR_MARCADOR = 2
 
 
+# Campo de RelatorioValidacao incrementado a cada regeneracao, por motivo
+# devolvido por ResponseGenerator._problema_estrutural.
+_CONTADOR_POR_MOTIVO = {
+    "marcador": "regeneracoes_por_marcador",
+    "remetente_sem_email": "regeneracoes_por_remetente",
+    "destinatario_sem_email": "regeneracoes_por_destinatario",
+    "instituicao_real": "regeneracoes_por_instituicao_real",
+    "dominio_caricato": "regeneracoes_por_dominio_caricato",
+    "assunto_proibido": "regeneracoes_por_assunto",
+}
+
+
 class ItemInvalidoError(Exception):
     """Item gerado que nao pode ser usado mesmo depois das
-    regeneracoes (marcador de template ou remetente sem e-mail).
+    regeneracoes (marcador de template, remetente ou destinatario sem
+    e-mail, instituicao real, dominio caricato ou formula proibida no
+    assunto).
     """
 
 
@@ -88,14 +108,24 @@ _REGRAS_DE_FORMA = (
     "no formato 'Nome Exibido <endereco@dominio>'. Quem assina, da ficha, aparece na "
     "assinatura no fim do `conteudo`; não substitui o endereço.\n"
     "- O domínio do endereço do remetente segue a linha 'Endereço do remetente' da ficha.\n"
-    "- Se o cenário não dá o nome da organização, invente um nome fictício e plausível "
-    "(nunca o de uma instituição real, nunca 'Exemplo', 'XYZ' ou parecidos) e use o mesmo "
-    "nome em todo o e-mail. O domínio oficial dela é coerente com esse nome; o do "
-    "remetente segue a ficha.\n"
+    "- `receptor` é SEMPRE o endereço de e-mail de quem recebe (com o nome da ficha, se "
+    "houver: 'Nome <endereco@dominio>'), nunca uma saudação nem um grupo como 'Prezados "
+    "Alunos'. A saudação vai na primeira linha do `conteudo`.\n"
+    "- Domínios e endereços são realistas: nunca domínios que se denunciam sozinhos, com "
+    "'fake', 'falso', 'phishing', 'golpe', 'donotclick', '123' ou parecidos.\n"
+    "- `conteudo` é texto simples, sem Markdown: nada de [texto](url) nem **negrito**. Um "
+    "link aparece no corpo só pelo texto exibido; o destino fica em `links`.\n"
+    "- A organização do e-mail é SEMPRE fictícia: invente um nome fictício e plausível "
+    "(nunca 'Exemplo', 'XYZ' ou parecidos) e use o mesmo nome em todo o e-mail. Nunca use "
+    "nome, sigla ou domínio de uma instituição real (universidade, banco, órgão público, "
+    "empresa), nem no remetente, no destinatário ou nos links. Se o cenário citar uma "
+    "instituição real, crie uma equivalente fictícia. O domínio oficial dela é coerente "
+    "com esse nome; o do remetente segue a ficha.\n"
     "- Nunca escreva texto entre colchetes ou entre chaves: todo dado do e-mail (nome, "
     "telefone, protocolo, contato) aparece preenchido, inventado quando preciso.\n"
-    "- Siga o estilo de assunto da ficha. Nunca comece o assunto com 'Ação Necessária' "
-    "ou 'Ação Requerida', e não repita o assunto como primeira linha do `conteudo`.\n\n"
+    "- Siga o estilo de assunto da ficha. Nunca use 'Ação Necessária' ou 'Ação Requerida' "
+    "(nem variações) em nenhuma parte do assunto, e não repita o assunto como primeira "
+    "linha do `conteudo`.\n\n"
 )
 
 
@@ -367,7 +397,9 @@ class ResponseGenerator:
                 "### CARACTERÍSTICAS DOS NÍVEIS DE DIFICULDADE\n\n"
                 
                 "**FÁCIL:**\n"
-                "- Remetente claramente suspeito ou genérico (ex: noreply@empresa123.com)\n"
+                "- Remetente claramente fora da organização, mas realista: um e-mail gratuito "
+                "(gmail, outlook, hotmail) com nome de setor, ou o domínio de uma empresa sem "
+                "relação com o cenário\n"
                 "- Assunto com erros ortográficos ou gramaticais evidentes\n"
                 "- Urgência exagerada e óbvia ('URGENTE!!!', 'AÇÃO IMEDIATA')\n"
                 "- LINK OBRIGATÓRIO: inclua um link visivelmente suspeito ou encurtado em "
@@ -922,7 +954,9 @@ class ResponseGenerator:
 
         Raises:
             ItemInvalidoError: o item continuou com marcador de template
-                ou com remetente sem endereço de e-mail depois de
+                ou com remetente ou destinatário sem endereço de e-mail,
+                instituição real, domínio caricato ou "Ação Necessária" no
+                assunto depois de
                 MAX_REGENERACOES_POR_MARCADOR novas gerações.
         """
         chain = self.chain if is_malicious else self.legitimate_chain
@@ -959,11 +993,17 @@ class ResponseGenerator:
                     f"item continuou invalido ({motivo}: {detalhe}) apos "
                     f"{MAX_REGENERACOES_POR_MARCADOR} regeneracoes"
                 )
-            if motivo == "marcador":
-                relatorio.regeneracoes_por_marcador += 1
-            else:
-                relatorio.regeneracoes_por_remetente += 1
+            contador = _CONTADOR_POR_MOTIVO[motivo]
+            setattr(relatorio, contador, getattr(relatorio, contador) + 1)
 
+        # Antes da anotacao as cegas e dos spans: os dois precisam ver o
+        # texto final, e um link Markdown convertido entra em `links`.
+        (
+            draft.conteudo,
+            draft.links,
+            relatorio.links_markdown_convertidos,
+            relatorio.negritos_markdown_removidos,
+        ) = converter_markdown(draft.conteudo, draft.links)
         draft.conteudo, relatorio.assunto_removido_do_corpo = remover_assunto_repetido(
             draft.assunto, draft.conteudo
         )
@@ -1008,8 +1048,11 @@ class ResponseGenerator:
 
     def _problema_estrutural(self, draft: GeneratedItemDraft):
         """(motivo, detalhe) quando o item nao pode ser usado como veio,
-        ou None. Marcador de template (piloto 1 e 2) ou remetente sem
-        endereco de e-mail (piloto 2).
+        ou None. Marcador de template (piloto 1 e 2), remetente sem
+        endereco de e-mail (piloto 2), destinatario sem e-mail e dominio
+        caricato (piloto 3), instituicao real ou "Acao Necessaria" no
+        assunto (teste da versao do piloto 3). Vale para phishing e
+        legitimo: senao a regra vira atalho para o rotulo.
         """
         textos_de_link = [link.text for link in draft.links]
         # O endereco do destinatario so e checado quanto a colchetes:
@@ -1024,6 +1067,29 @@ class ResponseGenerator:
             return "marcador", marcadores
         if endereco_de_email(draft.remetente) is None:
             return "remetente_sem_email", draft.remetente
+        if endereco_de_email(draft.receptor) is None:
+            return "destinatario_sem_email", draft.receptor
+        instituicoes = encontrar_instituicoes_reais(
+            draft.remetente,
+            draft.receptor,
+            draft.assunto,
+            draft.conteudo,
+            *(link.text for link in draft.links),
+            *(link.href for link in draft.links),
+        )
+        if instituicoes:
+            return "instituicao_real", instituicoes
+        caricatos = encontrar_dominios_caricatos(
+            draft.remetente,
+            draft.receptor,
+            draft.conteudo,
+            *(link.href for link in draft.links),
+        )
+        if caricatos:
+            return "dominio_caricato", caricatos
+        formula = formula_proibida_no_assunto(draft.assunto)
+        if formula:
+            return "assunto_proibido", formula
         return None
 
     async def _anotar_as_cegas(self, draft: GeneratedItemDraft, cenario: str) -> AnotacaoCega:
@@ -1256,23 +1322,29 @@ class ResponseGenerator:
         prompt = PromptTemplate(
             input_variables=["generation_context", "full_context_text"],
             template=(
-                "Analise os documentos acadêmicos e extraia informações técnicas específicas para executar a tarefa solicitada.\n\n"
-                
-                "**TAREFA CRIATIVA:**\n"
+                "Analise os documentos acadêmicos e extraia o CONHECIMENTO TÉCNICO sobre phishing "
+                "útil para o cenário abaixo. Você NÃO escreve o e-mail: outra etapa o escreve, e "
+                "este resumo vai igual para todos os itens de um lote.\n\n"
+
+                "**CENÁRIO (só para decidir o que é relevante):**\n"
                 "{generation_context}\n\n"
-                
+
                 "**DOCUMENTOS ACADÊMICOS:**\n"
                 "{full_context_text}\n\n"
-                
+
                 "**INSTRUÇÕES DE EXTRAÇÃO:**\n"
-                "1. Identifique táticas, técnicas e métodos específicos relevantes para a tarefa\n"
-                "2. Extraia gatilhos psicológicos e estratégias mencionadas\n"
-                "3. Inclua exemplos práticos e terminologia técnica\n"
-                "4. Mantenha apenas informações DIRETAMENTE úteis para a criação do email\n"
-                "5. Organize em formato claro e acionável\n"
-                "6. Relacione as técnicas com níveis de sofisticação (fácil, médio, difícil)\n\n"
-                
-                "**CONHECIMENTO TÉCNICO FOCADO (em português brasileiro):**"
+                "1. Táticas, técnicas e métodos de phishing relevantes para o cenário\n"
+                "2. Gatilhos psicológicos e estratégias de engenharia social descritos nos "
+                "documentos\n"
+                "3. Terminologia técnica e como cada técnica aparece num e-mail, descrita (não "
+                "escrita como texto pronto)\n"
+                "4. Relação das técnicas com níveis de sofisticação (fácil, médio, difícil)\n\n"
+
+                "**PROIBIDO NA SAÍDA:** escrever um e-mail ou um modelo de e-mail (assunto, "
+                "saudação, corpo, assinatura); nomes de instituições, empresas ou pessoas citadas "
+                "nos documentos; texto entre colchetes. Use tópicos curtos.\n\n"
+
+                "**CONHECIMENTO TÉCNICO (em português brasileiro, em tópicos):**"
             )
         )
         
@@ -1283,10 +1355,19 @@ class ResponseGenerator:
                 "generation_context": generation_context,
                 "full_context_text": full_context_text
             })
-            return response.content.strip()
+            fundido = response.content.strip()
         except Exception as e:
             logging.error(f"Error fusing context: {e}")
-            return full_context_text
+            fundido = full_context_text
+        # Lote local de 27/10: a fusao devolveu um e-mail pronto assinado
+        # "Universidade Federal do Rio de Janeiro" com "[Seu Nome]", e o
+        # gerador copiou a instituicao em todas as regeneracoes.
+        limpo, removidos = limpar_contexto_fundido(fundido)
+        if removidos:
+            logging.warning(
+                "Contexto fundido com instituicao real ou marcador; removido: %s", removidos
+            )
+        return limpo
 
 
     async def translate_to_english_with_enrichment(self, text: str, difficulty: str) -> str:

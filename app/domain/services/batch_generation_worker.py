@@ -1,13 +1,14 @@
 import json
 import logging
 import random
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Set, Tuple
 from uuid import UUID
 
 from app.domain.models.channel import Channel
 from app.domain.models.generation_job import JobStatus
 from app.domain.models.phishing_email import PhishingEmail
 from app.domain.services.generation_pipeline import GenerationPipeline
+from app.domain.services.item_validation import normalizar_assunto
 from app.domain.services.phishing_service import PhishingEmailService
 from app.domain.services.response_generator import VERSAO_GERADOR, ResponseGenerator
 from app.domain.services.variation_sampler import VariationSampler
@@ -119,7 +120,9 @@ class BatchGenerationWorker:
         # exemplo, nao deve entrar).
         dedup_job_ids = list(dedup_job_ids or [])
         try:
-            accepted_embeddings = await self._embeddings_de_lotes_anteriores(dedup_job_ids)
+            accepted_embeddings, accepted_assuntos = await self._carregar_lotes_anteriores(
+                dedup_job_ids
+            )
         except Exception as e:
             logger.error(f"Job {job_id}: falha ao carregar itens de lotes anteriores: {e}")
             await self._job_repository.mark_finished(
@@ -188,6 +191,7 @@ class BatchGenerationWorker:
                             generation_context=built.generation_context,
                             fused_context=built.fused_context,
                             accepted_embeddings=accepted_embeddings,
+                            accepted_assuntos=accepted_assuntos,
                             sampler=sampler,
                             tentativas=tentativas_do_item,
                         )
@@ -232,6 +236,8 @@ class BatchGenerationWorker:
                         item_id = await self._phishing_service.create_email(phishing_example)
                         item_ids.append(item_id)
                         accepted_embeddings.append(embedding)
+                        if phishing_example.assunto:
+                            accepted_assuntos.add(normalizar_assunto(phishing_example.assunto))
                 except Exception as e:
                     logger.error(
                         f"Job {job_id}: falha ao gerar item {difficulty_value} "
@@ -277,15 +283,17 @@ class BatchGenerationWorker:
 
         await self._job_repository.mark_finished(job_id, status)
 
-    async def _embeddings_de_lotes_anteriores(self, job_ids: List[UUID]) -> List[List[float]]:
-        """Embeddings dos itens aceitos nos lotes `job_ids`, calculados
-        com o mesmo texto e o mesmo cliente da dedup do lote corrente.
-        Recalculados a partir do conteudo guardado (nao persistidos):
+    async def _carregar_lotes_anteriores(
+        self, job_ids: List[UUID]
+    ) -> Tuple[List[List[float]], Set[str]]:
+        """Embeddings e assuntos (normalizados) dos itens aceitos nos
+        lotes `job_ids`, para a dedup do lote corrente. Embeddings
+        recalculados a partir do conteudo guardado (nao persistidos):
         custa uma chamada de embedding a cada 100 itens, e evita uma
         tabela so para isso.
         """
         if not job_ids:
-            return []
+            return [], set()
         item_ids: List[UUID] = []
         for job_id in job_ids:
             job = await self._job_repository.get_by_id(job_id)
@@ -293,9 +301,10 @@ class BatchGenerationWorker:
                 raise ValueError(f"lote {job_id} nao encontrado")
             item_ids.extend(job.item_ids)
         if not item_ids:
-            return []
+            return [], set()
 
         itens = await self._phishing_service.get_emails_by_ids(item_ids)
+        assuntos = {normalizar_assunto(item.assunto) for item in itens if item.assunto}
         textos = [
             _texto_email_para_embedding(item.assunto, item.conteudo)
             if item.channel == Channel.EMAIL
@@ -307,7 +316,7 @@ class BatchGenerationWorker:
             embeddings.extend(
                 self._embedding_client.embed_batch(textos[inicio : inicio + _TAMANHO_LOTE_EMBEDDING])
             )
-        return embeddings
+        return embeddings, assuntos
 
     def _maior_similaridade(
         self, embedding: List[float], accepted_embeddings: List[List[float]]
@@ -318,10 +327,18 @@ class BatchGenerationWorker:
         )
 
     def _registrar_tentativa(
-        self, tentativas: List[dict], numero: int, similaridade: float, pistas_alvo=None
+        self,
+        tentativas: List[dict],
+        numero: int,
+        similaridade: float,
+        pistas_alvo=None,
+        assunto_repetido: bool = False,
     ) -> str:
-        """Registra a tentativa e devolve o resultado dela."""
-        if similaridade < self._dedup_threshold:
+        """Registra a tentativa e devolve o resultado dela. Assunto
+        identico ao de um item aceito conta como repeticao, como a
+        similaridade acima do limiar.
+        """
+        if similaridade < self._dedup_threshold and not assunto_repetido:
             resultado = RESULTADO_ACEITO
         elif numero < MAX_DEDUP_RETRIES + 1:
             resultado = RESULTADO_REPETIDO
@@ -332,6 +349,8 @@ class BatchGenerationWorker:
             "similaridade_max": round(similaridade, 4),
             "resultado": resultado,
         }
+        if assunto_repetido:
+            registro["assunto_repetido"] = True
         if pistas_alvo is not None:
             registro["pistas_alvo"] = [getattr(p, "value", p) for p in pistas_alvo]
         tentativas.append(registro)
@@ -344,12 +363,15 @@ class BatchGenerationWorker:
         generation_context: str,
         fused_context: str,
         accepted_embeddings: List[List[float]],
+        accepted_assuntos: Set[str],
         sampler: VariationSampler,
         tentativas: List[dict],
     ):
         """Gera um item; se ficar parecido demais com outro ja aceito
-        (no lote ou nos lotes anteriores indicados), tenta de novo ate
-        MAX_DEDUP_RETRIES vezes. Se continuar parecido, devolve
+        (no lote ou nos lotes anteriores indicados), ou com o MESMO
+        assunto de um deles (piloto 3: assuntos identicos passavam pela
+        similaridade de assunto + corpo), tenta de novo ate
+        MAX_DEDUP_RETRIES vezes. Se continuar repetido, devolve
         (None, None) -- descartado, nao e falha de geracao.
 
         Cada tentativa usa uma ficha NOVA (proxima do sorteio
@@ -381,8 +403,11 @@ class BatchGenerationWorker:
             )
             similaridade = self._maior_similaridade(embedding, accepted_embeddings)
             pistas_alvo = draft.target_cues if draft.target_cues is not None else []
+            assunto_repetido = normalizar_assunto(draft.assunto) in accepted_assuntos
             if (
-                self._registrar_tentativa(tentativas, numero, similaridade, pistas_alvo)
+                self._registrar_tentativa(
+                    tentativas, numero, similaridade, pistas_alvo, assunto_repetido
+                )
                 == RESULTADO_ACEITO
             ):
                 return draft, embedding
