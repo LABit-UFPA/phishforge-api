@@ -1,3 +1,4 @@
+import random
 from uuid import UUID
 
 import asyncpg
@@ -15,6 +16,7 @@ from app.domain.services.generation_pipeline import GenerationPipeline
 from app.domain.services.phishing_service import PhishingEmailService
 from app.domain.services.response_generator import ResponseGenerator
 from app.domain.services.user_answer_evaluator import UserAnswerEvaluator
+from app.domain.services.variation_sampler import VariationSampler
 from app.dto.estatistica import EmailStatistics
 from app.dto.query import QueryRequest
 from app.dto.requests import (
@@ -137,17 +139,28 @@ async def generate(
     # dificuldade e entrada da geracao, nao saida do LLM (issue #11).
     # O PhishingEmail final e montado aqui, combinando o draft com o
     # nivel ja validado.
+    #
+    # Ficha de variacao (lote-piloto de 26/10/2026): o fluxo unico sorteia
+    # uma tambem, para os dois fluxos usarem o mesmo prompt e o item
+    # avulso ficar com a mesma rastreabilidade do item de lote. Sem
+    # semente: o item avulso nao tem um lote a reproduzir.
+    ficha = VariationSampler(random.Random()).sortear(
+        payload.difficulty.value, payload.is_malicious
+    )
     try:
         draft = await response_generator.generate_response(
             difficulty=payload.difficulty.value,
             context=built.generation_context,
             relevant_docs=built.fused_context,
             is_malicious=payload.is_malicious,
+            variacao=ficha,
         )
         phishing_example = PhishingEmail(
             **draft.model_dump(),
             nivel=payload.difficulty.value,
             is_malicious=payload.is_malicious,
+            target_cues=list(ficha.pistas_alvo) if payload.is_malicious else None,
+            variation_spec=ficha.model_dump(mode="json"),
         )
     except Exception as e:
         raise HTTPException(
@@ -213,6 +226,20 @@ async def generate_batch(
             ),
         )
 
+    # Lotes da dedup entre lotes: id inexistente e erro de quem pede
+    # (422), antes de criar o job -- nao uma falha descoberta pelo worker
+    # depois do 202.
+    lotes_inexistentes = [
+        str(lote_id)
+        for lote_id in payload.dedup_job_ids
+        if await job_repository.get_by_id(lote_id) is None
+    ]
+    if lotes_inexistentes:
+        raise HTTPException(
+            status_code=422,
+            detail=f"dedup_job_ids com lote inexistente: {lotes_inexistentes}",
+        )
+
     difficulties_values = [d.value for d in payload.difficulties]
 
     job_id = await job_repository.create(
@@ -231,6 +258,8 @@ async def generate_batch(
         total=payload.total,
         malicious_ratio=payload.malicious_ratio,
         channel=payload.channel.value,
+        dedup_job_ids=list(payload.dedup_job_ids),
+        seed=payload.seed,
     )
 
     return JSONResponse(
@@ -280,6 +309,8 @@ async def get_batch_job(
         "distribution": job.distribution,
         "examples": examples,
         "failures": [f.model_dump() for f in job.failures],
+        "attempt_log": job.attempt_log,
+        "run_metadata": job.run_metadata,
         "error_message": job.error_message,
         "created_at": job.created_at,
         "updated_at": job.updated_at,

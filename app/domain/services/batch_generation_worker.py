@@ -1,6 +1,7 @@
 import json
 import logging
-from typing import List, Optional
+import random
+from typing import List, Optional, Sequence
 from uuid import UUID
 
 from app.domain.models.channel import Channel
@@ -9,6 +10,7 @@ from app.domain.models.phishing_email import PhishingEmail
 from app.domain.services.generation_pipeline import GenerationPipeline
 from app.domain.services.phishing_service import PhishingEmailService
 from app.domain.services.response_generator import ResponseGenerator
+from app.domain.services.variation_sampler import VariationSampler
 from app.infra.database.repositories.generation_job_repository import GenerationJobRepository
 
 logger = logging.getLogger(__name__)
@@ -18,6 +20,18 @@ logger = logging.getLogger(__name__)
 # quando a geracao FUNCIONOU mas o resultado ficou parecido demais com
 # outro item ja aceito no mesmo lote.
 MAX_DEDUP_RETRIES = 2
+
+# Tamanho de cada chamada de embedding em lote ao carregar os itens de
+# lotes anteriores (dedup entre lotes).
+_TAMANHO_LOTE_EMBEDDING = 100
+
+# Resultado de cada tentativa registrado em generation_jobs.attempt_log.
+RESULTADO_ACEITO = "aceito"
+# Parecido demais com um item aceito; vai tentar de novo.
+RESULTADO_REPETIDO = "repetido"
+# Parecido demais na ultima tentativa; item descartado.
+RESULTADO_DESCARTADO = "descartado"
+RESULTADO_FALHA = "falha"
 
 
 def _cosine_similarity(a: List[float], b: List[float]) -> float:
@@ -77,6 +91,8 @@ class BatchGenerationWorker:
         total: int,
         malicious_ratio: float,
         channel: str = "email",
+        dedup_job_ids: Optional[Sequence[UUID]] = None,
+        seed: Optional[int] = None,
     ) -> None:
         try:
             built = await self._pipeline.build_context(context)
@@ -87,6 +103,31 @@ class BatchGenerationWorker:
             )
             return
 
+        # Dedup entre lotes (lote-piloto de 26/10/2026): os itens aceitos
+        # dos lotes indicados entram na comparacao desde o primeiro item
+        # deste lote. Sem isso, os 4 lotes de 50 de uma mesma celula do
+        # protocolo podiam repetir itens entre si -- a dedup so via o
+        # proprio lote. Quem escolhe os lotes e quem pede (o piloto, por
+        # exemplo, nao deve entrar).
+        dedup_job_ids = list(dedup_job_ids or [])
+        try:
+            accepted_embeddings = await self._embeddings_de_lotes_anteriores(dedup_job_ids)
+        except Exception as e:
+            logger.error(f"Job {job_id}: falha ao carregar itens de lotes anteriores: {e}")
+            await self._job_repository.mark_finished(
+                job_id,
+                JobStatus.FALHOU,
+                error_message=f"Erro ao carregar itens de lotes anteriores: {e}",
+            )
+            return
+        itens_de_lotes_anteriores = len(accepted_embeddings)
+
+        # Semente do sorteio das fichas: sempre registrada, mesmo quando
+        # nao veio na requisicao, para o lote poder ser reproduzido.
+        if seed is None:
+            seed = random.SystemRandom().randrange(2**31)
+        sampler = VariationSampler(random.Random(seed))
+
         # Mesma logica de distribuicao entre dificuldades da issue #11
         # (nao mexer): o resto vai para as primeiras dificuldades da
         # lista.
@@ -95,12 +136,28 @@ class BatchGenerationWorker:
         for i in range(extra):
             distribution[difficulties[i]] += 1
 
-        await self._job_repository.mark_em_progresso(job_id, distribution)
+        run_metadata = {
+            "modelo": getattr(self._response_generator, "model_name", None),
+            "temperatura": getattr(self._response_generator, "temperature", None),
+            "limiar_dedup": self._dedup_threshold,
+            "max_dedup_retries": MAX_DEDUP_RETRIES,
+            "seed": seed,
+            "ficha_por_item": channel == Channel.EMAIL.value,
+            "dedup_job_ids": [str(j) for j in dedup_job_ids],
+            "itens_de_lotes_anteriores": itens_de_lotes_anteriores,
+            # O que o gerador de fato recebeu: o normalizador reescreve o
+            # contexto (em ingles), entao a string original do job nao
+            # basta para reproduzir o lote.
+            "generation_context": built.generation_context,
+            "fused_context": built.fused_context,
+        }
+        await self._job_repository.mark_em_progresso(job_id, distribution, run_metadata)
 
         item_ids: List[UUID] = []
         failures: List[dict] = []
         total_discarded = 0
-        accepted_embeddings: List[List[float]] = []
+        attempt_log: List[dict] = []
+        numero_item = 0
 
         for difficulty_value, count in distribution.items():
             # Mesma composicao malicioso/legitimo da issue #3: dentro
@@ -111,16 +168,18 @@ class BatchGenerationWorker:
             itens_do_nivel = [True] * n_malicious + [False] * n_legitimate
 
             for is_malicious in itens_do_nivel:
+                numero_item += 1
+                tentativas_do_item: List[dict] = []
                 try:
                     if channel == Channel.EMAIL.value:
-                        # Caminho intocado pela issue #6 -- o mesmo de
-                        # antes desta issue, byte a byte.
-                        draft, embedding = await self._generate_com_dedup(
+                        draft, embedding, ficha = await self._generate_com_dedup(
                             difficulty_value=difficulty_value,
                             is_malicious=is_malicious,
                             generation_context=built.generation_context,
                             fused_context=built.fused_context,
                             accepted_embeddings=accepted_embeddings,
+                            sampler=sampler,
+                            tentativas=tentativas_do_item,
                         )
                         phishing_example = (
                             None
@@ -129,6 +188,8 @@ class BatchGenerationWorker:
                                 **draft.model_dump(),
                                 nivel=difficulty_value,
                                 is_malicious=is_malicious,
+                                target_cues=list(ficha.pistas_alvo) if is_malicious else None,
+                                variation_spec=ficha.model_dump(mode="json"),
                             )
                         )
                     else:
@@ -139,6 +200,7 @@ class BatchGenerationWorker:
                             generation_context=built.generation_context,
                             fused_context=built.fused_context,
                             accepted_embeddings=accepted_embeddings,
+                            tentativas=tentativas_do_item,
                         )
                         phishing_example = (
                             None
@@ -171,12 +233,28 @@ class BatchGenerationWorker:
                             "error": str(e),
                         }
                     )
+                    tentativas_do_item.append(
+                        {
+                            "tentativa": len(tentativas_do_item) + 1,
+                            "similaridade_max": None,
+                            "resultado": RESULTADO_FALHA,
+                        }
+                    )
+
+                for tentativa in tentativas_do_item:
+                    attempt_log.append({"item": numero_item, "nivel": difficulty_value, **tentativa})
 
                 # Persistido a cada item, nao so no final -- e o que
                 # faz o polling mostrar progresso parcial de um lote
                 # ainda rodando.
                 await self._job_repository.update_progress(
-                    job_id, len(item_ids), len(failures), total_discarded, item_ids, failures
+                    job_id,
+                    len(item_ids),
+                    len(failures),
+                    total_discarded,
+                    item_ids,
+                    failures,
+                    attempt_log,
                 )
 
         if len(item_ids) == 0:
@@ -188,6 +266,66 @@ class BatchGenerationWorker:
 
         await self._job_repository.mark_finished(job_id, status)
 
+    async def _embeddings_de_lotes_anteriores(self, job_ids: List[UUID]) -> List[List[float]]:
+        """Embeddings dos itens aceitos nos lotes `job_ids`, calculados
+        com o mesmo texto e o mesmo cliente da dedup do lote corrente.
+        Recalculados a partir do conteudo guardado (nao persistidos):
+        custa uma chamada de embedding a cada 100 itens, e evita uma
+        tabela so para isso.
+        """
+        if not job_ids:
+            return []
+        item_ids: List[UUID] = []
+        for job_id in job_ids:
+            job = await self._job_repository.get_by_id(job_id)
+            if job is None:
+                raise ValueError(f"lote {job_id} nao encontrado")
+            item_ids.extend(job.item_ids)
+        if not item_ids:
+            return []
+
+        itens = await self._phishing_service.get_emails_by_ids(item_ids)
+        textos = [
+            item.conteudo
+            if item.channel == Channel.EMAIL
+            else _texto_para_embedding(item.channel.value, item.content_json or {})
+            for item in itens
+        ]
+        embeddings: List[List[float]] = []
+        for inicio in range(0, len(textos), _TAMANHO_LOTE_EMBEDDING):
+            embeddings.extend(
+                self._embedding_client.embed_batch(textos[inicio : inicio + _TAMANHO_LOTE_EMBEDDING])
+            )
+        return embeddings
+
+    def _maior_similaridade(
+        self, embedding: List[float], accepted_embeddings: List[List[float]]
+    ) -> float:
+        return max(
+            (_cosine_similarity(embedding, e) for e in accepted_embeddings),
+            default=0.0,
+        )
+
+    def _registrar_tentativa(
+        self, tentativas: List[dict], numero: int, similaridade: float, ficha=None
+    ) -> str:
+        """Registra a tentativa e devolve o resultado dela."""
+        if similaridade < self._dedup_threshold:
+            resultado = RESULTADO_ACEITO
+        elif numero < MAX_DEDUP_RETRIES + 1:
+            resultado = RESULTADO_REPETIDO
+        else:
+            resultado = RESULTADO_DESCARTADO
+        registro = {
+            "tentativa": numero,
+            "similaridade_max": round(similaridade, 4),
+            "resultado": resultado,
+        }
+        if ficha is not None:
+            registro["pistas_alvo"] = [p.value for p in ficha.pistas_alvo]
+        tentativas.append(registro)
+        return resultado
+
     async def _generate_com_dedup(
         self,
         difficulty_value: str,
@@ -195,33 +333,38 @@ class BatchGenerationWorker:
         generation_context: str,
         fused_context: str,
         accepted_embeddings: List[List[float]],
+        sampler: VariationSampler,
+        tentativas: List[dict],
     ):
         """Gera um item; se ficar parecido demais com outro ja aceito
-        no lote, tenta de novo ate MAX_DEDUP_RETRIES vezes. Se
-        continuar parecido, devolve (None, None) -- descartado, nao e
-        falha de geracao.
+        (no lote ou nos lotes anteriores indicados), tenta de novo ate
+        MAX_DEDUP_RETRIES vezes. Se continuar parecido, devolve
+        (None, None, None) -- descartado, nao e falha de geracao.
+
+        Cada tentativa usa uma ficha NOVA (proxima do sorteio
+        balanceado): repetir a mesma ficha tenderia a reproduzir o
+        mesmo item. A ficha devolvida e a do item aceito.
 
         Excecao de geracao (erro de LLM de verdade) NAO e capturada
         aqui: propaga para o chamador tratar como falha, distinto de
         descarte por duplicidade -- sao categorias diferentes de
         problema.
         """
-        for _tentativa in range(MAX_DEDUP_RETRIES + 1):
+        for numero in range(1, MAX_DEDUP_RETRIES + 2):
+            ficha = sampler.sortear(difficulty_value, is_malicious)
             draft = await self._response_generator.generate_response(
                 difficulty=difficulty_value,
                 context=generation_context,
                 relevant_docs=fused_context,
                 is_malicious=is_malicious,
+                variacao=ficha,
             )
             embedding = self._embedding_client.embed(draft.conteudo)
-            maior_similaridade = max(
-                (_cosine_similarity(embedding, e) for e in accepted_embeddings),
-                default=0.0,
-            )
-            if maior_similaridade < self._dedup_threshold:
-                return draft, embedding
+            similaridade = self._maior_similaridade(embedding, accepted_embeddings)
+            if self._registrar_tentativa(tentativas, numero, similaridade, ficha) == RESULTADO_ACEITO:
+                return draft, embedding, ficha
 
-        return None, None
+        return None, None, None
 
     async def _generate_channel_com_dedup(
         self,
@@ -231,14 +374,16 @@ class BatchGenerationWorker:
         generation_context: str,
         fused_context: str,
         accepted_embeddings: List[List[float]],
+        tentativas: List[dict],
     ) -> tuple[Optional[dict], Optional[List[float]]]:
         """Equivalente de `_generate_com_dedup` para os canais novos
         (issue #6) -- mesma logica de retry/descarte, mas chamando
         `generate_channel_item` e derivando o texto do embedding de
         `content_json` via `_texto_para_embedding` (o campo de texto
         livre varia por canal; email usa `draft.conteudo` diretamente).
+        Sem ficha: os prompts dos canais novos ainda nao a recebem.
         """
-        for _tentativa in range(MAX_DEDUP_RETRIES + 1):
+        for numero in range(1, MAX_DEDUP_RETRIES + 2):
             resultado = await self._response_generator.generate_channel_item(
                 channel=channel,
                 difficulty=difficulty_value,
@@ -249,11 +394,8 @@ class BatchGenerationWorker:
             embedding = self._embedding_client.embed(
                 _texto_para_embedding(channel, resultado["content_json"])
             )
-            maior_similaridade = max(
-                (_cosine_similarity(embedding, e) for e in accepted_embeddings),
-                default=0.0,
-            )
-            if maior_similaridade < self._dedup_threshold:
+            similaridade = self._maior_similaridade(embedding, accepted_embeddings)
+            if self._registrar_tentativa(tentativas, numero, similaridade) == RESULTADO_ACEITO:
                 return resultado, embedding
 
         return None, None

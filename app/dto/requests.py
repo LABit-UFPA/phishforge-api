@@ -1,4 +1,5 @@
-from typing import List
+from typing import List, Optional
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -38,6 +39,25 @@ class BatchGenerationRequest(BaseModel):
     channel: Channel = Field(
         default=Channel.EMAIL,
         description="Canal do lote. Por ora só 'email' é aceito; os demais retornam 422.",
+    )
+    # Lote-piloto de 26/10/2026: a dedup so comparava itens do proprio
+    # lote, entao os varios lotes de uma mesma celula do protocolo podiam
+    # repetir itens entre si. Quem pede escolhe quais lotes entram na
+    # comparacao -- explicito, para um lote-piloto nunca entrar por acaso.
+    dedup_job_ids: List[UUID] = Field(
+        default_factory=list,
+        description=(
+            "Lotes anteriores (job_id) cujos itens aceitos também entram na checagem de "
+            "quase-duplicata. Use os outros lotes da mesma célula; não inclua lotes-piloto."
+        ),
+    )
+    seed: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Semente do sorteio das fichas de variação. Omitida, o sistema sorteia uma e a "
+            "registra em run_metadata, para o lote poder ser reproduzido."
+        ),
     )
 
 

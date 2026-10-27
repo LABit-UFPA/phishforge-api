@@ -168,12 +168,17 @@ class Container(containers.DeclarativeContainer):
         ResponseGenerator,
         api_key=config.OPENAI_API_KEY,
         model_name=config.MODEL_NAME_LLM,
+        temperature=config.LLM_TEMPERATURE,
     )
 
+    # model_name explicito (lote-piloto de 26/10/2026): antes o
+    # normalizador ficava sempre no default da classe ("gpt-4o-mini",
+    # alias sem snapshot), entao fixar o snapshot em MODEL_NAME_LLM nao
+    # fixava esta etapa -- e ela reescreve o contexto que chega ao gerador.
     prompt_normalizer = providers.Singleton(
         PromptNormalizer,
-        api_key=config.OPENAI_API_KEY
-        # O model_name "gpt-4o-mini" será usado como default da própria classe
+        api_key=config.OPENAI_API_KEY,
+        model_name=config.MODEL_NAME_LLM,
     )
 
     user_answer_evaluator = providers.Singleton(

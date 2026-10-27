@@ -22,6 +22,11 @@ CAMPOS_PROIBIDOS: Set[str] = {
     "updated_at",
     "channel",
     "content_json",
+    # Ficha e pistas-alvo (lote-piloto de 26/10/2026): sao o rotulo
+    # pretendido do item, tao ancorador quanto `cues`.
+    "target_cues",
+    "variation_spec",
+    "validacao",
 }
 
 

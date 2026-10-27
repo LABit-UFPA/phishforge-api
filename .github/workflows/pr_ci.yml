@@ -65,7 +65,10 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Instalar Poetry
-        run: pipx install poetry==${{ env.POETRY_VERSION }}
+        # --python: sem isso o pipx usa o Python padrao do runner (3.14 a
+        # partir de out/2026), o Poetry cria o venv nele e ignora o 3.11
+        # acima -- e pydantic-core 2.33.2 nao compila em 3.14.
+        run: pipx install --python "$(which python)" poetry==${{ env.POETRY_VERSION }}
 
       - name: Cache das dependencias do Poetry
         uses: actions/cache@v4
@@ -127,7 +130,10 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Instalar Poetry
-        run: pipx install poetry==${{ env.POETRY_VERSION }}
+        # --python: sem isso o pipx usa o Python padrao do runner (3.14 a
+        # partir de out/2026), o Poetry cria o venv nele e ignora o 3.11
+        # acima -- e pydantic-core 2.33.2 nao compila em 3.14.
+        run: pipx install --python "$(which python)" poetry==${{ env.POETRY_VERSION }}
 
       - name: Cache das dependencias do Poetry
         uses: actions/cache@v4

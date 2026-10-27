@@ -8,6 +8,18 @@ from app.domain.models.phishing_email import PhishingEmail
 from app.infra.database.connection import DatabaseConnection
 
 
+def _json_ou_none(valor) -> Optional[str]:
+    return json.dumps(valor) if valor is not None else None
+
+
+def _json_loads_ou_none(row, coluna: str):
+    """Colunas JSONB opcionais (ficha, pistas-alvo, relatorio de
+    validacao). `row.get` porque nem toda query seleciona as tres.
+    """
+    valor = row.get(coluna) if hasattr(row, "get") else row[coluna]
+    return json.loads(valor) if valor else None
+
+
 class PhishingEmailRepository:
     def __init__(self, db: DatabaseConnection):
         self.db = db
@@ -23,8 +35,8 @@ class PhishingEmailRepository:
                     INSERT INTO phishing_emails
                     (receptor, remetente, assunto, conteudo, explicacao, nivel, categoria, links, is_malicious,
                      phish_scale_cue_count, phish_scale_premise_alignment, difficulty_estimated,
-                     channel, content_json)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                     channel, content_json, target_cues, variation_spec, validacao)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
                     RETURNING id
                 """
                 phish_scale = email.phish_scale
@@ -44,6 +56,11 @@ class PhishingEmailRepository:
                     phish_scale.difficulty_estimated.value if phish_scale else None,
                     email.channel.value,
                     json.dumps(email.content_json) if email.content_json is not None else None,
+                    _json_ou_none(
+                        [c.value for c in email.target_cues] if email.target_cues is not None else None
+                    ),
+                    _json_ou_none(email.variation_spec),
+                    _json_ou_none(email.validacao),
                 )
 
                 if email.cues:
@@ -91,7 +108,7 @@ class PhishingEmailRepository:
                 SELECT id, receptor, remetente, assunto, conteudo, explicacao,
                        nivel, categoria, links, is_malicious, created_at, updated_at,
                        phish_scale_cue_count, phish_scale_premise_alignment, difficulty_estimated,
-                       channel, content_json
+                       channel, content_json, target_cues, variation_spec, validacao
                 FROM phishing_emails
                 WHERE id = $1
             """
@@ -288,6 +305,9 @@ class PhishingEmailRepository:
             phish_scale=phish_scale,
             channel=row["channel"],
             content_json=json.loads(row["content_json"]) if row["content_json"] else None,
+            target_cues=_json_loads_ou_none(row, "target_cues"),
+            variation_spec=_json_loads_ou_none(row, "variation_spec"),
+            validacao=_json_loads_ou_none(row, "validacao"),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )

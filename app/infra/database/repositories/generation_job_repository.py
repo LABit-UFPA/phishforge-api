@@ -41,12 +41,19 @@ class GenerationJobRepository:
             row = await conn.fetchrow("SELECT * FROM generation_jobs WHERE id = $1", job_id)
             return self._row_to_model(row) if row else None
 
-    async def mark_em_progresso(self, job_id: UUID, distribution: dict) -> None:
+    async def mark_em_progresso(
+        self, job_id: UUID, distribution: dict, run_metadata: Optional[dict] = None
+    ) -> None:
         async with self.db.get_connection() as conn:
             await conn.execute(
-                "UPDATE generation_jobs SET status = 'em_progresso', distribution = $2 WHERE id = $1",
+                """
+                UPDATE generation_jobs
+                SET status = 'em_progresso', distribution = $2, run_metadata = $3
+                WHERE id = $1
+                """,
                 job_id,
                 json.dumps(distribution),
+                json.dumps(run_metadata) if run_metadata is not None else None,
             )
 
     async def update_progress(
@@ -57,17 +64,19 @@ class GenerationJobRepository:
         total_discarded: int,
         item_ids: List[UUID],
         failures: List[dict],
+        attempt_log: Optional[List[dict]] = None,
     ) -> None:
         """Chamado apos CADA item processado (sucesso, falha ou
         descarte por duplicidade), para o polling refletir progresso
-        parcial em vez de so o resultado final.
+        parcial em vez de so o resultado final. `attempt_log` e a lista
+        COMPLETA de tentativas ate aqui (substitui a anterior).
         """
         async with self.db.get_connection() as conn:
             await conn.execute(
                 """
                 UPDATE generation_jobs
                 SET total_generated = $2, total_failed = $3, total_discarded = $4,
-                    item_ids = $5, failures = $6
+                    item_ids = $5, failures = $6, attempt_log = $7
                 WHERE id = $1
                 """,
                 job_id,
@@ -76,6 +85,7 @@ class GenerationJobRepository:
                 total_discarded,
                 json.dumps([str(i) for i in item_ids]),
                 json.dumps(failures),
+                json.dumps(attempt_log or []),
             )
 
     async def mark_finished(
@@ -108,6 +118,8 @@ class GenerationJobRepository:
             total_discarded=row["total_discarded"],
             item_ids=[UUID(i) for i in json.loads(row["item_ids"])],
             failures=[GenerationFailure(**f) for f in json.loads(row["failures"])],
+            attempt_log=json.loads(row["attempt_log"]) if row["attempt_log"] else [],
+            run_metadata=json.loads(row["run_metadata"]) if row["run_metadata"] else None,
             error_message=row["error_message"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
