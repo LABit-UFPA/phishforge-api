@@ -193,3 +193,35 @@ async def test_cue_id_inexistente_e_rejeitado_pela_fk(phishing_repository, db_co
                 """,
                 email_id,
             )
+
+
+async def test_ficha_pistas_alvo_e_relatorio_persistem(phishing_repository):
+    """Lote-piloto de 26/10/2026 (migration V20261026120000): as pistas-
+    alvo voltam como CueCode, ficha e relatorio como dict.
+    """
+    ficha = {"nome_destinatario": "Larissa Monteiro", "pistas_alvo": ["urgency", "typosquat"]}
+    relatorio = {"regeneracoes_por_marcador": 1, "pistas_removidas": []}
+    email_id = await phishing_repository.create(
+        _email_de_teste(
+            target_cues=[CueCode.URGENCY, CueCode.TYPOSQUAT],
+            variation_spec=ficha,
+            validacao=relatorio,
+        )
+    )
+
+    recuperado = await phishing_repository.get_by_id(email_id)
+    assert recuperado.target_cues == [CueCode.URGENCY, CueCode.TYPOSQUAT]
+    assert recuperado.variation_spec == ficha
+    assert recuperado.validacao == relatorio
+
+    [via_lote] = await phishing_repository.get_by_ids([email_id])
+    assert via_lote.target_cues == [CueCode.URGENCY, CueCode.TYPOSQUAT]
+
+
+async def test_item_sem_ficha_fica_com_colunas_nulas(phishing_repository):
+    email_id = await phishing_repository.create(_email_de_teste())
+
+    recuperado = await phishing_repository.get_by_id(email_id)
+    assert recuperado.target_cues is None
+    assert recuperado.variation_spec is None
+    assert recuperado.validacao is None

@@ -13,9 +13,31 @@ from app.domain.models.channel_item_draft import (
 )
 from app.domain.models.cue import Cue
 from app.domain.models.difficulty import Difficulty
-from app.domain.models.generated_item_draft import GeneratedItemDraft
+from app.domain.models.generated_item_draft import GeneratedItemDraft, ValidatedItemDraft
 from app.domain.models.phish_scale import PhishScale, PremiseAlignment
+from app.domain.models.variation_spec import VariationSpec
+from app.domain.services.item_validation import (
+    PistaRemovida,
+    RelatorioValidacao,
+    calcular_spans,
+    encontrar_marcadores,
+    registrar_aderencia,
+    remover_saudacao_generica_falsa,
+)
+from app.domain.services.variation_sampler import renderizar_ficha
 from langchain_openai import ChatOpenAI
+
+# Quantas vezes gerar o item de novo quando ele volta com marcador de
+# template ("[Nome do Estudante]") -- lote-piloto de 26/10/2026. Esgotado,
+# generate_response levanta ItemInvalidoError (falha de geracao, nao
+# descarte por duplicidade).
+MAX_REGENERACOES_POR_MARCADOR = 2
+
+
+class ItemInvalidoError(Exception):
+    """Item gerado que nao pode ser usado mesmo depois das
+    regeneracoes (hoje: marcador de template no texto).
+    """
 
 # Descricao curta de cada codigo, injetada nos dois prompts (issue #5,
 # passo 3): sem isso, o `Enum` do structured output so impede o modelo
@@ -216,11 +238,15 @@ _REGRAS_WHATSAPP_LEGITIMO = (
 
 
 class ResponseGenerator:
-    def __init__(self, api_key: str, model_name: str = "gpt-4o-mini"):
+    def __init__(self, api_key: str, model_name: str = "gpt-4o-mini", temperature: float = 0.7):
+        # Guardados para o lote registrar com que modelo/temperatura os
+        # itens foram gerados (generation_jobs.run_metadata).
+        self.model_name = model_name
+        self.temperature = temperature
         self.llm = ChatOpenAI(
             model_name=model_name,
             api_key=api_key,
-            temperature=0.7
+            temperature=temperature
         ).with_structured_output(GeneratedItemDraft)
 
         self.text_llm = ChatOpenAI(
@@ -230,7 +256,7 @@ class ResponseGenerator:
         )
 
         self.prompt_template = PromptTemplate(
-            input_variables=["context", "difficulty", "relevant_docs"],
+            input_variables=["context", "difficulty", "relevant_docs", "variacao"],
             template=(
                 "## 1. INSTRUÇÃO DE SISTEMA\n"
                 "Você é um especialista em cibersegurança especializado na criação de emails de phishing educacionais baseados em pesquisas acadêmicas.\n\n"
@@ -242,6 +268,19 @@ class ResponseGenerator:
                 "## 3. ESPECIFICAÇÃO DA TAREFA\n"
                 "**Nível de Dificuldade:** {difficulty}\n"
                 "**Cenário Específico:** {context}\n\n"
+
+                "### FICHA DO ITEM (OBRIGATÓRIO -- sorteada pelo sistema para este item)\n"
+                "Cada chamada sua é independente e não sabe o que as outras geraram (ver "
+                "VARIEDADE ESTRUTURAL abaixo); sem a ficha, itens do mesmo cenário saem como "
+                "cópias uns dos outros -- foi o que um lote-piloto real mostrou. Por isso o "
+                "sistema sorteia, para cada item, os detalhes abaixo. Siga a ficha à risca: ela "
+                "fixa DETALHES dentro do cenário pedido, nunca troca o cenário. As pistas-alvo "
+                "da ficha definem QUAIS pistas da taxonomia o e-mail deve conter.\n"
+                "{variacao}\n\n"
+                "Nunca abra o e-mail com fórmulas prontas como 'Esperamos que você esteja bem' "
+                "ou 'Espero que esta mensagem o encontre bem'. Nunca deixe marcadores de "
+                "template no texto, como [Nome] ou [Nome do Estudante]: use exatamente o nome "
+                "da ficha, ou uma saudação genérica quando a ficha disser que não há nome.\n\n"
 
                 "### VARIEDADE ESTRUTURAL (OBRIGATÓRIO -- validado empiricamente na issue #20)\n"
                 "Uma checagem contra geração real mostrou dois problemas que já foram "
@@ -272,9 +311,9 @@ class ResponseGenerator:
                 "- Ausência de personalização (tratamento genérico)\n"
                 "- Ameaças diretas e explícitas\n"
                 "- Solicitação óbvia de informações sensíveis\n"
-                "- Phish Scale: mire em 3 OU MAIS pistas da taxonomia abaixo, óbvias, e "
-                "premissa `baixo` ou `medio` (pretexto genérico, sem relação com a rotina "
-                "específica de quem recebe)\n\n"
+                "- Phish Scale: inclua as 3 pistas-alvo da FICHA DO ITEM, óbvias (pode haver "
+                "mais, nunca menos), e premissa `baixo` ou `medio` (pretexto genérico, sem "
+                "relação com a rotina específica de quem recebe)\n\n"
 
                 "**MÉDIO:**\n"
                 "- Remetente parcialmente convincente mas com pequenas inconsistências\n"
@@ -284,11 +323,13 @@ class ResponseGenerator:
                 "issue #20) -- peça os dados por resposta direta ao e-mail, por anexo, ou "
                 "peça uma ligação para um número informado no próprio corpo\n"
                 "- Formatação mais profissional, similar a comunicações empresariais\n"
-                "- Personalização básica (nome do destinatário)\n"
+                "- Personalização básica (o nome do destinatário que está na ficha)\n"
                 "- Mistura de informações verdadeiras com falsas\n"
                 "- Uso de logos e identidade visual parcialmente convincentes\n"
                 "- Solicitação indireta de ação (download, clique, verificação)\n"
-                "- Phish Scale: mire em EXATAMENTE 2 pistas moderadas e premissa `medio`\n\n"
+                "- Phish Scale: EXATAMENTE as 2 pistas-alvo da FICHA DO ITEM, moderadas, e "
+                "premissa `medio`. Não acrescente outras pistas da taxonomia: com nome na "
+                "saudação, `generic_greeting` não está presente\n\n"
 
                 "**DIFÍCIL:**\n"
                 "- Remetente altamente convincente, indistinguível de comunicações legítimas\n"
@@ -303,8 +344,8 @@ class ResponseGenerator:
                 "- Phish Scale: mire em NO MÁXIMO 1 pista no total (validado empiricamente na "
                 "issue #27 -- rodadas anteriores erravam por tratar sofisticação como 'muitos "
                 "elementos convincentes', o que gerava 2+ pistas contáveis). O link obrigatório "
-                "acima JÁ CONSOME esse orçamento (normalmente `typosquat` ou "
-                "`sender_domain_mismatch`) -- os itens da lista acima (remetente, assunto, "
+                "acima JÁ CONSOME esse orçamento com a pista-alvo da FICHA DO ITEM "
+                "(`typosquat` ou `sender_domain_mismatch`) -- os itens da lista acima (remetente, assunto, "
                 "formatação, personalização, identidade visual, contexto temporal) são "
                 "elementos de REALISMO, não pistas da taxonomia, e não devem virar entradas em "
                 "`cues`. NÃO anote `urgency` nem `authority` neste nível: se usar algum apelo "
@@ -320,12 +361,12 @@ class ResponseGenerator:
                 "(nunca invente um novo):\n"
                 f"{_TAXONOMIA_DE_PISTAS}\n\n"
                 "Para cada pista, informe `evidencia`: o TRECHO LITERAL do `conteudo` que "
-                "comprova a pista (copie exatamente, nao parafraseie -- isso sera conferido). "
-                "Quando conseguir localizar esse trecho com precisao, informe tambem "
-                "`span_start`/`span_end` (posicao inicial/final do trecho dentro de "
-                "`conteudo`); se nao tiver certeza da posicao exata, deixe os dois como "
-                "null -- e melhor omitir a posicao do que informar uma errada. So anote "
-                "pistas REALMENTE presentes: uma lista vazia e melhor que uma pista forcada. "
+                "comprova a pista (copie exatamente, sem aspas, nao parafraseie -- isso sera "
+                "conferido). Deixe `span_start`/`span_end` como null: as posicoes sao "
+                "calculadas pelo sistema a partir da `evidencia`, e por isso ela precisa ser "
+                "um trecho copiado do `conteudo`. So anote pistas REALMENTE presentes: uma "
+                "lista vazia e melhor que uma pista forcada. As pistas-alvo da FICHA DO ITEM "
+                "devem estar no texto, mas anote o que voce de fato escreveu. "
                 "`generic_greeting` so se aplica quando a saudacao for de fato generica "
                 "('Prezado cliente'), nao quando houver qualquer personalizacao.\n\n"
 
@@ -385,6 +426,8 @@ class ResponseGenerator:
                 "- ✓ Técnicas acadêmicas implementadas?\n"
                 "- ✓ Nível de dificuldade respeitado?\n"
                 "- ✓ Coerência entre cenário + táticas + nível?\n"
+                "- ✓ Ficha do item seguida (nome, quem assina, detalhe do pretexto, ação, tom, "
+                "estrutura, abertura e pistas-alvo)?\n"
                 "- ✓ `cues` lista exatamente as pistas realmente presentes, com evidência literal?\n"
                 "- ✓ `premise_alignment` reflete o que você de fato escreveu, não só o alvo do nível?\n\n"
 
@@ -404,7 +447,7 @@ class ResponseGenerator:
         # real plausivel", entao o raciocinio, os criterios de
         # validacao e o que conta como "bom resultado" sao outros.
         self.legitimate_prompt_template = PromptTemplate(
-            input_variables=["context", "difficulty", "relevant_docs"],
+            input_variables=["context", "difficulty", "relevant_docs", "variacao"],
             template=(
                 "## 1. INSTRUÇÃO DE SISTEMA\n"
                 "Você é um especialista em comunicação corporativa e segurança da informação, "
@@ -422,6 +465,15 @@ class ResponseGenerator:
                 "## 3. ESPECIFICAÇÃO DA TAREFA\n"
                 "**Nível de Dificuldade:** {difficulty}\n"
                 "**Cenário Específico:** {context}\n\n"
+
+                "### FICHA DO ITEM (OBRIGATÓRIO -- sorteada pelo sistema para este item)\n"
+                "Cada chamada sua é independente e não sabe o que as outras geraram; por isso "
+                "o sistema sorteia, para cada item, os detalhes abaixo. Siga a ficha: ela fixa "
+                "DETALHES dentro do cenário pedido, nunca troca o cenário, e nunca autoriza "
+                "nada que as regras de legitimidade abaixo proíbem.\n"
+                "{variacao}\n\n"
+                "Nunca abra com fórmulas prontas como 'Esperamos que você esteja bem'. Nunca "
+                "deixe marcadores de template no texto, como [Nome]: use o nome da ficha.\n\n"
 
                 "### O QUE TORNA O ITEM LEGÍTIMO (OBRIGATÓRIO)\n"
                 "- Domínio do remetente coerente e plausível para a organização do cenário\n"
@@ -526,21 +578,21 @@ class ResponseGenerator:
         # PhoneCallItemDraft, PixQrItemDraft) em vez de reusar
         # GeneratedItemDraft, que fica intocado por esta issue.
         self.website_llm = ChatOpenAI(
-            model_name=model_name, api_key=api_key, temperature=0.7
+            model_name=model_name, api_key=api_key, temperature=temperature
         ).with_structured_output(WebsiteItemDraft)
         self.phone_call_llm = ChatOpenAI(
-            model_name=model_name, api_key=api_key, temperature=0.7
+            model_name=model_name, api_key=api_key, temperature=temperature
         ).with_structured_output(PhoneCallItemDraft)
         self.pix_qr_llm = ChatOpenAI(
-            model_name=model_name, api_key=api_key, temperature=0.7
+            model_name=model_name, api_key=api_key, temperature=temperature
         ).with_structured_output(PixQrItemDraft)
         # sms/whatsapp (issue #6, desbloqueados pela phishing-quest-api
         # #68): mesma separacao de LLM/prompt por canal dos 3 acima.
         self.sms_llm = ChatOpenAI(
-            model_name=model_name, api_key=api_key, temperature=0.7
+            model_name=model_name, api_key=api_key, temperature=temperature
         ).with_structured_output(SmsItemDraft)
         self.whatsapp_llm = ChatOpenAI(
-            model_name=model_name, api_key=api_key, temperature=0.7
+            model_name=model_name, api_key=api_key, temperature=temperature
         ).with_structured_output(WhatsAppItemDraft)
 
         _campos_canal = "content, explicacao, categoria"
@@ -702,8 +754,13 @@ class ResponseGenerator:
         }
 
     async def generate_response(
-        self, difficulty: str, context: str, relevant_docs, is_malicious: bool = True
-    ) -> GeneratedItemDraft:
+        self,
+        difficulty: str,
+        context: str,
+        relevant_docs,
+        is_malicious: bool = True,
+        variacao: Optional[VariationSpec] = None,
+    ) -> ValidatedItemDraft:
         """
         Gera um item (phishing ou legítimo) baseado no contexto, dificuldade e documentos relevantes.
 
@@ -724,53 +781,105 @@ class ResponseGenerator:
                 prompt: são duas chains com objetivos opostos ("montar
                 isca convincente" vs. "montar comunicação real
                 plausível"), como o item legítimo deixa explícito.
+            variacao: ficha sorteada para este item (ver
+                VariationSpec e VariationSampler). Entra no prompt como
+                `{variacao}` e alimenta as validacoes (nome do
+                destinatario, pistas-alvo). None so para chamador que
+                nao sorteia ficha -- o prompt entao pede escolha livre.
 
         Returns:
-            GeneratedItemDraft: NÃO inclui `nivel` nem `is_malicious`
+            ValidatedItemDraft: NÃO inclui `nivel` nem `is_malicious`
             (ver issue #11 -- ambos são entrada da geração, não saída
             do LLM). `cues` já vem validado por `_validar_cues` (issue
-            #5, passos 5 e 9) -- span incoerente é descartado (mantendo
-            a pista) e item legítimo nunca sai daqui com pista alguma.
+            #5, passos 5 e 9, e lote-piloto de 26/10/2026) -- spans
+            calculados a partir da evidência, `generic_greeting` falso
+            removido e item legítimo nunca sai daqui com pista alguma.
             `phish_scale` (issue #9) é montado por
             `_compute_phish_scale` a partir do `cues` já validado e do
             `premise_alignment` que o LLM julgou -- None para item
-            legítimo.
+            legítimo. `validacao` traz o relatório do que foi corrigido.
+
+        Raises:
+            ItemInvalidoError: o item continuou com marcador de template
+                ("[Nome do Estudante]") depois de
+                MAX_REGENERACOES_POR_MARCADOR novas gerações.
         """
         chain = self.chain if is_malicious else self.legitimate_chain
-        try:
-            draft = await chain.ainvoke({
-                "context": context,
-                "difficulty": difficulty,
-                "relevant_docs": relevant_docs
-            })
-        except Exception as e:
-            logging.error(f"Error generating response: {e}")
-            raise e
+        entrada = {
+            "context": context,
+            "difficulty": difficulty,
+            "relevant_docs": relevant_docs,
+            "variacao": renderizar_ficha(variacao),
+        }
+        relatorio = RelatorioValidacao()
 
-        draft.cues = self._validar_cues(draft.conteudo, draft.cues, is_malicious)
+        for tentativa in range(MAX_REGENERACOES_POR_MARCADOR + 1):
+            try:
+                draft = await chain.ainvoke(entrada)
+            except Exception as e:
+                logging.error(f"Error generating response: {e}")
+                raise e
+
+            marcadores = encontrar_marcadores(
+                draft.receptor, draft.remetente, draft.assunto, draft.conteudo
+            )
+            if not marcadores:
+                break
+            logging.warning(
+                "Item gerado com marcador de template %s (tentativa %d) -- gerando de novo.",
+                marcadores,
+                tentativa + 1,
+            )
+            if tentativa == MAX_REGENERACOES_POR_MARCADOR:
+                raise ItemInvalidoError(
+                    f"item continuou com marcador de template {marcadores} apos "
+                    f"{MAX_REGENERACOES_POR_MARCADOR} regeneracoes"
+                )
+            relatorio.regeneracoes_por_marcador += 1
+
+        draft.cues = self._validar_cues(
+            draft.conteudo,
+            draft.cues,
+            is_malicious,
+            nome_destinatario=variacao.nome_destinatario if variacao else None,
+            relatorio=relatorio,
+        )
+        if is_malicious and variacao is not None:
+            registrar_aderencia(draft.cues, variacao.pistas_alvo, relatorio)
         draft.phish_scale = self._compute_phish_scale(draft.cues, draft.premise_alignment, is_malicious)
-        return draft
+        return ValidatedItemDraft(
+            **draft.model_dump(), validacao=relatorio.model_dump(mode="json")
+        )
 
     def _validar_cues(
-        self, conteudo: str, cues: List[Cue], is_malicious: bool
+        self,
+        conteudo: str,
+        cues: List[Cue],
+        is_malicious: bool,
+        nome_destinatario: Optional[str] = None,
+        relatorio: Optional[RelatorioValidacao] = None,
     ) -> List[Cue]:
-        """Aplica os passos 5 e 9 da issue #5 depois da geracao.
+        """Aplica os passos 5 e 9 da issue #5 depois da geracao, mais as
+        validacoes do lote-piloto de 26/10/2026.
 
         Passo 9: item legitimo nunca deve ter pista de golpe. O prompt
         legitimo ja instrui `cues: []`, mas isso e disciplina de
         prompt, nao garantia -- aqui e onde a garantia de fato existe.
-        Um LLM que "esquecer" a instrucao e descartado em silencio (com
-        log), nao propagado: nao ha ganho em falhar a geracao inteira
-        por causa de uma lista que deveria estar vazia.
+        Um LLM que "esquecer" a instrucao e descartado (com log e
+        registro no relatorio), nao propagado: nao ha ganho em falhar a
+        geracao inteira por causa de uma lista que deveria estar vazia.
 
-        Passo 5: para cada pista de um item malicioso, confere que
-        `conteudo[span_start:span_end]` bate exatamente com a
-        `evidencia` declarada. Span incoerente (fora dos limites do
-        texto ou trecho diferente) e zerado (vira None/None), mas a
-        pista em si e MANTIDA -- o codigo da pista pode estar certo
-        mesmo quando o modelo erra a localizacao exata, e um destaque
-        errado no app e pior que nenhum destaque, nao pior que nenhuma
-        pista.
+        Passo 5, refeito no piloto: as posicoes deixam de vir do LLM e
+        passam a ser CALCULADAS a partir da `evidencia` (ver
+        item_validation.calcular_spans). No piloto, 9 de 10 spans
+        voltaram nulos; agora span nulo significa uma coisa so -- a
+        evidencia nao e trecho literal do `conteudo`. A pista continua
+        MANTIDA nesse caso: o codigo pode estar certo mesmo quando a
+        citacao nao esta.
+
+        `generic_greeting` com o nome do destinatario na saudacao e
+        removido (falso positivo do piloto) -- so quando o nome e
+        conhecido, isto e, quando a ficha foi passada.
         """
         if not is_malicious:
             if cues:
@@ -779,19 +888,22 @@ class ResponseGenerator:
                     "descartando (issue #5, passo 9).",
                     len(cues),
                 )
+                if relatorio is not None:
+                    relatorio.pistas_removidas.extend(
+                        PistaRemovida(code=c.code, evidencia=c.evidencia, motivo="item_legitimo")
+                        for c in cues
+                    )
             return []
 
-        validadas = []
-        for cue in cues:
-            se_tem_span = cue.span_start is not None and cue.span_end is not None
-            span_valido = (
-                se_tem_span
-                and 0 <= cue.span_start < cue.span_end <= len(conteudo)
-                and conteudo[cue.span_start:cue.span_end] == cue.evidencia
+        validadas = calcular_spans(conteudo, cues, relatorio)
+        removidas_antes = len(relatorio.pistas_removidas) if relatorio else 0
+        validadas = remover_saudacao_generica_falsa(
+            conteudo, validadas, nome_destinatario, relatorio
+        )
+        if relatorio is not None and len(relatorio.pistas_removidas) > removidas_antes:
+            logging.warning(
+                "generic_greeting removido: a saudacao usa o nome do destinatario da ficha."
             )
-            if se_tem_span and not span_valido:
-                cue = cue.model_copy(update={"span_start": None, "span_end": None})
-            validadas.append(cue)
         return validadas
 
     def _compute_phish_scale(

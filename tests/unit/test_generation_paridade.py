@@ -97,3 +97,27 @@ async def test_lote_reaproveita_o_pipeline_uma_vez_por_requisicao(client, fakes)
     assert len(fakes["prompt_normalizer"].calls) == 1
     assert len(fakes["reranker"].calls) == 1
     assert len(fakes["qdrant_store"].calls) == 1
+
+
+async def test_os_dois_fluxos_passam_uma_ficha_ao_gerador(client, fakes):
+    """Lote-piloto de 26/10/2026: a ficha de variacao entra nos dois
+    fluxos, para o prompt ser o mesmo e o item avulso ter a mesma
+    rastreabilidade (pistas-alvo e ficha persistidas).
+    """
+    from app.domain.models.variation_spec import VariationSpec
+
+    resposta = await client.post(
+        "/api/v1/generate", json={"context": "cobranca de fatura", "difficulty": "medio"}
+    )
+    assert resposta.status_code == 200
+    assert len(resposta.json()["target_cues"]) == 2
+
+    await post_batch_and_get_job(
+        client, {"context": "cobranca de fatura", "difficulties": ["medio"], "total": 1}
+    )
+
+    chamadas = [
+        c for c in fakes["response_generator"].calls if c["step"] == "generate_response"
+    ]
+    assert len(chamadas) == 2
+    assert all(isinstance(c["variacao"], VariationSpec) for c in chamadas)

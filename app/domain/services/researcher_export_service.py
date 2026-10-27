@@ -25,7 +25,7 @@ COLUNAS: Dict[str, List[str]] = {
     "itens": [
         "ordem_canonica", "item_id", "nivel_sistema", "categoria", "is_malicious",
         "channel", "difficulty_estimated", "phish_scale_cue_count", "cues_llm",
-        "avaliacoes_concluidas",
+        "cues_alvo", "avaliacoes_concluidas",
     ],
     "especialistas": [
         "especialista_id", "anos_experiencia", "area_atuacao", "formacao",

@@ -120,6 +120,12 @@ services:
       DB_PASSWORD: phishforge
       DB_NAME: phishforge
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # Modelo e temperatura da geracao (lote-piloto de 26/10/2026). O
+      # .env nao entra na imagem, entao sem estas linhas o container
+      # ignorava o MODEL_NAME_LLM do .env e rodava sempre o default do
+      # codigo -- fixar o snapshot no .env nao tinha efeito nenhum.
+      MODEL_NAME_LLM: ${MODEL_NAME_LLM:-gpt-4o-mini}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.7}
       # Issue #7: autenticacao entre servicos. Este compose e ambiente
       # LOCAL: sem API_KEY no .env, usa um valor padrao conhecido para
       # o gerador funcionar de primeira (o nginx do frontend injeta a

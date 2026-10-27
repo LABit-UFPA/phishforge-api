@@ -95,8 +95,16 @@ class FakeResponseGenerator:
         return "contexto fundido fake"
 
     async def generate_response(
-        self, difficulty: str, context: str, relevant_docs, is_malicious: bool = True
+        self,
+        difficulty: str,
+        context: str,
+        relevant_docs,
+        is_malicious: bool = True,
+        variacao=None,
     ) -> GeneratedItemDraft:
+        # `variacao` (ficha sorteada por item, lote-piloto de 26/10/2026)
+        # fica registrada para os testes provarem que cada item recebe a
+        # sua -- o fake nao a usa para nada alem disso.
         self.calls.append(
             {
                 "step": "generate_response",
@@ -104,6 +112,7 @@ class FakeResponseGenerator:
                 "context": context,
                 "relevant_docs": relevant_docs,
                 "is_malicious": is_malicious,
+                "variacao": variacao,
             }
         )
         # Sem `nivel`: o draft nunca inclui dificuldade (issue #11) --
@@ -704,13 +713,21 @@ class FakeGenerationJobRepository:
     async def get_by_id(self, job_id):
         return self.storage.get(job_id)
 
-    async def mark_em_progresso(self, job_id, distribution: dict) -> None:
+    async def mark_em_progresso(self, job_id, distribution: dict, run_metadata=None) -> None:
         job = self.storage[job_id]
         job.status = JobStatus.EM_PROGRESSO
         job.distribution = distribution
+        job.run_metadata = run_metadata
 
     async def update_progress(
-        self, job_id, total_generated, total_failed, total_discarded, item_ids, failures
+        self,
+        job_id,
+        total_generated,
+        total_failed,
+        total_discarded,
+        item_ids,
+        failures,
+        attempt_log=None,
     ) -> None:
         job = self.storage[job_id]
         job.total_generated = total_generated
@@ -720,6 +737,7 @@ class FakeGenerationJobRepository:
         job.failures = [
             f if isinstance(f, GenerationFailure) else GenerationFailure(**f) for f in failures
         ]
+        job.attempt_log = list(attempt_log or [])
 
     async def mark_finished(self, job_id, status: JobStatus, error_message=None) -> None:
         job = self.storage[job_id]

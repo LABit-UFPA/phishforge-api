@@ -261,6 +261,12 @@ class ResearcherRepository:
                            FROM email_cues ec JOIN cues c ON c.id = ec.cue_id
                            WHERE ec.email_id = pe.id
                        ), '') AS cues_llm,
+                       -- Pistas-alvo da ficha (lote-piloto de 26/10/2026):
+                       -- vazio para itens gerados antes da ficha.
+                       COALESCE((
+                           SELECT string_agg(alvo, ';' ORDER BY alvo)
+                           FROM jsonb_array_elements_text(pe.target_cues) AS alvo
+                       ), '') AS cues_alvo,
                        (
                            SELECT COUNT(*) FROM avaliacoes a
                            JOIN especialistas e ON e.id = a.especialista_id

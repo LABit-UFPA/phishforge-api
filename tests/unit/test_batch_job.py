@@ -35,8 +35,12 @@ class _ConteudoFixoResponseGenerator(FakeResponseGenerator):
     exato que a dedup da #11b precisa detectar.
     """
 
-    async def generate_response(self, difficulty, context, relevant_docs, is_malicious=True):
-        draft = await super().generate_response(difficulty, context, relevant_docs, is_malicious)
+    async def generate_response(
+        self, difficulty, context, relevant_docs, is_malicious=True, variacao=None
+    ):
+        draft = await super().generate_response(
+            difficulty, context, relevant_docs, is_malicious, variacao
+        )
         draft.conteudo = "CONTEUDO IDENTICO EM TODA CHAMADA, PARA FORCAR A DEDUP"
         return draft
 
@@ -51,11 +55,15 @@ class _FalhaNaSegundaChamadaResponseGenerator(FakeResponseGenerator):
         super().__init__()
         self._chamadas_generate_response = 0
 
-    async def generate_response(self, difficulty, context, relevant_docs, is_malicious=True):
+    async def generate_response(
+        self, difficulty, context, relevant_docs, is_malicious=True, variacao=None
+    ):
         self._chamadas_generate_response += 1
         if self._chamadas_generate_response == 2:
             raise RuntimeError("falha simulada de LLM")
-        return await super().generate_response(difficulty, context, relevant_docs, is_malicious)
+        return await super().generate_response(
+            difficulty, context, relevant_docs, is_malicious, variacao
+        )
 
 
 class _NormalizerQueFalha:
@@ -129,3 +137,56 @@ async def test_job_falha_inteiro_quando_montagem_de_contexto_da_excecao(app_and_
     assert job["total_discarded"] == 0
     assert job["distribution"] is None
     assert "falha simulada na normalizacao" in job["error_message"]
+
+
+async def test_lote_anterior_inexistente_na_dedup_da_422_sem_criar_job(client, fakes):
+    """Lote-piloto de 26/10/2026: `dedup_job_ids` com id que nao existe e
+    erro de quem pede, respondido antes de criar o job.
+    """
+    inexistente = str(uuid4())
+    response = await client.post(
+        "/api/v1/generate/batch",
+        json={
+            "context": "cobranca de fatura",
+            "difficulties": ["medio"],
+            "total": 1,
+            "dedup_job_ids": [inexistente],
+        },
+    )
+
+    assert response.status_code == 422
+    assert inexistente in response.json()["detail"]
+    assert fakes["generation_job_repository"].storage == {}
+
+
+async def test_get_do_job_traz_log_de_tentativas_e_metadados(client):
+    job = await post_batch_and_get_job(
+        client,
+        {"context": "cobranca de fatura", "difficulties": ["medio"], "total": 2, "seed": 9},
+    )
+
+    assert [t["resultado"] for t in job["attempt_log"]] == ["aceito", "aceito"]
+    assert job["run_metadata"]["seed"] == 9
+    # Cada item do lote volta com a sua ficha e as pistas-alvo.
+    for exemplo in job["examples"]:
+        assert len(exemplo["target_cues"]) == 2
+        assert exemplo["variation_spec"]["nome_destinatario"]
+
+
+async def test_lote_anterior_existente_entra_na_dedup(client):
+    primeiro = await post_batch_and_get_job(
+        client, {"context": "cobranca de fatura", "difficulties": ["medio"], "total": 1}
+    )
+
+    segundo = await post_batch_and_get_job(
+        client,
+        {
+            "context": "cobranca de fatura",
+            "difficulties": ["medio"],
+            "total": 1,
+            "dedup_job_ids": [primeiro["job_id"]],
+        },
+    )
+
+    assert segundo["run_metadata"]["dedup_job_ids"] == [primeiro["job_id"]]
+    assert segundo["run_metadata"]["itens_de_lotes_anteriores"] == 1

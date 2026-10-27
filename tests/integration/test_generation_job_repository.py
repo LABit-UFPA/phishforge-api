@@ -109,3 +109,36 @@ async def test_estado_sobrevive_a_restart_do_processo(generation_job_repository)
         assert job.malicious_ratio == 0.0
     finally:
         await conexao_pos_restart.close_pool()
+
+
+async def test_log_de_tentativas_e_metadados_do_lote_persistem(generation_job_repository):
+    """Lote-piloto de 26/10/2026: migration V20261026120000."""
+    job_id = await generation_job_repository.create(
+        context="pendencia na matricula", difficulties=["medio"], total=2, malicious_ratio=1.0
+    )
+    job = await generation_job_repository.get_by_id(job_id)
+    assert job.attempt_log == []
+    assert job.run_metadata is None
+
+    metadados = {"modelo": "gpt-4o-mini-2024-07-18", "seed": 42, "dedup_job_ids": []}
+    await generation_job_repository.mark_em_progresso(job_id, {"medio": 2}, metadados)
+
+    log = [
+        {"item": 1, "nivel": "medio", "tentativa": 1, "similaridade_max": 0.0,
+         "resultado": "aceito", "pistas_alvo": ["urgency", "authority"]},
+        {"item": 2, "nivel": "medio", "tentativa": 1, "similaridade_max": 0.97,
+         "resultado": "repetido", "pistas_alvo": ["scarcity", "typosquat"]},
+    ]
+    await generation_job_repository.update_progress(
+        job_id,
+        total_generated=1,
+        total_failed=0,
+        total_discarded=0,
+        item_ids=[uuid4()],
+        failures=[],
+        attempt_log=log,
+    )
+
+    job = await generation_job_repository.get_by_id(job_id)
+    assert job.run_metadata == metadados
+    assert job.attempt_log == log

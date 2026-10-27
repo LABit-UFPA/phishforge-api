@@ -5,7 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, model_validator
 
 from app.domain.models.channel import Channel
-from app.domain.models.cue import Cue
+from app.domain.models.cue import Cue, CueCode
 from app.domain.models.link_ref import LinkRef
 from app.domain.models.phish_scale import PhishScale
 
@@ -55,6 +55,17 @@ class PhishingEmail(BaseModel):
     # backend Go, phishing-quest-api #66) -- ver docstring de
     # PhishScale para os tres significados.
     phish_scale: Optional[PhishScale] = None
+    # Ficha de variacao do item e as pistas-alvo sorteadas nela (lote-
+    # piloto de 26/10/2026). ENTRADA da geracao, como `nivel`: quem
+    # chama o gerador preenche, nunca o LLM. `target_cues` e o que o
+    # item deveria conter; `cues` e o que o LLM anotou. None para itens
+    # gerados antes da ficha ou de canais sem ficha.
+    target_cues: Optional[List[CueCode]] = None
+    variation_spec: Optional[Dict[str, Any]] = None
+    # Relatorio das validacoes pos-geracao (ver
+    # app/domain/services/item_validation.py): evidencias nao literais,
+    # pistas removidas, regeneracoes e aderencia ao alvo.
+    validacao: Optional[Dict[str, Any]] = None
     # Default True preserva o comportamento historico (todo item ate a
     # issue #3 era phishing por construcao) para quem constroi este
     # modelo sem passar o campo explicitamente. O endpoint sempre passa

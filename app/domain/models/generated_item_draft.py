@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -65,3 +65,18 @@ class GeneratedItemDraft(BaseModel):
     # do draft, e nao um retorno a parte de generate_response, para
     # fluir para o PhishingEmail final do mesmo jeito que `cues` flui.
     phish_scale: Optional[PhishScale] = None
+
+
+class ValidatedItemDraft(GeneratedItemDraft):
+    """O que `ResponseGenerator.generate_response` devolve: o draft do
+    LLM depois das validacoes pos-geracao (lote-piloto de 26/10/2026),
+    mais o relatorio delas.
+
+    Subclasse, e nao um campo novo em GeneratedItemDraft, para nao
+    mexer no schema do structured output: `validacao` nunca deve
+    aparecer como campo que o LLM preenche. Quem chama continua usando
+    `PhishingEmail(**draft.model_dump(), ...)`, e `validacao` vai junto
+    para o item persistido.
+    """
+
+    validacao: Optional[Dict[str, Any]] = None

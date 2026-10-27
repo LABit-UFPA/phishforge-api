@@ -7,7 +7,14 @@ class Settings(BaseSettings):
     MODEL_NAME_EMBEDDING: str = "all-MiniLM-L6-v2"
     
     MODEL_NAME_LLM: str = "gpt-4o-mini"
-    
+
+    # Temperatura das chains que GERAM itens (email e canais novos). As
+    # etapas auxiliares (HyDE, fusao, normalizacao) mantem as suas
+    # proprias, mais baixas. Antes ficava fixa em 0.7 no codigo; no
+    # config, um lote registra (run_metadata) e um piloto pode variar
+    # sem mexer no codigo.
+    LLM_TEMPERATURE: float = 0.7
+
     QDRANT_URL: str = "http://localhost:6333"
     COLLECTION_NAME: str = "phishing_articles"
 

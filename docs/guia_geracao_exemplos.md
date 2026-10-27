@@ -69,7 +69,17 @@ preencha a linha abaixo com a sua chave e salve:
 OPENAI_API_KEY=sk-...sua-chave...
 ```
 
-Deixe todo o resto como está.
+Para os lotes do protocolo de geração, preencha também o modelo com o
+**snapshot** definido com o orientador (não o alias `gpt-4o-mini`, que pode
+mudar de modelo sem aviso):
+
+```
+MODEL_NAME_LLM=gpt-4o-mini-2024-07-18
+```
+
+Deixe todo o resto como está. Se mudar o `.env` com tudo já rodando, aplique
+com `docker compose up -d` (passo 3). O modelo usado em cada lote fica
+registrado no próprio lote (`run_metadata`) e no `lotes.csv` da exportação.
 
 ## 3. Subir tudo
 
@@ -130,6 +140,41 @@ acompanhamento continua. Exemplos muito parecidos com outros do mesmo lote
 são descartados automaticamente. Por isso o total gerado pode ficar um pouco
 abaixo do pedido.
 
+Cada exemplo recebe uma **ficha sorteada** pelo sistema: nome do
+destinatário, quem assina, detalhe do pretexto, ação pedida, tom, estrutura,
+abertura e as pistas de phishing que o e-mail deve conter. É o que evita que
+os exemplos de um mesmo contexto saiam como cópias uns dos outros. A ficha
+fica guardada junto do exemplo.
+
+### Vários lotes da mesma célula do protocolo (Swagger)
+
+O site não expõe estas duas opções; use o Swagger em
+**http://localhost:8000/docs**, rota `POST /api/v1/generate/batch` (preencha o
+campo `x-api-key` com `phishforge-local`, ou com o `API_KEY` do seu `.env`):
+
+- **`dedup_job_ids`**: lista de `job_id` de lotes anteriores **da mesma
+  célula**. Os exemplos desses lotes entram na checagem de repetição, então o
+  2º, 3º e 4º lote de uma célula não repetem exemplos dos anteriores.
+  **Não inclua lotes-piloto.**
+- **`seed`**: semente do sorteio das fichas. Com a mesma semente, o lote
+  sorteia as mesmas fichas. Se omitida, o sistema sorteia uma e a registra.
+
+Exemplo de corpo para o 2º lote de uma célula:
+
+```json
+{
+  "context": "Estudante de graduação de uma universidade pública brasileira recebe ...",
+  "difficulties": ["medio"],
+  "total": 50,
+  "dedup_job_ids": ["<job_id do 1º lote desta célula>"]
+}
+```
+
+O `GET /api/v1/generate/batch/{job_id}` mostra, além dos exemplos, o
+`attempt_log` (cada tentativa, inclusive as descartadas, com a similaridade
+com o exemplo mais parecido) e o `run_metadata` (modelo, temperatura,
+semente, limiar e o contexto que o gerador recebeu).
+
 > **Dica para a análise:** use um contexto por lote e anote quais contextos
 > você usou. A exportação (passo 6) já traz, para cada exemplo gerado em
 > lote, o contexto que o originou. Exemplos gerados no modo Único não
@@ -171,7 +216,10 @@ LibreOffice, Google Sheets, pandas ou R. Use a codificação UTF-8 ao importar.
 | `remetente`, `receptor`, `assunto`, `conteudo` | o e-mail em si |
 | `explicacao` | explicação das técnicas de phishing usadas |
 | `links` | links do e-mail (texto exibido e destino real) |
-| `pistas` | códigos das pistas anotadas, separados por `;` |
+| `pistas` | códigos das pistas anotadas pelo LLM, separados por `;` |
+| `pistas_alvo` | códigos das pistas que a ficha mandou incluir, separados por `;` (vazio em exemplos anteriores à ficha) |
+| `ficha` | a ficha sorteada para o exemplo (JSON) |
+| `validacao` | o que a validação automática corrigiu (JSON): evidências que não são trecho literal do texto, pistas removidas, regenerações por marcador como `[Nome]` e pistas-alvo que o LLM não anotou |
 | `lote_id`, `contexto_lote` | o lote e o contexto que geraram o exemplo (vazios no modo Único) |
 
 **`pistas.csv`**: uma pista por linha (um e-mail pode ter várias).
@@ -181,7 +229,16 @@ LibreOffice, Google Sheets, pandas ou R. Use a codificação UTF-8 ao importar.
 | `email_id` | o `id` do exemplo em `exemplos.csv` |
 | `pista`, `pista_rotulo`, `pista_categoria` | código, nome e tipo (técnica ou psicológica) da pista |
 | `evidencia` | o trecho do e-mail que evidencia a pista |
-| `span_start`, `span_end` | posição desse trecho no `conteudo` (podem vir vazios) |
+| `span_start`, `span_end` | posição desse trecho no `conteudo`, calculada pelo sistema. Vazios só quando a evidência não é um trecho literal do texto |
+
+**`lotes.csv`**: um lote por linha, com status, totais e os parâmetros com
+que rodou (modelo, temperatura, semente, limiar de repetição, lotes usados na
+checagem).
+
+**`tentativas.csv`**: uma tentativa de geração por linha, inclusive as
+descartadas, com a similaridade com o exemplo mais parecido já aceito e o
+resultado (`aceito`, `repetido`, `descartado` ou `falha`). É daqui que sai a
+taxa de descarte e a distribuição de similaridade de cada lote.
 
 Rode o comando de novo sempre que quiser um retrato atualizado. Ele
 sobrescreve os arquivos.
@@ -229,7 +286,20 @@ docker compose logs --tail 100 phishforge-api
 4. **Reordenação** desses trechos por um *cross-encoder*
    (`ms-marco-MiniLM-L-6-v2`).
 5. **Fusão**: os 3 melhores trechos são resumidos num contexto acadêmico.
-6. **Geração** do e-mail pelo LLM (`gpt-4o-mini`), na dificuldade pedida, com
-   explicação, pistas anotadas e estimativa pelo NIST Phish Scale.
+6. **Ficha**: o sistema sorteia, para o exemplo, destinatário, quem assina,
+   detalhe do pretexto, ação, tom, estrutura, abertura e as pistas-alvo do
+   nível. O sorteio é balanceado: dentro de um lote, cada valor (e cada par de
+   pistas, no nível médio) aparece com frequência parecida.
+7. **Geração** do e-mail pelo LLM (snapshot fixado em `MODEL_NAME_LLM`), na
+   dificuldade pedida e seguindo a ficha, com explicação, pistas anotadas e
+   estimativa pelo NIST Phish Scale.
+8. **Validação automática**: posição de cada pista calculada a partir do
+   trecho citado; `generic_greeting` removida quando a saudação usa o nome do
+   destinatário; exemplo gerado de novo se vier com marcador como `[Nome]`.
+9. **Checagem de repetição**: similaridade de cosseno (embeddings
+   `text-embedding-3-small`) com os exemplos já aceitos no lote e nos lotes
+   indicados em `dedup_job_ids`. Acima de 0,95, o exemplo é gerado de novo com
+   outra ficha, até 2 vezes; depois disso, é descartado.
 
-No lote, os passos 1 a 5 rodam uma vez e o passo 6 roda uma vez por exemplo.
+No lote, os passos 1 a 5 rodam uma vez e os passos 6 a 9 rodam uma vez por
+exemplo.

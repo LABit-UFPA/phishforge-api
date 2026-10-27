@@ -55,6 +55,16 @@ class GenerationJob(BaseModel):
     total_discarded: int = 0
     item_ids: List[UUID] = Field(default_factory=list)
     failures: List[GenerationFailure] = Field(default_factory=list)
+    # Uma entrada por tentativa de geracao (lote-piloto de 26/10/2026):
+    # {item, nivel, tentativa, similaridade_max, resultado, pistas_alvo}.
+    # Inclui as tentativas descartadas, que antes nao deixavam rastro --
+    # e daqui que sai a distribuicao de similaridade para calibrar o
+    # limiar da dedup.
+    attempt_log: List[dict] = Field(default_factory=list)
+    # Com o que o lote rodou de fato: modelo, temperatura, limiar,
+    # semente das fichas, lotes usados na dedup e o contexto que o
+    # gerador recebeu depois da normalizacao. None ate o job comecar.
+    run_metadata: Optional[dict] = None
     error_message: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
