@@ -30,6 +30,14 @@ class VariationSpec(BaseModel):
     # como pista-alvo, no nivel facil).
     nome_destinatario: Optional[str] = None
     assinatura: str
+    # Nome de quem assina, quando `assinatura` e uma pessoa (piloto 2: sem
+    # isso, o modelo assinava sempre "Maria Silva" ou "Joao da Silva").
+    nome_remetente: Optional[str] = None
+    # Como deve ser o DOMINIO do endereco do remetente, derivado das
+    # pistas-alvo (piloto 2: pistas de dominio pedidas com o remetente
+    # escrito como um nome, sem endereco).
+    endereco_remetente: str
+    estilo_assunto: str
     angulo_pretexto: str
     # None para item legitimo: a acao do item legitimo ja e definida pelo
     # nivel no prompt legitimo (link oficial ou instrucao textual).

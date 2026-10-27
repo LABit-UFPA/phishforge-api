@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     # sem mexer no codigo.
     LLM_TEMPERATURE: float = 0.7
 
+    # Anotacao as cegas das pistas (piloto 2, 27/10/2026): com o gerador
+    # anotando as proprias pistas sabendo as pistas-alvo, as anotadas
+    # coincidiam 100% com o alvo mesmo sem lastro no texto. Ligado,
+    # `cues` e `premise_alignment` vem de uma 2a chamada de LLM que so ve
+    # o item pronto. Desligar volta a autoanotacao do gerador.
+    ANOTACAO_CEGA: bool = True
+
     QDRANT_URL: str = "http://localhost:6333"
     COLLECTION_NAME: str = "phishing_articles"
 

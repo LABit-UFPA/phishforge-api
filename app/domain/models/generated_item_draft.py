@@ -2,7 +2,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from app.domain.models.cue import Cue
+from app.domain.models.cue import Cue, CueCode
 from app.domain.models.link_ref import LinkRef
 from app.domain.models.phish_scale import PhishScale, PremiseAlignment
 
@@ -80,3 +80,9 @@ class ValidatedItemDraft(GeneratedItemDraft):
     """
 
     validacao: Optional[Dict[str, Any]] = None
+    # Ficha de fato usada no item (pode ser outra que a primeira, se o
+    # item foi gerado de novo -- piloto 2) e as pistas-alvo dela. Mesmos
+    # nomes de campo do PhishingEmail, para passarem direto no
+    # `PhishingEmail(**draft.model_dump(), ...)`.
+    target_cues: Optional[List[CueCode]] = None
+    variation_spec: Optional[Dict[str, Any]] = None

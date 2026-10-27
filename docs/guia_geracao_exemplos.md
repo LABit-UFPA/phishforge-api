@@ -141,10 +141,17 @@ são descartados automaticamente. Por isso o total gerado pode ficar um pouco
 abaixo do pedido.
 
 Cada exemplo recebe uma **ficha sorteada** pelo sistema: nome do
-destinatário, quem assina, detalhe do pretexto, ação pedida, tom, estrutura,
-abertura e as pistas de phishing que o e-mail deve conter. É o que evita que
-os exemplos de um mesmo contexto saiam como cópias uns dos outros. A ficha
-fica guardada junto do exemplo.
+destinatário, quem assina, como deve ser o domínio do remetente, estilo do
+assunto, detalhe do pretexto, ação pedida, tom, estrutura, abertura e as
+pistas de phishing que o e-mail deve conter. É o que evita que os exemplos de
+um mesmo contexto saiam como cópias uns dos outros. A ficha fica guardada
+junto do exemplo.
+
+As pistas e o alinhamento de premissa de cada exemplo são anotados por uma
+**segunda chamada ao modelo**, que vê só o e-mail pronto (não a ficha) e usa
+as mesmas definições de pista que os especialistas veem. Isso dobra as
+chamadas por exemplo. Para voltar à anotação feita pelo próprio gerador, use
+`ANOTACAO_CEGA=false` no `.env`.
 
 ### Vários lotes da mesma célula do protocolo (Swagger)
 
@@ -216,10 +223,10 @@ LibreOffice, Google Sheets, pandas ou R. Use a codificação UTF-8 ao importar.
 | `remetente`, `receptor`, `assunto`, `conteudo` | o e-mail em si |
 | `explicacao` | explicação das técnicas de phishing usadas |
 | `links` | links do e-mail (texto exibido e destino real) |
-| `pistas` | códigos das pistas anotadas pelo LLM, separados por `;` |
+| `pistas` | códigos das pistas anotadas (pelo anotador às cegas, quando ligado), separados por `;` |
 | `pistas_alvo` | códigos das pistas que a ficha mandou incluir, separados por `;` (vazio em exemplos anteriores à ficha) |
 | `ficha` | a ficha sorteada para o exemplo (JSON) |
-| `validacao` | o que a validação automática corrigiu (JSON): evidências que não são trecho literal do texto, pistas removidas, regenerações por marcador como `[Nome]` e pistas-alvo que o LLM não anotou |
+| `validacao` | o que a validação automática corrigiu (JSON): evidências que não são trecho literal do texto, pistas removidas, regenerações (marcador como `[Nome]` ou remetente sem e-mail), assunto tirado do corpo, pistas-alvo que não foram encontradas e, com anotação às cegas, o que o próprio gerador tinha declarado (`cues_autodeclaradas`) |
 | `lote_id`, `contexto_lote` | o lote e o contexto que geraram o exemplo (vazios no modo Único) |
 
 **`pistas.csv`**: uma pista por linha (um e-mail pode ter várias).
@@ -229,7 +236,8 @@ LibreOffice, Google Sheets, pandas ou R. Use a codificação UTF-8 ao importar.
 | `email_id` | o `id` do exemplo em `exemplos.csv` |
 | `pista`, `pista_rotulo`, `pista_categoria` | código, nome e tipo (técnica ou psicológica) da pista |
 | `evidencia` | o trecho do e-mail que evidencia a pista |
-| `span_start`, `span_end` | posição desse trecho no `conteudo`, calculada pelo sistema. Vazios só quando a evidência não é um trecho literal do texto |
+| `campo` | onde está o trecho: `remetente`, `assunto` ou `conteudo` (vazio em exemplos antigos) |
+| `span_start`, `span_end` | posição desse trecho dentro do `campo`, calculada pelo sistema. Vazios só quando a evidência não é um trecho literal do e-mail |
 
 **`lotes.csv`**: um lote por linha, com status, totais e os parâmetros com
 que rodou (modelo, temperatura, semente, limiar de repetição, lotes usados na
@@ -293,13 +301,23 @@ docker compose logs --tail 100 phishforge-api
 7. **Geração** do e-mail pelo LLM (snapshot fixado em `MODEL_NAME_LLM`), na
    dificuldade pedida e seguindo a ficha, com explicação, pistas anotadas e
    estimativa pelo NIST Phish Scale.
-8. **Validação automática**: posição de cada pista calculada a partir do
-   trecho citado; `generic_greeting` removida quando a saudação usa o nome do
-   destinatário; exemplo gerado de novo se vier com marcador como `[Nome]`.
-9. **Checagem de repetição**: similaridade de cosseno (embeddings
-   `text-embedding-3-small`) com os exemplos já aceitos no lote e nos lotes
-   indicados em `dedup_job_ids`. Acima de 0,95, o exemplo é gerado de novo com
-   outra ficha, até 2 vezes; depois disso, é descartado.
+8. **Validação de forma**: exemplo gerado de novo, com outra ficha (até 2
+   vezes), se vier com texto entre colchetes ou chaves, nome de exemplo
+   ("Universidade Exemplo") ou remetente sem endereço de e-mail. Persistindo,
+   conta como falha. O assunto repetido na primeira linha do corpo é tirado.
+9. **Anotação às cegas**: uma segunda chamada ao LLM, que vê só o e-mail
+   pronto e o cenário, anota as pistas (com campo e trecho) e o alinhamento
+   de premissa, com as mesmas definições operacionais dos especialistas.
+10. **Validação das pistas**: posição de cada pista calculada a partir do
+    trecho citado, no campo em que ele está; removidas `generic_greeting` com
+    o nome do destinatário na saudação e pistas de domínio sem domínio na
+    evidência. Daí sai a estimativa pelo NIST Phish Scale.
+11. **Checagem de repetição**: similaridade de cosseno (embeddings
+    `text-embedding-3-small`) de assunto + corpo com os exemplos já aceitos
+    no lote e nos lotes indicados em `dedup_job_ids`. Acima de 0,95, o
+    exemplo é gerado de novo com outra ficha, até 2 vezes; depois disso, é
+    descartado.
 
-No lote, os passos 1 a 5 rodam uma vez e os passos 6 a 9 rodam uma vez por
-exemplo.
+No lote, os passos 1 a 5 rodam uma vez e os passos 6 a 11 rodam uma vez por
+exemplo. A versão do gerador fica registrada em `run_metadata.versao_gerador`
+de cada lote.

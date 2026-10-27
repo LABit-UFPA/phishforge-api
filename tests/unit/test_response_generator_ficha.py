@@ -9,13 +9,16 @@ from string import Formatter
 
 import pytest
 
-from app.domain.models.cue import Cue, CueCode
+from app.domain.models.cue import DEFINICOES_OPERACIONAIS, Cue, CueCode
 from app.domain.models.generated_item_draft import GeneratedItemDraft, ValidatedItemDraft
+from app.domain.models.phish_scale import PremiseAlignment
 from app.domain.models.phishing_email import PhishingEmail
 from app.domain.models.variation_spec import VariationSpec
 from app.domain.services.response_generator import (
     MAX_REGENERACOES_POR_MARCADOR,
+    AnotacaoCega,
     ItemInvalidoError,
+    PistaAnotada,
     ResponseGenerator,
 )
 from app.domain.services.variation_sampler import VariationSampler
@@ -37,11 +40,18 @@ class _ChainSequencia:
         return self._drafts[min(len(self.entradas), len(self._drafts)) - 1]
 
 
-def _draft(conteudo: str, cues=None, receptor="larissa@example.com", premise="medio"):
+def _draft(
+    conteudo: str,
+    cues=None,
+    receptor="larissa@unifloresta.edu.br",
+    premise="medio",
+    remetente="Secretaria Acadêmica <secretaria@unifloresta.edu.br>",
+    assunto="Pendência no cadastro",
+):
     return GeneratedItemDraft(
         receptor=receptor,
-        remetente="secretaria@exemplo-universidade.test",
-        assunto="Pendência no cadastro",
+        remetente=remetente,
+        assunto=assunto,
         conteudo=conteudo,
         explicacao="explicacao",
         categoria="academico",
@@ -55,6 +65,9 @@ def _ficha_medio(nome="Larissa Monteiro", pistas=(CueCode.URGENCY, CueCode.AUTHO
     return VariationSpec(
         nome_destinatario=nome,
         assinatura="uma pessoa com nome e cargo",
+        nome_remetente="Otávio Brito",
+        endereco_remetente="use um domínio plausível da própria organização",
+        estilo_assunto="em forma de pergunta",
         angulo_pretexto="um documento faltando",
         acao="abrir e preencher um anexo",
         tom="formal",
@@ -209,3 +222,189 @@ async def test_item_legitimo_registra_pistas_removidas_com_motivo():
     assert resultado.validacao["pistas_removidas"][0]["motivo"] == "item_legitimo"
     # Sem pistas-alvo, nao ha aderencia a medir.
     assert resultado.validacao["pistas_alvo_ausentes"] == []
+
+
+# ---------------------------------------------------------------------------
+# Lote-piloto 2 (27/10/2026)
+# ---------------------------------------------------------------------------
+
+
+class _AnotadorEspiao:
+    """Substitui a chain do anotador as cegas: registra a entrada e
+    devolve a anotacao dada.
+    """
+
+    def __init__(self, anotacao: AnotacaoCega):
+        self._anotacao = anotacao
+        self.entradas: list[dict] = []
+
+    async def ainvoke(self, args):
+        self.entradas.append(args)
+        return self._anotacao
+
+
+def _generator_cego(chain, anotacao: AnotacaoCega, is_malicious=True):
+    generator = ResponseGenerator(api_key="sk-nao-usada-neste-teste", anotacao_cega=True)
+    if is_malicious:
+        generator.chain = chain
+    else:
+        generator.legitimate_chain = chain
+    generator.annotation_chain = _AnotadorEspiao(anotacao)
+    return generator
+
+
+def test_prompts_de_email_trazem_as_regras_de_forma():
+    generator = ResponseGenerator(api_key="sk-nao-usada-neste-teste")
+    for template in (generator.prompt_template.template, generator.legitimate_prompt_template.template):
+        assert "REGRAS DE FORMA" in template
+        assert "Ação Necessária" in template
+        assert "nome fictício e plausível" in template
+
+
+def test_prompt_do_anotador_usa_as_definicoes_dos_especialistas_e_nao_ve_a_ficha():
+    generator = ResponseGenerator(api_key="sk-nao-usada-neste-teste")
+    template = generator.annotation_prompt_template.template
+    assert _variaveis(template) == {
+        "cenario", "remetente", "receptor", "assunto", "conteudo", "links"
+    }
+    assert DEFINICOES_OPERACIONAIS[CueCode.SCARCITY] in template
+    assert "FICHA" not in template and "{difficulty}" not in template
+
+
+async def test_anotacao_cega_substitui_pistas_e_premissa_do_gerador():
+    """O gerador anotou o alvo (urgency + authority) e premissa alta; o
+    anotador as cegas so encontrou urgency, com premissa media -- e o que
+    vale, e o que o gerador declarou fica no relatorio.
+    """
+    conteudo = "Prezada Larissa Monteiro,\n\nRegularize até sexta-feira."
+    gerado = _draft(
+        conteudo,
+        [
+            Cue(code=CueCode.URGENCY, evidencia="Regularize até sexta-feira"),
+            Cue(code=CueCode.AUTHORITY, evidencia="Reitoria"),
+        ],
+        premise="alto",
+    )
+    anotacao = AnotacaoCega(
+        pistas=[PistaAnotada(code=CueCode.URGENCY, campo="conteudo", evidencia="Regularize até sexta-feira")],
+        premise_alignment="medio",
+    )
+    generator = _generator_cego(_ChainSequencia(gerado), anotacao)
+
+    resultado = await generator.generate_response(
+        difficulty="medio", context="cenario X", relevant_docs="docs", variacao=_ficha_medio()
+    )
+
+    assert [c.code for c in resultado.cues] == [CueCode.URGENCY]
+    assert resultado.cues[0].campo == "conteudo"
+    assert resultado.premise_alignment == PremiseAlignment.MEDIO
+    assert resultado.phish_scale.cue_count == 1
+    v = resultado.validacao
+    assert v["anotacao_cega"] is True
+    assert v["cues_autodeclaradas"] == ["urgency", "authority"]
+    assert v["premise_alignment_autodeclarado"] == "alto"
+    assert v["pistas_alvo_ausentes"] == ["authority"]
+
+    entrada = generator.annotation_chain.entradas[0]
+    assert entrada["cenario"] == "cenario X"
+    assert entrada["conteudo"] == conteudo
+    # Nada da ficha nem do nivel chega ao anotador.
+    assert set(entrada) == {"cenario", "remetente", "receptor", "assunto", "conteudo", "links"}
+    assert entrada["links"] == "(nenhum)"
+
+
+async def test_anotacao_cega_no_remetente_tem_span_no_remetente():
+    remetente = "Secretaria <secretaria@unifl0resta.edu.br>"
+    gerado = _draft("Prezada Larissa Monteiro,\n\nTexto.", remetente=remetente)
+    anotacao = AnotacaoCega(
+        pistas=[PistaAnotada(code=CueCode.TYPOSQUAT, campo="remetente", evidencia="unifl0resta.edu.br")],
+        premise_alignment="alto",
+    )
+    resultado = await _generator_cego(_ChainSequencia(gerado), anotacao).generate_response(
+        difficulty="medio", context="ctx", relevant_docs="docs", variacao=_ficha_medio()
+    )
+    cue = resultado.cues[0]
+    assert cue.campo == "remetente"
+    assert remetente[cue.span_start : cue.span_end] == "unifl0resta.edu.br"
+
+
+async def test_item_legitimo_nao_passa_pelo_anotador():
+    gerado = _draft("Prezada Larissa,\n\nTexto.", premise=None)
+    ficha = VariationSampler(random.Random(1)).sortear("medio", is_malicious=False)
+    generator = _generator_cego(
+        _ChainSequencia(gerado), AnotacaoCega(premise_alignment="alto"), is_malicious=False
+    )
+    resultado = await generator.generate_response(
+        difficulty="medio", context="ctx", relevant_docs="docs", is_malicious=False, variacao=ficha
+    )
+    assert generator.annotation_chain.entradas == []
+    assert resultado.cues == [] and resultado.phish_scale is None
+    assert resultado.target_cues is None
+
+
+async def test_remetente_sem_email_faz_gerar_de_novo():
+    """Piloto 2: 4 de 9 remetentes eram nomes, sem endereco."""
+    sem_email = _draft("Texto.", remetente="Maria Silva, Coordenadora de Matrícula")
+    chain = _ChainSequencia(sem_email, _draft("Texto."))
+
+    resultado = await _generator(chain).generate_response(
+        difficulty="medio", context="ctx", relevant_docs="docs", variacao=_ficha_medio()
+    )
+
+    assert len(chain.entradas) == 2
+    assert resultado.validacao["regeneracoes_por_remetente"] == 1
+
+
+async def test_regeneracao_usa_ficha_nova_e_o_draft_devolve_a_usada():
+    """Piloto 2: com a mesma ficha, o item com '[Nome da Universidade]'
+    repetiu o marcador nas 2 regeneracoes.
+    """
+    chain = _ChainSequencia(_draft("Olá, [Nome da Universidade] informa."), _draft("Texto."))
+    primeira = _ficha_medio(nome="Larissa Monteiro")
+    segunda = _ficha_medio(nome="Otávio Brito", pistas=(CueCode.SCARCITY, CueCode.TYPOSQUAT))
+
+    resultado = await _generator(chain).generate_response(
+        difficulty="medio",
+        context="ctx",
+        relevant_docs="docs",
+        variacao=primeira,
+        sortear_variacao=lambda: segunda,
+    )
+
+    assert "Larissa Monteiro" in chain.entradas[0]["variacao"]
+    assert "Otávio Brito" in chain.entradas[1]["variacao"]
+    assert resultado.target_cues == [CueCode.SCARCITY, CueCode.TYPOSQUAT]
+    assert resultado.variation_spec["nome_destinatario"] == "Otávio Brito"
+    assert resultado.validacao["regeneracoes_por_marcador"] == 1
+
+
+async def test_universidade_exemplo_faz_gerar_de_novo():
+    chain = _ChainSequencia(_draft("Secretaria da Universidade Exemplo."), _draft("Texto."))
+    await _generator(chain).generate_response(
+        difficulty="medio", context="ctx", relevant_docs="docs", variacao=_ficha_medio()
+    )
+    assert len(chain.entradas) == 2
+
+
+async def test_assunto_repetido_no_corpo_e_removido():
+    assunto = "Ação Necessária: Divergência em Seus Dados"
+    gerado = _draft(f"{assunto}\n\nPrezada Larissa Monteiro,\n\nTexto.", assunto=assunto)
+
+    resultado = await _generator(_ChainSequencia(gerado)).generate_response(
+        difficulty="medio", context="ctx", relevant_docs="docs", variacao=_ficha_medio()
+    )
+
+    assert resultado.conteudo == "Prezada Larissa Monteiro,\n\nTexto."
+    assert resultado.validacao["assunto_removido_do_corpo"] is True
+
+
+async def test_pista_de_dominio_sem_dominio_sai_do_item():
+    gerado = _draft(
+        "Prezada Larissa Monteiro,\n\nEscritório de Administração Acadêmica",
+        [Cue(code=CueCode.SENDER_DOMAIN_MISMATCH, evidencia="Escritório de Administração Acadêmica")],
+    )
+    resultado = await _generator(_ChainSequencia(gerado)).generate_response(
+        difficulty="medio", context="ctx", relevant_docs="docs", variacao=_ficha_medio()
+    )
+    assert resultado.cues == []
+    assert resultado.validacao["pistas_removidas"][0]["motivo"] == "pista_de_dominio_sem_dominio"

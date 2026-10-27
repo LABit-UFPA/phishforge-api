@@ -169,6 +169,7 @@ class Container(containers.DeclarativeContainer):
         api_key=config.OPENAI_API_KEY,
         model_name=config.MODEL_NAME_LLM,
         temperature=config.LLM_TEMPERATURE,
+        anotacao_cega=config.ANOTACAO_CEGA,
     )
 
     # model_name explicito (lote-piloto de 26/10/2026): antes o

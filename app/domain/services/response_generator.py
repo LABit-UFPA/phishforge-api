@@ -1,7 +1,7 @@
 # app/domain/services/response_generator.py
 
 import logging
-from typing import List, Optional
+from typing import Callable, Dict, List, Optional
 
 from langchain_core.prompts import PromptTemplate
 from app.domain.models.channel_item_draft import (
@@ -11,7 +11,7 @@ from app.domain.models.channel_item_draft import (
     WebsiteItemDraft,
     WhatsAppItemDraft,
 )
-from app.domain.models.cue import Cue
+from app.domain.models.cue import DEFINICOES_OPERACIONAIS, CampoDaPista, Cue, CueCode
 from app.domain.models.difficulty import Difficulty
 from app.domain.models.generated_item_draft import GeneratedItemDraft, ValidatedItemDraft
 from app.domain.models.phish_scale import PhishScale, PremiseAlignment
@@ -21,14 +21,24 @@ from app.domain.services.item_validation import (
     RelatorioValidacao,
     calcular_spans,
     encontrar_marcadores,
+    endereco_de_email,
     registrar_aderencia,
+    remover_assunto_repetido,
+    remover_pistas_de_dominio_sem_dominio,
     remover_saudacao_generica_falsa,
 )
 from app.domain.services.variation_sampler import renderizar_ficha
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
 
-# Quantas vezes gerar o item de novo quando ele volta com marcador de
-# template ("[Nome do Estudante]") -- lote-piloto de 26/10/2026. Esgotado,
+# Versao do gerador de e-mail (prompts + validacoes), registrada em
+# generation_jobs.run_metadata de cada lote. Mudar prompt ou validacao =
+# mudar esta string, para os lotes de versoes diferentes nao se
+# misturarem na analise.
+VERSAO_GERADOR = "2026-10-27-piloto3"
+
+# Quantas vezes gerar o item de novo quando ele volta estruturalmente
+# invalido (marcador de template, remetente sem e-mail). Esgotado,
 # generate_response levanta ItemInvalidoError (falha de geracao, nao
 # descarte por duplicidade).
 MAX_REGENERACOES_POR_MARCADOR = 2
@@ -36,25 +46,63 @@ MAX_REGENERACOES_POR_MARCADOR = 2
 
 class ItemInvalidoError(Exception):
     """Item gerado que nao pode ser usado mesmo depois das
-    regeneracoes (hoje: marcador de template no texto).
+    regeneracoes (marcador de template ou remetente sem e-mail).
     """
 
-# Descricao curta de cada codigo, injetada nos dois prompts (issue #5,
-# passo 3): sem isso, o `Enum` do structured output so impede o modelo
-# de INVENTAR um codigo fora da taxonomia -- nao ajuda o modelo a
-# ESCOLHER o codigo certo para o que ele mesmo esta escrevendo.
-_TAXONOMIA_DE_PISTAS = (
-    "- sender_domain_mismatch: dominio do remetente nao corresponde a organizacao\n"
-    "- typosquat: dominio com erro de digitacao proposital (ex.: empres4.net)\n"
-    "- homoglyph: caractere visualmente parecido usado para enganar\n"
-    "- urgency: apelo a urgencia ou prazo curto\n"
-    "- authority: apelo a autoridade (banco, governo, chefia)\n"
-    "- generic_greeting: saudacao generica, sem personalizacao\n"
-    "- credential_request: solicitacao direta de senha ou dado sensivel\n"
-    "- link_text_mismatch: texto do link diferente do destino real\n"
-    "- unexpected_attachment: anexo inesperado ou fora do contexto\n"
-    "- scarcity: apelo a escassez ou oferta por tempo limitado"
+
+# Definicao de cada codigo, injetada nos prompts (issue #5, passo 3):
+# sem isso, o `Enum` do structured output so impede o modelo de INVENTAR
+# um codigo -- nao ajuda a ESCOLHER o codigo certo. Desde o piloto 2, e o
+# mesmo texto que o especialista ve (DEFINICOES_OPERACIONAIS).
+_TAXONOMIA_DE_PISTAS = "\n".join(
+    f"- {code.value}: {definicao}" for code, definicao in DEFINICOES_OPERACIONAIS.items()
 )
+
+
+class PistaAnotada(BaseModel):
+    """Uma pista encontrada pelo anotador as cegas."""
+
+    code: CueCode
+    campo: CampoDaPista = Field(
+        description="Onde a evidencia esta: remetente, assunto ou conteudo."
+    )
+    evidencia: str = Field(
+        description="Trecho copiado literalmente do campo indicado, sem aspas."
+    )
+
+
+class AnotacaoCega(BaseModel):
+    """Saida do anotador as cegas (piloto 2, 27/10/2026)."""
+
+    pistas: List[PistaAnotada] = Field(default_factory=list)
+    premise_alignment: PremiseAlignment
+
+
+# Regras de forma comuns aos dois prompts de e-mail (piloto 2, 27/10/2026):
+# remetente sem endereco em 4 de 9 itens, "[Informacoes de Contato]" e
+# "Universidade Exemplo" no texto, os 9 assuntos com "Acao Necessaria:".
+# Sem chaves literais no texto: e inserido num PromptTemplate.
+_REGRAS_DE_FORMA = (
+    "### REGRAS DE FORMA (OBRIGATÓRIO)\n"
+    "- `remetente` é SEMPRE um endereço de e-mail, opcionalmente com nome de exibição "
+    "no formato 'Nome Exibido <endereco@dominio>'. Quem assina, da ficha, aparece na "
+    "assinatura no fim do `conteudo`; não substitui o endereço.\n"
+    "- O domínio do endereço do remetente segue a linha 'Endereço do remetente' da ficha.\n"
+    "- Se o cenário não dá o nome da organização, invente um nome fictício e plausível "
+    "(nunca o de uma instituição real, nunca 'Exemplo', 'XYZ' ou parecidos) e use o mesmo "
+    "nome em todo o e-mail. O domínio oficial dela é coerente com esse nome; o do "
+    "remetente segue a ficha.\n"
+    "- Nunca escreva texto entre colchetes ou entre chaves: todo dado do e-mail (nome, "
+    "telefone, protocolo, contato) aparece preenchido, inventado quando preciso.\n"
+    "- Siga o estilo de assunto da ficha. Nunca comece o assunto com 'Ação Necessária' "
+    "ou 'Ação Requerida', e não repita o assunto como primeira linha do `conteudo`.\n\n"
+)
+
+
+def _links_para_anotador(links) -> str:
+    if not links:
+        return "(nenhum)"
+    return "\n".join(f"- texto exibido: {link.text} | destino real: {link.href}" for link in links)
 
 
 def _construir_prompt_canal(
@@ -238,11 +286,27 @@ _REGRAS_WHATSAPP_LEGITIMO = (
 
 
 class ResponseGenerator:
-    def __init__(self, api_key: str, model_name: str = "gpt-4o-mini", temperature: float = 0.7):
+    def __init__(
+        self,
+        api_key: str,
+        model_name: str = "gpt-4o-mini",
+        temperature: float = 0.7,
+        anotacao_cega: bool = False,
+    ):
         # Guardados para o lote registrar com que modelo/temperatura os
         # itens foram gerados (generation_jobs.run_metadata).
         self.model_name = model_name
         self.temperature = temperature
+        # Piloto 2: com o gerador anotando as proprias pistas sabendo as
+        # pistas-alvo, as anotadas coincidiram 100% com o alvo mesmo
+        # quando o texto nao as sustentava. Ligado, `cues` e
+        # `premise_alignment` passam a vir de uma 2a chamada que so ve o
+        # item pronto. Default False aqui (testes antigos); o container
+        # liga pelo config (ANOTACAO_CEGA).
+        self.anotacao_cega = anotacao_cega
+        self.annotation_llm = ChatOpenAI(
+            model_name=model_name, api_key=api_key, temperature=0.0
+        ).with_structured_output(AnotacaoCega)
         self.llm = ChatOpenAI(
             model_name=model_name,
             api_key=api_key,
@@ -281,6 +345,7 @@ class ResponseGenerator:
                 "ou 'Espero que esta mensagem o encontre bem'. Nunca deixe marcadores de "
                 "template no texto, como [Nome] ou [Nome do Estudante]: use exatamente o nome "
                 "da ficha, ou uma saudação genérica quando a ficha disser que não há nome.\n\n"
+                f"{_REGRAS_DE_FORMA}"
 
                 "### VARIEDADE ESTRUTURAL (OBRIGATÓRIO -- validado empiricamente na issue #20)\n"
                 "Uma checagem contra geração real mostrou dois problemas que já foram "
@@ -474,6 +539,7 @@ class ResponseGenerator:
                 "{variacao}\n\n"
                 "Nunca abra com fórmulas prontas como 'Esperamos que você esteja bem'. Nunca "
                 "deixe marcadores de template no texto, como [Nome]: use o nome da ficha.\n\n"
+                f"{_REGRAS_DE_FORMA}"
 
                 "### O QUE TORNA O ITEM LEGÍTIMO (OBRIGATÓRIO)\n"
                 "- Domínio do remetente coerente e plausível para a organização do cenário\n"
@@ -714,6 +780,55 @@ class ResponseGenerator:
             )
         )
 
+        # Anotador as cegas (piloto 2): recebe so o que o especialista
+        # recebe (remetente, destinatario, assunto, corpo, links) e o
+        # cenario -- nunca a ficha, o nivel pedido nem se o item e golpe.
+        self.annotation_prompt_template = PromptTemplate(
+            input_variables=["cenario", "remetente", "receptor", "assunto", "conteudo", "links"],
+            template=(
+                "## TAREFA\n"
+                "Você é um anotador independente de pistas de phishing. Leia a mensagem "
+                "abaixo e marque SOMENTE as pistas da taxonomia que estão de fato presentes "
+                "no texto. Você não sabe como a mensagem foi produzida nem se ela é golpe "
+                "ou comunicação legítima: julgue apenas o que está escrito. Uma lista vazia "
+                "é uma resposta válida.\n\n"
+                "## TAXONOMIA (definições operacionais)\n"
+                f"{_TAXONOMIA_DE_PISTAS}\n\n"
+                "## REGRAS\n"
+                "- Para cada pista: `code`, `campo` (onde ela está: `remetente`, `assunto` "
+                "ou `conteudo`) e `evidencia`, o trecho copiado literalmente desse campo, "
+                "sem aspas.\n"
+                "- Marque cada pista uma vez, com o trecho mais claro.\n"
+                "- `sender_domain_mismatch` e `typosquat` exigem um domínio na evidência "
+                "(o do endereço do remetente ou o destino de um link). Nome de pessoa, de "
+                "setor ou de organização não é domínio.\n"
+                "- `sender_domain_mismatch` só quando o domínio do endereço não é o da "
+                "organização que a mensagem diz representar. Domínio coerente com a "
+                "organização não é pista.\n"
+                "- `typosquat` só quando o domínio imita o oficial com caractere trocado, a "
+                "mais ou a menos.\n"
+                "- `urgency` é tempo (prazo, 'imediatamente', consequência iminente); "
+                "`scarcity` é quantidade ou oferta limitada. Prazo para cumprir uma "
+                "obrigação é `urgency`.\n"
+                "- `generic_greeting` só quando a saudação não usa o nome do destinatário.\n"
+                "- `link_text_mismatch`: compare o texto exibido de cada link com o "
+                "destino real, na lista de links.\n\n"
+                "## PREMISSA (premise_alignment)\n"
+                "Julgue também o quanto o PRETEXTO da mensagem se encaixa na rotina de "
+                "quem recebe, dado o cenário: {cenario}\n"
+                "- `alto`: o pretexto faz parte da rotina de quem recebe\n"
+                "- `medio`: plausível, mas não esperado naquele momento\n"
+                "- `baixo`: pretexto genérico ou incoerente com o cenário\n\n"
+                "## MENSAGEM\n"
+                "Remetente: {remetente}\n"
+                "Destinatário: {receptor}\n"
+                "Assunto: {assunto}\n"
+                "Corpo:\n{conteudo}\n\n"
+                "Links (texto exibido e destino real):\n{links}\n"
+            ),
+        )
+        self.annotation_chain = self.annotation_prompt_template | self.annotation_llm
+
         self.chain = self.prompt_template | self.llm
         self.legitimate_chain = self.legitimate_prompt_template | self.llm
         self.hyde_chain = self.hyde_prompt_template | self.text_llm
@@ -760,6 +875,7 @@ class ResponseGenerator:
         relevant_docs,
         is_malicious: bool = True,
         variacao: Optional[VariationSpec] = None,
+        sortear_variacao: Optional[Callable[[], VariationSpec]] = None,
     ) -> ValidatedItemDraft:
         """
         Gera um item (phishing ou legítimo) baseado no contexto, dificuldade e documentos relevantes.
@@ -786,70 +902,150 @@ class ResponseGenerator:
                 `{variacao}` e alimenta as validacoes (nome do
                 destinatario, pistas-alvo). None so para chamador que
                 nao sorteia ficha -- o prompt entao pede escolha livre.
+            sortear_variacao: quando o item volta estruturalmente
+                invalido e e gerado de novo, cada nova tentativa usa a
+                ficha devolvida por esta funcao (piloto 2: o item com
+                "[Nome da Universidade]" repetiu o marcador nas 2
+                regeneracoes com a mesma ficha). Sem ela, repete a ficha.
 
         Returns:
             ValidatedItemDraft: NÃO inclui `nivel` nem `is_malicious`
             (ver issue #11 -- ambos são entrada da geração, não saída
-            do LLM). `cues` já vem validado por `_validar_cues` (issue
-            #5, passos 5 e 9, e lote-piloto de 26/10/2026) -- spans
-            calculados a partir da evidência, `generic_greeting` falso
-            removido e item legítimo nunca sai daqui com pista alguma.
-            `phish_scale` (issue #9) é montado por
-            `_compute_phish_scale` a partir do `cues` já validado e do
-            `premise_alignment` que o LLM julgou -- None para item
-            legítimo. `validacao` traz o relatório do que foi corrigido.
+            do LLM). `cues` e `premise_alignment` vêm do anotador às
+            cegas quando ele está ligado (piloto 2), senão do próprio
+            gerador; em ambos os casos validados por `_validar_cues`
+            (spans calculados no campo certo, pistas sem lastro
+            removidas, item legítimo sem pista). `phish_scale` (issue
+            #9) é montado a partir deles -- None para item legítimo.
+            `target_cues`/`variation_spec` são os da ficha de fato usada,
+            e `validacao` traz o relatório do que foi corrigido.
 
         Raises:
             ItemInvalidoError: o item continuou com marcador de template
-                ("[Nome do Estudante]") depois de
+                ou com remetente sem endereço de e-mail depois de
                 MAX_REGENERACOES_POR_MARCADOR novas gerações.
         """
         chain = self.chain if is_malicious else self.legitimate_chain
-        entrada = {
-            "context": context,
-            "difficulty": difficulty,
-            "relevant_docs": relevant_docs,
-            "variacao": renderizar_ficha(variacao),
-        }
         relatorio = RelatorioValidacao()
+        ficha = variacao
 
         for tentativa in range(MAX_REGENERACOES_POR_MARCADOR + 1):
+            if tentativa > 0 and sortear_variacao is not None:
+                ficha = sortear_variacao()
+            entrada = {
+                "context": context,
+                "difficulty": difficulty,
+                "relevant_docs": relevant_docs,
+                "variacao": renderizar_ficha(ficha),
+            }
             try:
                 draft = await chain.ainvoke(entrada)
             except Exception as e:
                 logging.error(f"Error generating response: {e}")
                 raise e
 
-            marcadores = encontrar_marcadores(
-                draft.receptor, draft.remetente, draft.assunto, draft.conteudo
-            )
-            if not marcadores:
+            problema = self._problema_estrutural(draft)
+            if problema is None:
                 break
+            motivo, detalhe = problema
             logging.warning(
-                "Item gerado com marcador de template %s (tentativa %d) -- gerando de novo.",
-                marcadores,
+                "Item gerado invalido (%s: %s, tentativa %d) -- gerando de novo.",
+                motivo,
+                detalhe,
                 tentativa + 1,
             )
             if tentativa == MAX_REGENERACOES_POR_MARCADOR:
                 raise ItemInvalidoError(
-                    f"item continuou com marcador de template {marcadores} apos "
+                    f"item continuou invalido ({motivo}: {detalhe}) apos "
                     f"{MAX_REGENERACOES_POR_MARCADOR} regeneracoes"
                 )
-            relatorio.regeneracoes_por_marcador += 1
+            if motivo == "marcador":
+                relatorio.regeneracoes_por_marcador += 1
+            else:
+                relatorio.regeneracoes_por_remetente += 1
+
+        draft.conteudo, relatorio.assunto_removido_do_corpo = remover_assunto_repetido(
+            draft.assunto, draft.conteudo
+        )
+
+        cues, premise_alignment = draft.cues, draft.premise_alignment
+        if is_malicious and self.anotacao_cega:
+            relatorio.anotacao_cega = True
+            relatorio.cues_autodeclaradas = [c.code for c in draft.cues]
+            relatorio.premise_alignment_autodeclarado = (
+                draft.premise_alignment.value if draft.premise_alignment else None
+            )
+            anotacao = await self._anotar_as_cegas(draft, context)
+            cues = [
+                Cue(code=p.code, evidencia=p.evidencia, campo=p.campo) for p in anotacao.pistas
+            ]
+            premise_alignment = anotacao.premise_alignment
 
         draft.cues = self._validar_cues(
             draft.conteudo,
-            draft.cues,
+            cues,
             is_malicious,
-            nome_destinatario=variacao.nome_destinatario if variacao else None,
+            nome_destinatario=ficha.nome_destinatario if ficha else None,
             relatorio=relatorio,
+            campos={
+                "conteudo": draft.conteudo,
+                "assunto": draft.assunto,
+                "remetente": draft.remetente,
+            },
         )
-        if is_malicious and variacao is not None:
-            registrar_aderencia(draft.cues, variacao.pistas_alvo, relatorio)
+        draft.premise_alignment = premise_alignment
+        if is_malicious and ficha is not None:
+            registrar_aderencia(draft.cues, ficha.pistas_alvo, relatorio)
         draft.phish_scale = self._compute_phish_scale(draft.cues, draft.premise_alignment, is_malicious)
         return ValidatedItemDraft(
-            **draft.model_dump(), validacao=relatorio.model_dump(mode="json")
+            **{
+                **draft.model_dump(),
+                "validacao": relatorio.model_dump(mode="json"),
+                "target_cues": list(ficha.pistas_alvo) if (ficha and is_malicious) else None,
+                "variation_spec": ficha.model_dump(mode="json") if ficha else None,
+            }
         )
+
+    def _problema_estrutural(self, draft: GeneratedItemDraft):
+        """(motivo, detalhe) quando o item nao pode ser usado como veio,
+        ou None. Marcador de template (piloto 1 e 2) ou remetente sem
+        endereco de e-mail (piloto 2).
+        """
+        textos_de_link = [link.text for link in draft.links]
+        # O endereco do destinatario so e checado quanto a colchetes:
+        # "aluno@example.com" ali e comum e nao e o que o especialista
+        # analisa (remetente, assunto e corpo).
+        marcadores = encontrar_marcadores(
+            draft.remetente, draft.assunto, draft.conteudo, textos_de_link=textos_de_link
+        ) + encontrar_marcadores(
+            draft.receptor, textos_de_link=textos_de_link, nomes_genericos=False
+        )
+        if marcadores:
+            return "marcador", marcadores
+        if endereco_de_email(draft.remetente) is None:
+            return "remetente_sem_email", draft.remetente
+        return None
+
+    async def _anotar_as_cegas(self, draft: GeneratedItemDraft, cenario: str) -> AnotacaoCega:
+        """2a chamada: anota pistas e premissa a partir do item pronto,
+        sem a ficha, o nivel pedido nem a informacao de que e golpe --
+        a mesma situacao do especialista (ver ConteudoParaAvaliar).
+        Erro aqui propaga como falha de geracao do item.
+        """
+        try:
+            return await self.annotation_chain.ainvoke(
+                {
+                    "cenario": cenario,
+                    "remetente": draft.remetente,
+                    "receptor": draft.receptor,
+                    "assunto": draft.assunto,
+                    "conteudo": draft.conteudo,
+                    "links": _links_para_anotador(draft.links),
+                }
+            )
+        except Exception as e:
+            logging.error(f"Error annotating item: {e}")
+            raise e
 
     def _validar_cues(
         self,
@@ -858,9 +1054,10 @@ class ResponseGenerator:
         is_malicious: bool,
         nome_destinatario: Optional[str] = None,
         relatorio: Optional[RelatorioValidacao] = None,
+        campos: Optional[Dict[str, Optional[str]]] = None,
     ) -> List[Cue]:
         """Aplica os passos 5 e 9 da issue #5 depois da geracao, mais as
-        validacoes do lote-piloto de 26/10/2026.
+        validacoes dos lotes-piloto de 26 e 27/10/2026.
 
         Passo 9: item legitimo nunca deve ter pista de golpe. O prompt
         legitimo ja instrui `cues: []`, mas isso e disciplina de
@@ -869,17 +1066,16 @@ class ResponseGenerator:
         registro no relatorio), nao propagado: nao ha ganho em falhar a
         geracao inteira por causa de uma lista que deveria estar vazia.
 
-        Passo 5, refeito no piloto: as posicoes deixam de vir do LLM e
-        passam a ser CALCULADAS a partir da `evidencia` (ver
-        item_validation.calcular_spans). No piloto, 9 de 10 spans
-        voltaram nulos; agora span nulo significa uma coisa so -- a
-        evidencia nao e trecho literal do `conteudo`. A pista continua
-        MANTIDA nesse caso: o codigo pode estar certo mesmo quando a
-        citacao nao esta.
+        Passo 5, refeito nos pilotos: as posicoes sao CALCULADAS a partir
+        da `evidencia`, no campo em que ela esta (remetente, assunto ou
+        conteudo -- ver item_validation.calcular_spans). Span nulo
+        significa uma coisa so: a evidencia nao e trecho literal do item.
+        A pista continua MANTIDA nesse caso: o codigo pode estar certo
+        mesmo quando a citacao nao esta.
 
-        `generic_greeting` com o nome do destinatario na saudacao e
-        removido (falso positivo do piloto) -- so quando o nome e
-        conhecido, isto e, quando a ficha foi passada.
+        Removidas, com registro: `generic_greeting` com o nome do
+        destinatario da ficha na saudacao, e pistas de dominio cuja
+        evidencia nao tem dominio.
         """
         if not is_malicious:
             if cues:
@@ -895,14 +1091,16 @@ class ResponseGenerator:
                     )
             return []
 
-        validadas = calcular_spans(conteudo, cues, relatorio)
+        validadas = calcular_spans(campos or {"conteudo": conteudo}, cues, relatorio)
         removidas_antes = len(relatorio.pistas_removidas) if relatorio else 0
         validadas = remover_saudacao_generica_falsa(
             conteudo, validadas, nome_destinatario, relatorio
         )
+        validadas = remover_pistas_de_dominio_sem_dominio(validadas, relatorio)
         if relatorio is not None and len(relatorio.pistas_removidas) > removidas_antes:
             logging.warning(
-                "generic_greeting removido: a saudacao usa o nome do destinatario da ficha."
+                "Pistas removidas na validacao: %s",
+                [r.motivo for r in relatorio.pistas_removidas[removidas_antes:]],
             )
         return validadas
 

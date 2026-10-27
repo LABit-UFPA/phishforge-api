@@ -225,3 +225,37 @@ async def test_item_sem_ficha_fica_com_colunas_nulas(phishing_repository):
     assert recuperado.target_cues is None
     assert recuperado.variation_spec is None
     assert recuperado.validacao is None
+
+
+async def test_campo_da_pista_persiste(phishing_repository):
+    """Piloto 2 (migration V20261027120000): o campo em que o span se
+    aplica volta igual; pista sem campo continua aceita (linhas antigas).
+    """
+    email_id = await phishing_repository.create(
+        _email_de_teste(
+            remetente="Secretaria <secretaria@empres4.net>",
+            cues=[
+                Cue(code=CueCode.TYPOSQUAT, evidencia="empres4.net", campo="remetente",
+                    span_start=23, span_end=34),
+                Cue(code=CueCode.URGENCY, evidencia="em ate 2 horas"),
+            ],
+        )
+    )
+
+    recuperado = await phishing_repository.get_by_id(email_id)
+    por_codigo = {c.code: c for c in recuperado.cues}
+    assert por_codigo[CueCode.TYPOSQUAT].campo == "remetente"
+    assert por_codigo[CueCode.URGENCY].campo is None
+
+
+async def test_definicoes_do_anotador_sao_as_que_o_especialista_ve(db_connection):
+    """O anotador as cegas e o gerador usam DEFINICOES_OPERACIONAIS; o
+    especialista ve cues.descricao_pt. Se um mudar sem o outro, o LLM e
+    os especialistas passam a anotar com codebooks diferentes.
+    """
+    from app.domain.models.cue import DEFINICOES_OPERACIONAIS
+
+    async with db_connection.get_connection() as conn:
+        linhas = await conn.fetch("SELECT code, descricao_pt FROM cues")
+    no_banco = {linha["code"]: linha["descricao_pt"] for linha in linhas}
+    assert no_banco == {code.value: texto for code, texto in DEFINICOES_OPERACIONAIS.items()}

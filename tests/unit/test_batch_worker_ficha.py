@@ -30,7 +30,7 @@ class _ConteudoFixo(FakeResponseGenerator):
     """
 
     async def generate_response(
-        self, difficulty, context, relevant_docs, is_malicious=True, variacao=None
+        self, difficulty, context, relevant_docs, is_malicious=True, variacao=None, **kwargs
     ):
         draft = await super().generate_response(
             difficulty, context, relevant_docs, is_malicious, variacao
@@ -198,3 +198,45 @@ async def test_lote_anterior_inexistente_falha_o_job_antes_de_gerar():
     assert job.status == JobStatus.FALHOU
     assert "lotes anteriores" in job.error_message
     assert _fichas(rg) == []
+
+
+class _MesmoCorpoAssuntoDiferente(FakeResponseGenerator):
+    """Corpo identico, assunto diferente a cada chamada."""
+
+    async def generate_response(
+        self, difficulty, context, relevant_docs, is_malicious=True, variacao=None, **kwargs
+    ):
+        draft = await super().generate_response(
+            difficulty, context, relevant_docs, is_malicious, variacao
+        )
+        draft.conteudo = "CORPO IDENTICO"
+        draft.assunto = f"Assunto {self._contador}"
+        return draft
+
+
+async def test_dedup_considera_o_assunto():
+    """Piloto 2: a dedup so via o corpo, e dois pares de itens tinham o
+    mesmo assunto. Agora o texto comparado e assunto + corpo.
+    """
+    worker, jobs, _, _ = _montar(response_generator=_MesmoCorpoAssuntoDiferente())
+    job = await _rodar(worker, jobs, total=2)
+    assert job.total_generated == 2
+    assert job.total_discarded == 0
+
+
+async def test_gerador_recebe_o_sorteador_para_regenerar_com_ficha_nova():
+    worker, jobs, _, rg = _montar()
+    await _rodar(worker, jobs, total=1)
+    # O fake nao regenera; o que importa e o worker ter passado o sorteador.
+    chamada = next(c for c in rg.calls if c["step"] == "generate_response")
+    assert callable(chamada["sortear_variacao"])
+    assert isinstance(chamada["sortear_variacao"](), VariationSpec)
+
+
+async def test_run_metadata_registra_versao_do_gerador():
+    from app.domain.services.response_generator import VERSAO_GERADOR
+
+    worker, jobs, _, _ = _montar()
+    job = await _rodar(worker, jobs, total=1)
+    assert job.run_metadata["versao_gerador"] == VERSAO_GERADOR
+    assert "anotacao_cega" in job.run_metadata

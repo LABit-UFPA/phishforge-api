@@ -9,7 +9,7 @@ from app.domain.models.generation_job import JobStatus
 from app.domain.models.phishing_email import PhishingEmail
 from app.domain.services.generation_pipeline import GenerationPipeline
 from app.domain.services.phishing_service import PhishingEmailService
-from app.domain.services.response_generator import ResponseGenerator
+from app.domain.services.response_generator import VERSAO_GERADOR, ResponseGenerator
 from app.domain.services.variation_sampler import VariationSampler
 from app.infra.database.repositories.generation_job_repository import GenerationJobRepository
 
@@ -41,6 +41,14 @@ def _cosine_similarity(a: List[float], b: List[float]) -> float:
     if norm_a == 0 or norm_b == 0:
         return 0.0
     return dot / (norm_a * norm_b)
+
+
+def _texto_email_para_embedding(assunto: Optional[str], conteudo: Optional[str]) -> str:
+    """Texto do e-mail usado na dedup: assunto + corpo. So o corpo
+    deixava passar assuntos identicos (piloto 2: dois pares de itens com
+    o mesmo assunto, de corpos diferentes).
+    """
+    return f"{assunto or ''}\n\n{conteudo or ''}"
 
 
 def _texto_para_embedding(channel: str, content_json: dict) -> str:
@@ -137,8 +145,10 @@ class BatchGenerationWorker:
             distribution[difficulties[i]] += 1
 
         run_metadata = {
+            "versao_gerador": VERSAO_GERADOR,
             "modelo": getattr(self._response_generator, "model_name", None),
             "temperatura": getattr(self._response_generator, "temperature", None),
+            "anotacao_cega": getattr(self._response_generator, "anotacao_cega", None),
             "limiar_dedup": self._dedup_threshold,
             "max_dedup_retries": MAX_DEDUP_RETRIES,
             "seed": seed,
@@ -172,7 +182,7 @@ class BatchGenerationWorker:
                 tentativas_do_item: List[dict] = []
                 try:
                     if channel == Channel.EMAIL.value:
-                        draft, embedding, ficha = await self._generate_com_dedup(
+                        draft, embedding = await self._generate_com_dedup(
                             difficulty_value=difficulty_value,
                             is_malicious=is_malicious,
                             generation_context=built.generation_context,
@@ -181,6 +191,9 @@ class BatchGenerationWorker:
                             sampler=sampler,
                             tentativas=tentativas_do_item,
                         )
+                        # A ficha usada e as pistas-alvo vem no proprio
+                        # draft (target_cues/variation_spec): se o item foi
+                        # gerado de novo, a ficha pode ser outra.
                         phishing_example = (
                             None
                             if draft is None
@@ -188,8 +201,6 @@ class BatchGenerationWorker:
                                 **draft.model_dump(),
                                 nivel=difficulty_value,
                                 is_malicious=is_malicious,
-                                target_cues=list(ficha.pistas_alvo) if is_malicious else None,
-                                variation_spec=ficha.model_dump(mode="json"),
                             )
                         )
                     else:
@@ -286,7 +297,7 @@ class BatchGenerationWorker:
 
         itens = await self._phishing_service.get_emails_by_ids(item_ids)
         textos = [
-            item.conteudo
+            _texto_email_para_embedding(item.assunto, item.conteudo)
             if item.channel == Channel.EMAIL
             else _texto_para_embedding(item.channel.value, item.content_json or {})
             for item in itens
@@ -307,7 +318,7 @@ class BatchGenerationWorker:
         )
 
     def _registrar_tentativa(
-        self, tentativas: List[dict], numero: int, similaridade: float, ficha=None
+        self, tentativas: List[dict], numero: int, similaridade: float, pistas_alvo=None
     ) -> str:
         """Registra a tentativa e devolve o resultado dela."""
         if similaridade < self._dedup_threshold:
@@ -321,8 +332,8 @@ class BatchGenerationWorker:
             "similaridade_max": round(similaridade, 4),
             "resultado": resultado,
         }
-        if ficha is not None:
-            registro["pistas_alvo"] = [p.value for p in ficha.pistas_alvo]
+        if pistas_alvo is not None:
+            registro["pistas_alvo"] = [getattr(p, "value", p) for p in pistas_alvo]
         tentativas.append(registro)
         return resultado
 
@@ -339,32 +350,44 @@ class BatchGenerationWorker:
         """Gera um item; se ficar parecido demais com outro ja aceito
         (no lote ou nos lotes anteriores indicados), tenta de novo ate
         MAX_DEDUP_RETRIES vezes. Se continuar parecido, devolve
-        (None, None, None) -- descartado, nao e falha de geracao.
+        (None, None) -- descartado, nao e falha de geracao.
 
         Cada tentativa usa uma ficha NOVA (proxima do sorteio
         balanceado): repetir a mesma ficha tenderia a reproduzir o
-        mesmo item. A ficha devolvida e a do item aceito.
+        mesmo item. O gerador tambem recebe o sorteador, para trocar de
+        ficha quando regenera um item invalido; a ficha de fato usada
+        volta no draft.
 
-        Excecao de geracao (erro de LLM de verdade) NAO e capturada
-        aqui: propaga para o chamador tratar como falha, distinto de
-        descarte por duplicidade -- sao categorias diferentes de
-        problema.
+        Excecao de geracao (erro de LLM de verdade, ou item que
+        continuou invalido) NAO e capturada aqui: propaga para o
+        chamador tratar como falha, distinto de descarte por
+        duplicidade -- sao categorias diferentes de problema.
         """
+
+        def sortear():
+            return sampler.sortear(difficulty_value, is_malicious)
+
         for numero in range(1, MAX_DEDUP_RETRIES + 2):
-            ficha = sampler.sortear(difficulty_value, is_malicious)
             draft = await self._response_generator.generate_response(
                 difficulty=difficulty_value,
                 context=generation_context,
                 relevant_docs=fused_context,
                 is_malicious=is_malicious,
-                variacao=ficha,
+                variacao=sortear(),
+                sortear_variacao=sortear,
             )
-            embedding = self._embedding_client.embed(draft.conteudo)
+            embedding = self._embedding_client.embed(
+                _texto_email_para_embedding(draft.assunto, draft.conteudo)
+            )
             similaridade = self._maior_similaridade(embedding, accepted_embeddings)
-            if self._registrar_tentativa(tentativas, numero, similaridade, ficha) == RESULTADO_ACEITO:
-                return draft, embedding, ficha
+            pistas_alvo = draft.target_cues if draft.target_cues is not None else []
+            if (
+                self._registrar_tentativa(tentativas, numero, similaridade, pistas_alvo)
+                == RESULTADO_ACEITO
+            ):
+                return draft, embedding
 
-        return None, None, None
+        return None, None
 
     async def _generate_channel_com_dedup(
         self,

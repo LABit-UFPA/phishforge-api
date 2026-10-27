@@ -33,6 +33,9 @@ async def test_generate_propaga_cues_ate_a_resposta(client, fakes):
             "evidencia": "empres4.net",
             "span_start": 10,
             "span_end": 21,
+            # Campo da pista (piloto 2): None quando o gerador nao
+            # informou -- aditivo, o Go ignora o campo se nao o usar.
+            "campo": None,
         }
     ]
 
