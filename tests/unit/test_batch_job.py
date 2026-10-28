@@ -258,3 +258,46 @@ async def test_sem_instituicao_no_payload_override_fica_none(client):
     )
 
     assert job["run_metadata"]["instituicao_override"] is None
+
+
+async def test_instituicao_override_real_da_422_sem_criar_job(client, fakes):
+    """Sem esta checagem, uma instituicao real passada por engano faria
+    o bloqueio pos-geracao disparar em TODO item do lote, e a falha so
+    apareceria disfarcada em `failures` depois do job rodar inteiro.
+    """
+    response = await client.post(
+        "/api/v1/generate/batch",
+        json={
+            "context": "cobranca de fatura",
+            "difficulties": ["facil"],
+            "total": 1,
+            "instituicao": {
+                "nome_base": "UFRJ",
+                "sigla": "UFRJ",
+                "dominio_oficial": "ufrj.br",
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert "ufrj" in response.json()["detail"].lower()
+    assert fakes["generation_job_repository"].storage == {}
+
+
+async def test_instituicao_override_caricata_da_422_sem_criar_job(client, fakes):
+    response = await client.post(
+        "/api/v1/generate/batch",
+        json={
+            "context": "cobranca de fatura",
+            "difficulties": ["facil"],
+            "total": 1,
+            "instituicao": {
+                "nome_base": "Universidade Fake",
+                "sigla": "UFK",
+                "dominio_oficial": "universidade-fake.com.br",
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert fakes["generation_job_repository"].storage == {}

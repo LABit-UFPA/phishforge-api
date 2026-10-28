@@ -1,10 +1,20 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class InstituicaoFicticia(BaseModel):
     """Identidade ficticia completa de uma organizacao (nome-base, sigla
     e dominio oficial), fornecida pelo CODIGO ao prompt de geracao
     (correcoes de qualidade do piloto 5, item 2.1).
+
+    `frozen=True`: alem de expressar que e um objeto de valor (nunca
+    mutado depois de criado -- so comparado ou trocado por outro), e o
+    que torna a instancia hashable no pydantic v2. Sem isso,
+    `BaseModel` define `__eq__` (comparacao por campo) sem definir
+    `__hash__`, e a regra do proprio Python desliga o hash por
+    omissao -- `set(INSTITUICOES)` ou `{ficha.instituicao for ...}`
+    levantam `TypeError: unhashable type`. O codigo de producao nunca
+    muta uma instancia (so compara com `==`/`!=` ou troca por outra),
+    entao isto nao muda comportamento nenhum alem de habilitar o hash.
 
     Antes desta mudanca, a regra de forma mandava o LLM "inventar um
     nome ficticio e plausivel" -- e repetia a palavra "ficticia/o" 3
@@ -28,6 +38,8 @@ class InstituicaoFicticia(BaseModel):
     Vallonta"); nome-base, sigla e dominio sao sempre usados juntos e
     exatamente como estao -- o LLM nunca inventa nenhum dos tres.
     """
+
+    model_config = ConfigDict(frozen=True)
 
     nome_base: str
     sigla: str

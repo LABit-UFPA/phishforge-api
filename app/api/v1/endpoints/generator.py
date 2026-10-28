@@ -1,4 +1,5 @@
 import random
+from typing import Optional
 from uuid import UUID
 
 import asyncpg
@@ -10,9 +11,15 @@ from app.core.config import settings
 from app.core.container import Container
 from app.core.security import limiter
 from app.domain.models.channel import GENERATION_SUPORTADOS, Channel
+from app.domain.models.instituicao_ficticia import InstituicaoFicticia
 from app.domain.models.phishing_email import PhishingEmail
 from app.domain.services.batch_generation_worker import BatchGenerationWorker
 from app.domain.services.generation_pipeline import GenerationPipeline
+from app.domain.services.item_validation import (
+    encontrar_dominios_caricatos,
+    encontrar_instituicoes_reais,
+    encontrar_marcadores,
+)
 from app.domain.services.phishing_service import PhishingEmailService
 from app.domain.services.response_generator import ResponseGenerator
 from app.domain.services.user_answer_evaluator import UserAnswerEvaluator
@@ -72,6 +79,34 @@ def _validar_canal_suportado(channel: Channel) -> None:
             detail=(
                 f"canal '{channel.value}' desabilitado na geracao. "
                 f"Canais disponiveis: {sorted(c.value for c in GENERATION_SUPORTADOS)}."
+            ),
+        )
+
+
+def _validar_instituicao_override(instituicao: Optional[InstituicaoFicticia]) -> None:
+    """Override de instituicao (piloto 5, item 2.1) e erro de quem pede
+    (422), antes de criar o job -- sem isso, uma instituicao real
+    passada por engano faria o bloqueio pos-geracao
+    (`ResponseGenerator._problema_estrutural`) disparar em TODO item do
+    lote, e a falha so apareceria disfarcada, item a item, na lista de
+    `failures` depois do job rodar inteiro.
+    """
+    if instituicao is None:
+        return
+    achados = (
+        encontrar_instituicoes_reais(
+            instituicao.nome_base, instituicao.sigla, instituicao.dominio_oficial
+        )
+        + encontrar_dominios_caricatos(instituicao.dominio_oficial)
+        + encontrar_marcadores(instituicao.nome_base, instituicao.dominio_oficial)
+    )
+    if achados:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"instituicao do override parece real, caricata ou um marcador de "
+                f"exemplo: {achados}. Use uma identidade fictícia (ex.: as da lista em "
+                "instituicoes_ficticias.py)."
             ),
         )
 
@@ -248,6 +283,7 @@ async def generate_batch(
     Item legitimo avulso segue disponivel no /generate (is_malicious=false).
     """
     _validar_canal_suportado(payload.channel)
+    _validar_instituicao_override(payload.instituicao)
     if payload.malicious_ratio != 1.0:
         raise HTTPException(
             status_code=422,

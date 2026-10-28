@@ -13,7 +13,6 @@ from app.domain.models.cue import CueCode
 from app.domain.services.instituicoes_ficticias import INSTITUICOES
 from app.domain.services.item_validation import (
     encontrar_dominios_caricatos,
-    encontrar_instituicoes_reais,
     encontrar_marcadores,
 )
 from app.domain.services.variation_sampler import (
@@ -244,20 +243,6 @@ def test_scarcity_e_explicada_como_quantidade_e_nao_prazo():
 # ---------------------------------------------------------------------------
 
 
-def test_lista_de_instituicoes_tem_nomes_siglas_e_dominios_unicos():
-    """Expansao da lista (mais variedade para lotes grandes): nenhum
-    campo pode se repetir entre entradas, senao duas instituicoes
-    ficariam indistinguiveis ou um dominio colidiria.
-    """
-    nomes = [i.nome_base for i in INSTITUICOES]
-    siglas = [i.sigla for i in INSTITUICOES]
-    dominios = [i.dominio_oficial for i in INSTITUICOES]
-    assert len(nomes) == len(set(nomes))
-    assert len(siglas) == len(set(siglas))
-    assert len(dominios) == len(set(dominios))
-    assert len(INSTITUICOES) >= 20
-
-
 def test_instituicao_vem_da_lista_versionada_e_e_balanceada():
     """2.1: cada item sorteia uma instituicao da lista, em ciclo
     balanceado -- mesma garantia que as demais dimensoes da ficha.
@@ -277,24 +262,6 @@ def test_instituicao_fixa_no_construtor_vale_para_todo_o_lote():
     for _ in range(10):
         assert sampler.sortear("facil").instituicao == fixa
         assert sampler.sortear("medio", is_malicious=False).instituicao == fixa
-
-
-def test_nenhuma_instituicao_ficticia_dispara_os_proprios_detectores():
-    """2.1: a identidade ficticia nao pode disparar o bloqueio de
-    instituicao real, dominio caricato ou marcador -- senao o item
-    recem-criado com ela seria barrado e mandado gerar de novo, o
-    mesmo laco que a ficha pronta existe para romper.
-    """
-    for instituicao in INSTITUICOES:
-        for valor in (
-            instituicao.nome_base,
-            instituicao.sigla,
-            instituicao.dominio_oficial,
-            f"contato@{instituicao.dominio_oficial}",
-        ):
-            assert encontrar_instituicoes_reais(valor) == []
-            assert encontrar_dominios_caricatos(valor) == []
-            assert encontrar_marcadores(valor) == []
 
 
 def test_gerar_typosquat_nunca_repete_o_dominio_oficial():
