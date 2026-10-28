@@ -57,16 +57,23 @@ def test_openai_nova_geracao_detecta_gpt5_gpt6_oseries():
     assert not exige("gpt-4o") and not exige("gpt-4")
 
 
-def test_openai_nova_geracao_nao_passa_max_tokens_nem_temperature():
-    """GPT-5+/o-series: a API rejeita `max_tokens` e `temperature != 1`.
-    build_chat_model entao nao os passa direto (vao via model_kwargs /
-    default do provider), diferente do caminho do gpt-4o-mini.
+def test_openai_nova_geracao_omite_temperature():
+    """GPT-5+/o-series: a API so aceita `temperature=1`, entao
+    build_chat_model NAO passa temperature (usa o default do provider);
+    gpt-4o-mini (producao) continua recebendo a temperature pedida e o
+    `max_tokens`.
+
+    O roteamento do limite de tokens (max_completion_tokens via
+    model_kwargs) e validado de verdade pelo --smoke contra a API; aqui
+    o foco e a temperature, cujo comportamento e estavel entre o
+    langchain real e o fake de teste (o langchain real move o
+    max_completion_tokens do model_kwargs para o proprio campo, entao o
+    valor de `.max_tokens` nao e um sinal estavel para asserir).
     """
     novo = build_chat_model(
         PROVIDER_OPENAI, "gpt-6-luna", openai_api_key="sk-x", temperature=0.7, max_tokens=2000
     )
-    assert novo.temperature is None  # nao passou temperature
-    assert novo.max_tokens is None  # foi para model_kwargs (max_completion_tokens)
+    assert novo.temperature is None
 
     legado = build_chat_model(
         PROVIDER_OPENAI, "gpt-4o-mini", openai_api_key="sk-x", temperature=0.7, max_tokens=2000
