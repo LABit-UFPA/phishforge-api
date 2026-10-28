@@ -1,16 +1,25 @@
 import logging
+from typing import Any, Optional
 
-from ragas.dataset_schema import SingleTurnSample
-from ragas.embeddings import BaseRagasEmbeddings
-from ragas.llms import BaseRagasLLM
-from ragas.metrics import (
+from ragas.metrics.collections import (
+    AnswerRelevancy,
     ContextRelevance,
     Faithfulness,
-    ResponseRelevancy,
 )
 
 logging.basicConfig(level=logging.INFO)
 evaluation_logger = logging.getLogger("ragas_evaluation")
+
+
+def _valor(resultado: Any) -> Optional[float]:
+    """Le a nota das metricas do RAGAS 0.4: `ascore` devolve um
+    MetricResult com `.value` (antes era um float direto). Tolera um
+    float cru por seguranca.
+    """
+    if resultado is None:
+        return None
+    valor = getattr(resultado, "value", resultado)
+    return float(valor) if valor is not None else None
 
 
 async def run_ragas_evaluation(
@@ -19,65 +28,73 @@ async def run_ragas_evaluation(
     expanded_answer: str,
     full_answer: str,
     contexts: list[str],
-    eval_llm: BaseRagasLLM,
-    eval_embeddings: BaseRagasEmbeddings,
+    eval_llm: Any,
+    eval_embeddings: Any,
 ) -> dict:
     """
     Executa avaliação RAGAS - TUDO EM INGLÊS.
     Usa apenas métricas reference-free (sem necessidade de ground truth).
 
+    API do RAGAS 0.4 (migracao da 0.3.5): metricas em
+    `ragas.metrics.collections`, chamadas por `ascore(**kwargs)` com
+    argumentos nomeados (nao mais um `SingleTurnSample`), e a nota lida
+    de `MetricResult.value`. `eval_llm` e o LLM moderno do
+    `ragas.llms.llm_factory` (as metricas chamam `.agenerate`);
+    `eval_embeddings`, o do `ragas.embeddings.embedding_factory`.
+
     Métricas:
-    - Context Relevance: Avalia se os contextos recuperados são relevantes para a pergunta
-    - Faithfulness: Avalia se a resposta é fiel/suportada pelos contextos
-    - Response Relevancy: Avalia se a resposta é relevante para a pergunta do usuário
-      (NÃO precisa de contexto, apenas user_input e response)
+    - Context Relevance: os contextos recuperados sao relevantes para a
+      consulta de busca. Precisa de contexto -> None se nao houver.
+    - Faithfulness: a resposta se sustenta nos contextos. Precisa de
+      contexto -> None se nao houver.
+    - Answer/Response Relevancy: a resposta responde ao cenario pedido.
+      Nao usa contexto (so user_input + response), mas usa embeddings.
     """
+    resultado = {
+        "context_relevance": None,
+        "faithfulness": None,
+        "response_relevancy": None,
+    }
     try:
-        # Sample para Context Relevance e Faithfulness (precisam de contexto)
-        context_sample = SingleTurnSample(
-            user_input=search_question,
-            retrieved_contexts=contexts,
-            response=full_answer,
-        )
+        tem_contexto = bool(contexts)
 
-        # Sample para Response Relevancy (NÃO precisa de contexto)
-        # Usa a query tratada do usuário e a resposta gerada
-        relevancy_sample = SingleTurnSample(
-            user_input=generation_question, response=expanded_answer
-        )
+        if tem_contexto:
+            context_scorer = ContextRelevance(llm=eval_llm)
+            faithfulness_scorer = Faithfulness(llm=eval_llm)
+            resultado["context_relevance"] = _valor(
+                await context_scorer.ascore(
+                    user_input=search_question, retrieved_contexts=contexts
+                )
+            )
+            resultado["faithfulness"] = _valor(
+                await faithfulness_scorer.ascore(
+                    user_input=search_question,
+                    response=full_answer,
+                    retrieved_contexts=contexts,
+                )
+            )
 
-        context_scorer = ContextRelevance(llm=eval_llm)
-        relevancy_scorer = ResponseRelevancy(llm=eval_llm, embeddings=eval_embeddings)
-        faithfulness_scorer = Faithfulness(llm=eval_llm)
-
-        context_score = await context_scorer.single_turn_ascore(context_sample)
-        faithfulness_score = await faithfulness_scorer.single_turn_ascore(
-            context_sample
+        relevancy_scorer = AnswerRelevancy(llm=eval_llm, embeddings=eval_embeddings)
+        resultado["response_relevancy"] = _valor(
+            await relevancy_scorer.ascore(
+                user_input=generation_question, response=expanded_answer
+            )
         )
-        relevancy_score = await relevancy_scorer.single_turn_ascore(relevancy_sample)
 
         evaluation_logger.info(f"\n{'=' * 60}")
-        evaluation_logger.info("RAGAS EVALUATION (ALL IN ENGLISH)")
+        evaluation_logger.info("RAGAS EVALUATION (0.4, ALL IN ENGLISH)")
         evaluation_logger.info(f"{'=' * 60}")
-        evaluation_logger.info(f"Context Relevance:    {context_score}")
-        evaluation_logger.info(f"Faithfulness:         {faithfulness_score}")
-        evaluation_logger.info(f"Response Relevancy:   {relevancy_score}")
+        evaluation_logger.info(f"Context Relevance:    {resultado['context_relevance']}")
+        evaluation_logger.info(f"Faithfulness:         {resultado['faithfulness']}")
+        evaluation_logger.info(f"Response Relevancy:   {resultado['response_relevancy']}")
         evaluation_logger.info(f"{'=' * 60}\n")
 
-        return {
-            "context_relevance": context_score,
-            "faithfulness": faithfulness_score,
-            "response_relevancy": relevancy_score,
-        }
+        return resultado
 
     except Exception as e:
         evaluation_logger.error(f"Erro RAGAS: {str(e)}", exc_info=True)
-        return {
-            "context_relevance": None,
-            "faithfulness": None,
-            "response_relevancy": None,
-            "error": str(e),
-        }
+        resultado["error"] = str(e)
+        return resultado
 
 
 async def run_and_log_ragas_evaluation(
@@ -86,8 +103,8 @@ async def run_and_log_ragas_evaluation(
     expanded_answer: str,
     full_answer: str,
     contexts: list[str],
-    eval_llm: BaseRagasLLM,
-    eval_embeddings: BaseRagasEmbeddings,
+    eval_llm: Any,
+    eval_embeddings: Any,
 ):
     """
     Wrapper que executa a avaliação RAGAS e exibe resultados formatados.
