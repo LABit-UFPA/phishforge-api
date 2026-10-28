@@ -244,6 +244,20 @@ def test_scarcity_e_explicada_como_quantidade_e_nao_prazo():
 # ---------------------------------------------------------------------------
 
 
+def test_lista_de_instituicoes_tem_nomes_siglas_e_dominios_unicos():
+    """Expansao da lista (mais variedade para lotes grandes): nenhum
+    campo pode se repetir entre entradas, senao duas instituicoes
+    ficariam indistinguiveis ou um dominio colidiria.
+    """
+    nomes = [i.nome_base for i in INSTITUICOES]
+    siglas = [i.sigla for i in INSTITUICOES]
+    dominios = [i.dominio_oficial for i in INSTITUICOES]
+    assert len(nomes) == len(set(nomes))
+    assert len(siglas) == len(set(siglas))
+    assert len(dominios) == len(set(dominios))
+    assert len(INSTITUICOES) >= 20
+
+
 def test_instituicao_vem_da_lista_versionada_e_e_balanceada():
     """2.1: cada item sorteia uma instituicao da lista, em ciclo
     balanceado -- mesma garantia que as demais dimensoes da ficha.
@@ -285,10 +299,14 @@ def test_nenhuma_instituicao_ficticia_dispara_os_proprios_detectores():
 
 def test_gerar_typosquat_nunca_repete_o_dominio_oficial():
     for instituicao in INSTITUICOES:
+        # So o primeiro rotulo muda (ver gerar_typosquat): o sufixo
+        # (".com.br", ".org.br", ".net.br", ".com" -- a lista tem os
+        # quatro) fica igual ao do dominio oficial.
+        _, _, sufixo_oficial = instituicao.dominio_oficial.partition(".")
         for seed in range(100):
             typo = gerar_typosquat(instituicao.dominio_oficial, random.Random(seed))
             assert typo != instituicao.dominio_oficial
-            assert typo.endswith(".com.br")
+            assert typo.endswith(f".{sufixo_oficial}")
             assert encontrar_dominios_caricatos(typo) == []
 
 

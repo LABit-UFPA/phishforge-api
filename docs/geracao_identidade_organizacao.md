@@ -39,8 +39,10 @@ ficha; o LLM só usa.**
 
 - `app/domain/models/instituicao_ficticia.py`: `InstituicaoFicticia` —
   `nome_base`, `sigla`, `dominio_oficial`.
-- `app/domain/services/instituicoes_ficticias.py`: lista versionada de 8
-  identidades (análoga a `instituicoes_reais.py`, mas na direção oposta).
+- `app/domain/services/instituicoes_ficticias.py`: lista versionada de 20
+  identidades (análoga a `instituicoes_reais.py`, mas na direção oposta) —
+  variedade suficiente para o ciclo balanceado não repetir a mesma
+  instituição cedo demais dentro de um lote grande do protocolo.
   Cada entrada é conferida (`tests/unit/test_variation_sampler.py::test_nenhuma_instituicao_ficticia_dispara_os_proprios_detectores`)
   contra os próprios detectores de instituição real, domínio caricato e
   marcador — senão a identidade recém-criada se bloquearia sozinha.

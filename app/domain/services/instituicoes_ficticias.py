@@ -24,10 +24,13 @@ from app.domain.models.instituicao_ficticia import InstituicaoFicticia
 
 # Nomes de marca neutros quanto ao setor (nenhum contem "banco",
 # "universidade" etc.) -- ver docstring de InstituicaoFicticia sobre o
-# porque disso ser proposital. Oito entradas bastam para um ciclo
-# balanceado (_Ciclo) sem repetir a mesma instituicao duas vezes antes
-# de esgotar a lista, no tamanho tipico de lote do protocolo (10-50
-# itens).
+# porque disso ser proposital. 20 entradas dao mais folego ao ciclo
+# balanceado (_Ciclo) em lotes grandes do protocolo (uma celula pode
+# ter 50-200 itens): com poucas entradas, a MESMA instituicao reaparece
+# cedo demais dentro do lote, mesmo balanceada. A maioria usa
+# ".com.br" (o padrao do cenario brasileiro mais comum), com algumas
+# variacoes de TLD (".org.br", ".net.br", ".com") para nao deixar o
+# sufixo do dominio sempre identico entre itens.
 INSTITUICOES: tuple[InstituicaoFicticia, ...] = (
     InstituicaoFicticia(nome_base="Vallonta", sigla="VAL", dominio_oficial="vallonta.com.br"),
     InstituicaoFicticia(nome_base="Nortega", sigla="NTG", dominio_oficial="nortega.com.br"),
@@ -43,4 +46,24 @@ INSTITUICOES: tuple[InstituicaoFicticia, ...] = (
     InstituicaoFicticia(
         nome_base="Prisma Nacional", sigla="PRN", dominio_oficial="prismanacional.com.br"
     ),
+    InstituicaoFicticia(nome_base="Trovoa Sul", sigla="TVS", dominio_oficial="trovoasul.com.br"),
+    InstituicaoFicticia(
+        nome_base="Cedros Brasil", sigla="CDS", dominio_oficial="cedrosbrasil.org.br"
+    ),
+    InstituicaoFicticia(
+        nome_base="Luminara Mais", sigla="LMM", dominio_oficial="luminaramais.com.br"
+    ),
+    InstituicaoFicticia(nome_base="Trilha Norte", sigla="TRN", dominio_oficial="trilhanorte.com.br"),
+    InstituicaoFicticia(
+        nome_base="Fortim Nacional", sigla="FTN", dominio_oficial="fortimnacional.com.br"
+    ),
+    InstituicaoFicticia(nome_base="Zelora Brasil", sigla="ZLB", dominio_oficial="zelorabrasil.com.br"),
+    InstituicaoFicticia(nome_base="Serra Azul", sigla="SAZ", dominio_oficial="serraazul.com.br"),
+    InstituicaoFicticia(nome_base="Âncora Rede", sigla="ANR", dominio_oficial="ancorarede.com.br"),
+    InstituicaoFicticia(nome_base="Vertin Norte", sigla="VTN", dominio_oficial="vertinnorte.net.br"),
+    InstituicaoFicticia(nome_base="Rumora Plus", sigla="RMP", dominio_oficial="rumoraplus.com.br"),
+    InstituicaoFicticia(
+        nome_base="Alvora Centro", sigla="ALC", dominio_oficial="alvoracentro.com.br"
+    ),
+    InstituicaoFicticia(nome_base="Coral Vale", sigla="CRV", dominio_oficial="coralvale.com"),
 )
