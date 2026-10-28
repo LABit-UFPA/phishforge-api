@@ -83,7 +83,12 @@ from app.core.config import settings
 from app.domain.models.difficulty import Difficulty
 from app.domain.services.evaluation import run_ragas_evaluation
 from app.domain.services.generation_pipeline import TOP_N_PARA_FUSAO, TOP_K_RETRIEVE
-from app.domain.services.llm_factory import PROVIDER_ANTHROPIC, PROVIDER_OPENAI
+from app.domain.services.llm_factory import (
+    PROVIDER_ANTHROPIC,
+    PROVIDER_OPENAI,
+    build_chat_model,
+    openai_exige_max_completion_tokens,
+)
 from app.domain.services.openai.embedding_client import OpenAIEmbeddingClient
 from app.domain.services.prompt_normalizer import PromptNormalizer
 from app.domain.services.reranker import ReRanker
@@ -274,6 +279,28 @@ class ResultadoItem:
     erro: Optional[str] = None
 
 
+def _build_juiz_ragas(client):
+    """Juiz RAGAS (llm_factory) com correcao do bug de deteccao da
+    ragas 0.4.3: para um modelo com minor version no nome (ex.:
+    `gpt-5.5`), o `is_reasoning_model` da ragas faz `int("5.5")` ->
+    ValueError e NAO mapeia `max_tokens` -> `max_completion_tokens`,
+    entao a API dos modelos GPT-5+ rejeita (400: "Unsupported parameter:
+    'max_tokens'"). Como `_map_openai_params` deixa os `model_args`
+    passarem inalterados para modelos nao-detectados, normalizamos na
+    mao: `max_completion_tokens` no lugar de `max_tokens`,
+    `temperature=1` (unico aceito) e sem `top_p`.
+    """
+    juiz = llm_factory(JUIZ_RAGAS_MODEL, client=client)
+    if openai_exige_max_completion_tokens(JUIZ_RAGAS_MODEL):
+        args = getattr(juiz, "model_args", None)
+        if isinstance(args, dict):
+            max_t = args.pop("max_tokens", 1024)
+            args.setdefault("max_completion_tokens", max_t)
+            args.pop("top_p", None)
+            args["temperature"] = 1.0
+    return juiz
+
+
 class Avaliador:
     def __init__(self):
         if not settings.OPENAI_API_KEY:
@@ -296,7 +323,7 @@ class Avaliador:
         # LLM do `llm_factory` e usam o embedding do `embedding_factory`
         # -- os wrappers Langchain da 0.3 nao servem para elas.
         judge_client = AsyncOpenAI(api_key=self.openai_key)
-        self.eval_llm = llm_factory(JUIZ_RAGAS_MODEL, client=judge_client)
+        self.eval_llm = _build_juiz_ragas(judge_client)
         self.eval_embeddings = embedding_factory(
             "openai", model=JUIZ_RAGAS_EMBEDDING, client=judge_client
         )
@@ -558,17 +585,26 @@ def _dry_run(contextos, repeticoes):
 
 
 async def _smoke():
-    """Uma chamada real das 3 metricas RAGAS em dados minimos (sem RAG,
-    sem gerador), so para validar o wiring do RAGAS 0.4 + juiz + chaves
-    antes de gastar na comparacao cheia. Custa ~3 chamadas ao juiz.
+    """Valida, com poucas chamadas reais e sem RAG, as duas pontas que
+    so a execucao real exercita:
+
+    1. Juiz RAGAS 0.4 (as 3 metricas em dados minimos) -- ~3 chamadas.
+    2. Gerador OpenAI de nova geracao (build_chat_model) -- 1 chamada
+       trivial por modelo OpenAI testado, para pegar o problema de
+       parametro (max_tokens vs max_completion_tokens / temperature)
+       antes da comparacao cheia.
+
+    Nao testa Qdrant, Anthropic nem o pipeline RAG completo.
     """
     _validar_sem_placeholder()
     if not settings.OPENAI_API_KEY:
         raise SystemExit("OPENAI_API_KEY nao configurada (.env).")
+
+    # 1. Juiz RAGAS
     client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-    eval_llm = llm_factory(JUIZ_RAGAS_MODEL, client=client)
+    eval_llm = _build_juiz_ragas(client)
     eval_embeddings = embedding_factory("openai", model=JUIZ_RAGAS_EMBEDDING, client=client)
-    print(f"Smoke test do RAGAS 0.4 com juiz={JUIZ_RAGAS_MODEL} ...")
+    print(f"[1/2] Smoke do juiz RAGAS 0.4 ({JUIZ_RAGAS_MODEL}) ...")
     scores = await run_ragas_evaluation(
         search_question="phishing email urgency social engineering tactics",
         generation_question="Write a phishing email about a pending enrollment issue.",
@@ -578,13 +614,31 @@ async def _smoke():
         eval_llm=eval_llm,
         eval_embeddings=eval_embeddings,
     )
-    print("Resultado:", scores)
+    print("    Resultado:", scores)
     if scores.get("error"):
-        raise SystemExit(f"Smoke test FALHOU: {scores['error']}")
+        raise SystemExit(f"Smoke do juiz FALHOU: {scores['error']}")
     faltando = [k for k in ("context_relevance", "faithfulness", "response_relevancy") if scores.get(k) is None]
     if faltando:
-        raise SystemExit(f"Smoke test incompleto -- metricas sem nota: {faltando}")
-    print("Smoke test OK: as 3 metricas retornaram nota. Pode rodar a comparacao cheia.")
+        raise SystemExit(f"Smoke do juiz incompleto -- metricas sem nota: {faltando}")
+
+    # 2. Geradores OpenAI (so os OpenAI; Anthropic e outra API/credencial)
+    print("[2/2] Smoke dos geradores OpenAI (1 chamada trivial cada) ...")
+    for spec in MODELOS_A_TESTAR:
+        if spec.provider != PROVIDER_OPENAI:
+            continue
+        temp = settings.LLM_TEMPERATURE if spec.supports_temperature else None
+        chat = build_chat_model(
+            spec.provider, spec.model, openai_api_key=settings.OPENAI_API_KEY,
+            temperature=temp, max_tokens=64,
+        )
+        try:
+            resp = await chat.ainvoke("Responda apenas: ok")
+        except Exception as e:
+            raise SystemExit(f"Smoke do gerador {spec.label} ({spec.model}) FALHOU: {e}")
+        texto = getattr(resp, "content", str(resp))
+        print(f"    {spec.label} ({spec.model}): OK -> {str(texto)[:40]!r}")
+
+    print("\nSmoke OK: juiz RAGAS 0.4 e geradores OpenAI respondem. Pode rodar a comparacao cheia.")
 
 
 async def _main():

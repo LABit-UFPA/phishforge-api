@@ -13,6 +13,7 @@ esta em uso. O EMBEDDING nao passa por aqui: continua OpenAI, porque
 trocar o espaco vetorial exigiria reindexar o Qdrant.
 """
 
+import re
 from typing import Optional
 
 from langchain_core.language_models import BaseChatModel
@@ -25,6 +26,21 @@ PROVIDERS_SUPORTADOS = (PROVIDER_OPENAI, PROVIDER_ANTHROPIC)
 # seguranca quando o chamador nao informa um -- o mesmo default de
 # geracao de ResponseGenerator.
 _MAX_TOKENS_ANTHROPIC_PADRAO = 2000
+
+# o-series (o1..o9) e GPT-5+ (gpt-5, gpt-5.5, gpt-6-luna, ...): a API da
+# OpenAI rejeita `max_tokens` (exige `max_completion_tokens`) e aceita so
+# `temperature=1`. gpt-4/gpt-4o/gpt-4o-mini (producao) seguem no caminho
+# antigo. Aceita minor version com ponto (gpt-5.5) -- o parse por `int`
+# da propria ragas 0.4.3 falha nesse caso.
+_OPENAI_NOVA_GERACAO = re.compile(r"^(o[1-9]|gpt-(?:[5-9]|1[0-9]))", re.IGNORECASE)
+
+
+def openai_exige_max_completion_tokens(model_name: str) -> bool:
+    """True para os modelos OpenAI que exigem `max_completion_tokens` no
+    lugar de `max_tokens` e so aceitam `temperature=1` (o-series e
+    GPT-5+). Usado aqui e espelhado no juiz RAGAS do script de avaliacao.
+    """
+    return bool(_OPENAI_NOVA_GERACAO.match(model_name.strip()))
 
 
 def build_chat_model(
@@ -52,10 +68,18 @@ def build_chat_model(
         from langchain_openai import ChatOpenAI
 
         kwargs = {"model": model_name, "api_key": openai_api_key}
-        if temperature is not None:
-            kwargs["temperature"] = temperature
-        if max_tokens is not None:
-            kwargs["max_tokens"] = max_tokens
+        if openai_exige_max_completion_tokens(model_name):
+            # GPT-5+/o-series: `max_completion_tokens` (via model_kwargs,
+            # cru para a API) no lugar de `max_tokens`, e temperature
+            # omitida (a API so aceita o default 1). Passar `max_tokens`
+            # ou `temperature != 1` aqui da 400.
+            if max_tokens is not None:
+                kwargs["model_kwargs"] = {"max_completion_tokens": max_tokens}
+        else:
+            if temperature is not None:
+                kwargs["temperature"] = temperature
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
         return ChatOpenAI(**kwargs)
 
     if provider == PROVIDER_ANTHROPIC:

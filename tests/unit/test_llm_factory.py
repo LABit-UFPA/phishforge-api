@@ -45,3 +45,30 @@ def test_temperature_none_e_omitida_no_openai():
 def test_provider_desconhecido_falha_alto():
     with pytest.raises(ValueError, match="provider de LLM desconhecido"):
         build_chat_model("gemini", "qualquer", openai_api_key="x")
+
+
+def test_openai_nova_geracao_detecta_gpt5_gpt6_oseries():
+    from app.domain.services.llm_factory import openai_exige_max_completion_tokens as exige
+
+    assert exige("gpt-5.5") and exige("gpt-6-luna") and exige("gpt-6-sol")
+    assert exige("gpt-5") and exige("o1") and exige("o3-mini")
+    # Modelos legados (producao) seguem no caminho antigo (max_tokens).
+    assert not exige("gpt-4o-mini") and not exige("gpt-4o-mini-2024-07-18")
+    assert not exige("gpt-4o") and not exige("gpt-4")
+
+
+def test_openai_nova_geracao_nao_passa_max_tokens_nem_temperature():
+    """GPT-5+/o-series: a API rejeita `max_tokens` e `temperature != 1`.
+    build_chat_model entao nao os passa direto (vao via model_kwargs /
+    default do provider), diferente do caminho do gpt-4o-mini.
+    """
+    novo = build_chat_model(
+        PROVIDER_OPENAI, "gpt-6-luna", openai_api_key="sk-x", temperature=0.7, max_tokens=2000
+    )
+    assert novo.temperature is None  # nao passou temperature
+    assert novo.max_tokens is None  # foi para model_kwargs (max_completion_tokens)
+
+    legado = build_chat_model(
+        PROVIDER_OPENAI, "gpt-4o-mini", openai_api_key="sk-x", temperature=0.7, max_tokens=2000
+    )
+    assert legado.temperature == 0.7 and legado.max_tokens == 2000
