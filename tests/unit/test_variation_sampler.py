@@ -91,17 +91,39 @@ def test_item_legitimo_nao_tem_pista_nem_acao_e_tem_nome():
 
 
 def test_pares_de_pistas_do_medio_cobrem_o_pool_de_forma_balanceada():
-    """21 pares possiveis no medio: em 42 itens, cada par sai exatamente
-    2 vezes -- e o que o sorteio por ciclo garante, e o que um sorteio
-    independente nao garantiria.
+    """20 pares possiveis no medio (21 combinacoes de POOL_MEDIO menos o
+    par redundante {typosquat, sender_domain_mismatch} -- ver
+    test_par_de_dominio_redundante_nunca_sai_junto): em 40 itens, cada
+    par sai exatamente 2 vezes -- e o que o sorteio por ciclo garante,
+    e o que um sorteio independente nao garantiria.
     """
     sampler = _sampler()
     pares = Counter(
-        frozenset(sampler.sortear("medio").pistas_alvo) for _ in range(42)
+        frozenset(sampler.sortear("medio").pistas_alvo) for _ in range(40)
     )
-    todos = {frozenset(par) for par in combinations(POOL_MEDIO, 2)}
+    todos = {
+        frozenset(par)
+        for par in combinations(POOL_MEDIO, 2)
+        if frozenset(par) != {CueCode.TYPOSQUAT, CueCode.SENDER_DOMAIN_MISMATCH}
+    }
+    assert len(todos) == 20
     assert set(pares) == todos
     assert set(pares.values()) == {2}
+
+
+def test_par_de_dominio_redundante_nunca_sai_junto():
+    """typosquat e sender_domain_mismatch sao as duas formas de 'o
+    dominio do remetente esta errado' -- so uma pode ser realizada no
+    endereco do remetente de um item (_endereco_e_dominio_da_pista
+    checa sender_domain_mismatch primeiro); a outra ficaria no alvo sem
+    nenhum artefato no e-mail. Facil e medio nunca devem sortear as
+    duas juntas.
+    """
+    sampler = _sampler()
+    redundante = {CueCode.TYPOSQUAT, CueCode.SENDER_DOMAIN_MISMATCH}
+    for nivel in ("facil", "medio"):
+        for _ in range(60):
+            assert not redundante <= set(sampler.sortear(nivel).pistas_alvo)
 
 
 def test_mesma_semente_reproduz_as_mesmas_fichas():

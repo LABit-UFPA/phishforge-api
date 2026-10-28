@@ -18,6 +18,7 @@ from app.domain.models.generated_item_draft import GeneratedItemDraft, Validated
 from app.domain.models.phish_scale import PhishScale, PremiseAlignment
 from app.domain.models.variation_spec import VariationSpec
 from app.domain.services.item_validation import (
+    PISTAS_DE_DOMINIO,
     PistaRemovida,
     RelatorioValidacao,
     calcular_spans,
@@ -1077,6 +1078,9 @@ class ResponseGenerator:
             ]
             premise_alignment = anotacao.premise_alignment
 
+        if is_malicious:
+            cues = self._completar_pistas_de_dominio_por_construcao(cues, ficha, draft, relatorio)
+
         draft.cues = self._validar_cues(
             draft.conteudo,
             cues,
@@ -1182,6 +1186,70 @@ class ResponseGenerator:
         except Exception as e:
             logging.error(f"Error annotating item: {e}")
             raise e
+
+    def _completar_pistas_de_dominio_por_construcao(
+        self,
+        cues: List[Cue],
+        ficha: Optional[VariationSpec],
+        draft: GeneratedItemDraft,
+        relatorio: RelatorioValidacao,
+    ) -> List[Cue]:
+        """Pistas de dominio (typosquat, sender_domain_mismatch) sao
+        DETERMINISTICAS por construcao: o codigo decide o dominio exato
+        e onde ele entra (`ficha.dominio_da_pista`/`dominio_da_pista_em`
+        -- ver VariationSampler._endereco_e_dominio_da_pista). O LLM
+        quase nunca as autoanota: a secao 3.5 do prompt (e o anotador as
+        cegas) pedem evidencia como trecho de remetente/assunto/
+        conteudo, mas o artefato dessas pistas fica no remetente ou num
+        link, raramente citado de volta no corpo -- no piloto 5, 0 de 8
+        typosquats-alvo e 0 de 6 sender_domain_mismatch-alvo no dificil
+        sairam anotados.
+
+        Como o artefato e conhecido, a pista entra aqui por construcao
+        quando falta -- evidencia e o proprio endereco/dominio ofensor,
+        nunca um trecho do corpo. So insere quando o dominio de fato
+        aparece no item gerado (remetente ou algum link): o LLM pode
+        ter ignorado a ficha, e nesse caso nao ha o que completar (a
+        pista realmente nao esta no e-mail).
+
+        Depende do sorteio nunca colocar as duas pistas de dominio
+        juntas no alvo de um item (ver VariationSampler
+        ._pares_sem_redundancia_de_dominio): so ha um
+        `dominio_da_pista` por ficha, entao no maximo uma pista falta.
+        A checagem abaixo torna essa dependencia explicita -- se um
+        pool voltar a permitir as duas juntas sem atualizar esta
+        funcao, falha alto em vez de atribuir o mesmo dominio as duas
+        pistas por engano.
+        """
+        if ficha is None or not ficha.dominio_da_pista:
+            return cues
+        ja_anotadas = {c.code for c in cues}
+        faltando = [
+            p for p in PISTAS_DE_DOMINIO if p in ficha.pistas_alvo and p not in ja_anotadas
+        ]
+        if not faltando:
+            return cues
+        if len(faltando) > 1:
+            raise ValueError(
+                f"mais de uma pista de dominio faltando ({[p.value for p in faltando]}) para "
+                "um unico dominio_da_pista -- ver VariationSampler"
+                "._pares_sem_redundancia_de_dominio"
+            )
+
+        dominio = ficha.dominio_da_pista
+        if dominio in (draft.remetente or ""):
+            campo = "remetente"
+        elif any(dominio in (link.href or "") for link in draft.links):
+            # href nao e um CampoDaPista valido (so remetente/assunto/
+            # conteudo) -- calcular_spans tenta localizar mesmo assim e
+            # mantem a pista sem span quando nao acha, o mesmo
+            # tratamento que ja existe para evidencia nao literal.
+            campo = None
+        else:
+            return cues
+
+        relatorio.cues_completadas_por_construcao = list(faltando)
+        return cues + [Cue(code=p, evidencia=dominio, campo=campo) for p in faltando]
 
     def _validar_cues(
         self,

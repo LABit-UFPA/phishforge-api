@@ -433,6 +433,91 @@ async def test_pista_de_dominio_sem_dominio_sai_do_item():
     assert resultado.validacao["pistas_removidas"][0]["motivo"] == "pista_de_dominio_sem_dominio"
 
 
+async def test_pista_de_dominio_sem_autoanotacao_e_completada_por_construcao():
+    """Piloto 5 (ajuste 1): o artefato da pista de dominio fica no
+    remetente ou num link, raramente citado de volta no corpo -- o
+    prompt pede evidencia como trecho do corpo, entao o LLM quase nunca
+    autoanota essas pistas (0 de 8 typosquats-alvo no piloto 5). Como o
+    dominio e deterministico (a ficha ja o define), a pista entra por
+    construcao quando falta.
+    """
+    dominio_typo = "vall0nta.com.br"
+    ficha = _ficha_medio(pistas=(CueCode.TYPOSQUAT,)).model_copy(
+        update={"dominio_da_pista": dominio_typo, "dominio_da_pista_em": "link"}
+    )
+    gerado = _draft("Texto.")
+    gerado.links = [LinkRef(text="Acessar conta", href=f"https://{dominio_typo}/login")]
+    # LLM nao autoanotou a pista -- gerado.cues continua [].
+
+    resultado = await _generator(_ChainSequencia(gerado)).generate_response(
+        difficulty="dificil", context="ctx", relevant_docs="docs", variacao=ficha
+    )
+
+    assert [c.code for c in resultado.cues] == [CueCode.TYPOSQUAT]
+    assert resultado.cues[0].evidencia == dominio_typo
+    assert resultado.validacao["cues_completadas_por_construcao"] == ["typosquat"]
+    assert resultado.validacao["pistas_alvo_ausentes"] == []
+    assert resultado.phish_scale.cue_count == 1
+
+
+async def test_pista_de_dominio_ja_autoanotada_nao_e_duplicada():
+    dominio_typo = "vall0nta.com.br"
+    ficha = _ficha_medio(pistas=(CueCode.TYPOSQUAT,)).model_copy(
+        update={"dominio_da_pista": dominio_typo, "dominio_da_pista_em": "link"}
+    )
+    gerado = _draft(
+        "Texto.",
+        cues=[Cue(code=CueCode.TYPOSQUAT, evidencia=dominio_typo, campo=None)],
+    )
+    gerado.links = [LinkRef(text="Acessar conta", href=f"https://{dominio_typo}/login")]
+
+    resultado = await _generator(_ChainSequencia(gerado)).generate_response(
+        difficulty="dificil", context="ctx", relevant_docs="docs", variacao=ficha
+    )
+
+    assert [c.code for c in resultado.cues] == [CueCode.TYPOSQUAT]
+    assert resultado.validacao["cues_completadas_por_construcao"] == []
+
+
+async def test_pista_de_dominio_ignorada_pelo_llm_nao_e_inventada():
+    """O LLM ignorou o dominio da ficha (remetente e links nao o
+    contem) -- a pista realmente nao esta no e-mail, entao nao deve ser
+    inserida.
+    """
+    ficha = _ficha_medio(pistas=(CueCode.TYPOSQUAT,)).model_copy(
+        update={"dominio_da_pista": "vall0nta.com.br", "dominio_da_pista_em": "link"}
+    )
+    gerado = _draft("Texto.")
+    gerado.links = [LinkRef(text="Acessar conta", href="https://outro-dominio.com.br/login")]
+
+    resultado = await _generator(_ChainSequencia(gerado)).generate_response(
+        difficulty="dificil", context="ctx", relevant_docs="docs", variacao=ficha
+    )
+
+    assert resultado.cues == []
+    assert resultado.validacao["cues_completadas_por_construcao"] == []
+
+
+async def test_duas_pistas_de_dominio_faltando_ao_mesmo_tempo_falha_alto():
+    """Defesa contra regressao: so ha um `dominio_da_pista` por ficha
+    (ver VariationSampler._pares_sem_redundancia_de_dominio). Se os
+    pools algum dia voltarem a permitir typosquat e
+    sender_domain_mismatch juntos no alvo sem atualizar esta funcao,
+    ela deve falhar alto -- nao atribuir o mesmo dominio as duas pistas
+    por engano.
+    """
+    ficha = _ficha_medio(
+        pistas=(CueCode.TYPOSQUAT, CueCode.SENDER_DOMAIN_MISMATCH)
+    ).model_copy(update={"dominio_da_pista": "vall0nta.com.br", "dominio_da_pista_em": "link"})
+    gerado = _draft("Texto.")
+    gerado.links = [LinkRef(text="Acessar conta", href="https://vall0nta.com.br/login")]
+
+    with pytest.raises(ValueError, match="mais de uma pista de dominio"):
+        await _generator(_ChainSequencia(gerado)).generate_response(
+            difficulty="dificil", context="ctx", relevant_docs="docs", variacao=ficha
+        )
+
+
 async def test_instituicao_real_no_remetente_faz_gerar_de_novo():
     """Teste da versao do piloto 3: dominios da UFRJ num cenario que so
     dizia 'universidade federal brasileira'.
