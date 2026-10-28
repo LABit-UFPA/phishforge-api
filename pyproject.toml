@@ -24,9 +24,17 @@ sentence-transformers = "^3.4.1"
 # `poetry install` local nesses sistemas. torchvision/torchaudio
 # sairam: nenhum modulo os importa e nenhum pacote do lock os exige
 # (so sentence-transformers precisa de torch).
+#
+# Versao FIXA em 2.6.0 (nao `^2.6.0`): o intuito e so trocar a wheel
+# CUDA pela CPU, sem subir a versao. Com `^2.6.0` o resolvedor pegava a
+# mais nova do indice CPU (2.14.1+cpu), que nao casa com a versao de
+# `transformers`/`torchvision` ja travada no projeto -- no CI isso
+# quebrava o import de sentence-transformers com "operator
+# torchvision::nms does not exist". Fixar em 2.6.0 mantem tudo na
+# mesma versao do main, so em build CPU.
 torch = [
-    {version = "^2.6.0", source = "pytorch-cpu", markers = "sys_platform == 'linux'"},
-    {version = "^2.6.0", source = "pypi", markers = "sys_platform != 'linux'"},
+    {version = "2.6.0", source = "pytorch-cpu", markers = "sys_platform == 'linux'"},
+    {version = "2.6.0", source = "pypi", markers = "sys_platform != 'linux'"},
 ]
 langchain-community = "^0.3.16"
 pypdf = "^5.2.0"
