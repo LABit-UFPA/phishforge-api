@@ -45,3 +45,37 @@ def test_temperature_none_e_omitida_no_openai():
 def test_provider_desconhecido_falha_alto():
     with pytest.raises(ValueError, match="provider de LLM desconhecido"):
         build_chat_model("gemini", "qualquer", openai_api_key="x")
+
+
+def test_openai_nova_geracao_detecta_gpt5_gpt6_oseries():
+    from app.domain.services.llm_factory import openai_exige_max_completion_tokens as exige
+
+    assert exige("gpt-5.5") and exige("gpt-6-luna") and exige("gpt-6-sol")
+    assert exige("gpt-5") and exige("o1") and exige("o3-mini")
+    # Modelos legados (producao) seguem no caminho antigo (max_tokens).
+    assert not exige("gpt-4o-mini") and not exige("gpt-4o-mini-2024-07-18")
+    assert not exige("gpt-4o") and not exige("gpt-4")
+
+
+def test_openai_nova_geracao_omite_temperature():
+    """GPT-5+/o-series: a API so aceita `temperature=1`, entao
+    build_chat_model NAO passa temperature (usa o default do provider);
+    gpt-4o-mini (producao) continua recebendo a temperature pedida e o
+    `max_tokens`.
+
+    O roteamento do limite de tokens (max_completion_tokens via
+    model_kwargs) e validado de verdade pelo --smoke contra a API; aqui
+    o foco e a temperature, cujo comportamento e estavel entre o
+    langchain real e o fake de teste (o langchain real move o
+    max_completion_tokens do model_kwargs para o proprio campo, entao o
+    valor de `.max_tokens` nao e um sinal estavel para asserir).
+    """
+    novo = build_chat_model(
+        PROVIDER_OPENAI, "gpt-6-luna", openai_api_key="sk-x", temperature=0.7, max_tokens=2000
+    )
+    assert novo.temperature is None
+
+    legado = build_chat_model(
+        PROVIDER_OPENAI, "gpt-4o-mini", openai_api_key="sk-x", temperature=0.7, max_tokens=2000
+    )
+    assert legado.temperature == 0.7 and legado.max_tokens == 2000
