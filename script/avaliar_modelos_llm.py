@@ -51,10 +51,10 @@ juiz via `llm_factory` e embeddings via `embedding_factory`). A versao do
 RAGAS e parte do instrumento de medicao -- registre-a no artigo junto do
 juiz e do embedding.
 
-ANTES de rodar, PREENCHA os ids de modelo OpenAI marcados com
-`<<PREENCHER-...>>` abaixo e o `JUIZ_RAGAS_MODEL` com os ids EXATOS da
-API (os nomes comerciais nao sao ids de API). O script recusa rodar
-enquanto houver placeholder (fail-fast, antes de gastar credito).
+Os ids dos modelos (MODELOS_A_TESTAR) e do juiz (JUIZ_RAGAS_MODEL) ja
+estao preenchidos no topo deste arquivo. Se precisar trocar, use o id
+EXATO da API (nome comercial nao e id de API); o script valida que o
+juiz nao coincide com nenhum modelo testado.
 """
 
 import argparse
@@ -113,21 +113,21 @@ class ModelSpec:
     supports_temperature: bool = True
 
 
-# Os ids da Anthropic sao os da API; os da OpenAI estao como placeholder
-# porque os nomes comerciais (GPT-6 Luna, GPT-5.5, ...) nao sao ids de
-# API -- troque pelos ids exatos antes de rodar.
+# Ids definidos pelo pesquisador (out/2026). Pares de tier entre OpenAI e
+# Anthropic: pequeno/barato e medio. Precos aproximados (entrada/saida por
+# 1M de tokens) sao so referencia de custo, nao entram na medicao.
 MODELOS_A_TESTAR: list[ModelSpec] = [
     # Tier pequeno/barato
-    ModelSpec("GPT pequeno", "pequeno", PROVIDER_OPENAI, "<<PREENCHER-OPENAI-PEQUENO>>"),
+    ModelSpec("GPT-6 Luna", "pequeno", PROVIDER_OPENAI, "gpt-6-luna"),        # ~$0.10/$0.50 por 1M
     ModelSpec("Claude Haiku 5.5", "pequeno", PROVIDER_ANTHROPIC, "claude-haiku-5-5"),
     # Tier medio
-    ModelSpec("GPT medio", "medio", PROVIDER_OPENAI, "<<PREENCHER-OPENAI-MEDIO>>"),
+    ModelSpec("GPT-6 Sol", "medio", PROVIDER_OPENAI, "gpt-6-sol"),           # ~$2/$10 por 1M
     ModelSpec("Claude Sonnet 5.5", "medio", PROVIDER_ANTHROPIC, "claude-sonnet-5-5"),
 ]
 
-# Juiz RAGAS: um GPT-5-class da OpenAI, FIXO, que NAO esta em
-# MODELOS_A_TESTAR. Troque pelo id exato da API.
-JUIZ_RAGAS_MODEL = "<<PREENCHER-OPENAI-JUIZ-GPT5>>"
+# Juiz RAGAS: FIXO e igual para todos, distinto dos dois tiers testados
+# (evita vies de auto-preferencia). ~$5/$30 por 1M.
+JUIZ_RAGAS_MODEL = "gpt-5.5"
 
 # Embedding do RAGAS (Response Relevancy), fixo e igual para todos.
 JUIZ_RAGAS_EMBEDDING = "text-embedding-3-large"
