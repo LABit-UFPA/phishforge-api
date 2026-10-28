@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from app.domain.models.channel import Channel
 from app.domain.models.difficulty import Difficulty
+from app.domain.models.instituicao_ficticia import InstituicaoFicticia
 
 
 class BatchGenerationRequest(BaseModel):
@@ -57,6 +58,20 @@ class BatchGenerationRequest(BaseModel):
         description=(
             "Semente do sorteio das fichas de variação. Omitida, o sistema sorteia uma e a "
             "registra em run_metadata, para o lote poder ser reproduzido."
+        ),
+    )
+    # Correcoes de qualidade do piloto 5, item 2.1: override da
+    # identidade ficticia da organizacao para o LOTE inteiro (nome-base,
+    # sigla, dominio oficial), para a planilha do protocolo fixar a
+    # instituicao por celula. Omitido, cada item sorteia uma instituicao
+    # da lista versionada (balanceado -- ver VariationSampler e
+    # instituicoes_ficticias.py).
+    instituicao: Optional[InstituicaoFicticia] = Field(
+        default=None,
+        description=(
+            "Override da identidade fictícia da organização (nome-base, sigla, domínio "
+            "oficial) para o lote inteiro. Omitido, cada item sorteia uma instituição "
+            "diferente da lista versionada."
         ),
     )
 

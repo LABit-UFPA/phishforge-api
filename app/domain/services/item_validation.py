@@ -49,6 +49,22 @@ Lote-piloto 3 (27/10/2026, 50 itens faceis, rodado antes dos itens 9-10):
     escrevia o e-mail em vez de extrair conhecimento, e o mesmo modelo ia
     para todos os itens do lote. Alem do prompt, as linhas com
     instituicao real e os marcadores sao tirados do contexto fundido.
+
+Correcoes de qualidade do piloto 5 (bloqueio de instituicao real so em
+personificacao; "123456" como marcador):
+
+15. O bloqueio de instituicao real disparava em qualquer MENCAO no
+    corpo do e-mail ("entregue pelos Correios" num cenario de
+    logistica), nao so em personificacao de fato (remetente, dominio,
+    links). `encontrar_instituicoes_reais` continua igual para quem nao
+    distingue campo (`limpar_contexto_fundido`); a checagem pos-geracao
+    em `ResponseGenerator._problema_estrutural` passa a usar
+    `encontrar_nomes_de_instituicoes_reais` (so remetente/destinatario/
+    links) e `encontrar_dominios_reais` (qualquer campo -- um dominio
+    real escrito em qualquer lugar e sempre personificacao).
+16. "123456" como marcador: "Protocolo #123456" ainda se repetia mesmo
+    depois do item 10 (proibir "Acao Necessaria"), porque o filtro de
+    marcador nao cobria sequencia numerica de exemplo.
 """
 
 import re
@@ -89,6 +105,14 @@ _ENDERECO_DE_EXEMPLO = re.compile(
 _DOMINIO_DE_EXEMPLO = re.compile(
     r"\b[\w-]*(?:exemplo|example|ficticio|ficticia)[\w-]*(?:\.[\w-]+)*\.[a-z]{2,6}\b", re.IGNORECASE
 )
+# Sequencia de digitos ascendentes classica de placeholder (piloto 5,
+# item 2.6): "Protocolo #123456" se repetiu mesmo depois do item 10
+# (proibir "Acao Necessaria"), porque aquela proibicao e so sobre o
+# assunto e so sobre a formula, nunca sobre o numero de exemplo em si.
+# Fronteira so por digito: "1234567" ou "0123456" nao contam (nao e o
+# literal exato), mas "ORD123456" conta -- a sequencia em si ja
+# denuncia que ninguem preencheu um numero de verdade.
+_NUMERO_MARCADOR = re.compile(r"(?<!\d)123456(?!\d)")
 
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 # Um dominio: rotulos separados por ponto, terminando num TLD de letras.
@@ -227,6 +251,7 @@ def encontrar_marcadores(
             achados.extend(m.group(0) for m in _NOME_GENERICO.finditer(texto))
             achados.extend(m.group(0) for m in _DOMINIO_DE_EXEMPLO.finditer(texto))
             achados.extend(m.group(0) for m in _ENDERECO_DE_EXEMPLO.finditer(texto))
+            achados.extend(m.group(0) for m in _NUMERO_MARCADOR.finditer(texto))
     return achados
 
 
@@ -245,20 +270,68 @@ def _sem_acento(texto: str) -> str:
     return "".join(c for c in decomposto if not unicodedata.combining(c))
 
 
-def encontrar_instituicoes_reais(*textos: Optional[str]) -> List[str]:
-    """Nomes, siglas e dominios de instituicoes reais em qualquer dos
-    textos ("UFRJ", "suporte@ufrj.edu.br", "Universidade Federal do
-    Para", "receita.gov.br"), sem repeticao. Lista vazia = nada a
-    corrigir. O criterio da lista esta em instituicoes_reais.py.
+def encontrar_nomes_de_instituicoes_reais(*textos: Optional[str]) -> List[str]:
+    """Nomes e siglas de instituicoes reais (sem dominio -- ver
+    `encontrar_dominios_reais`) em qualquer dos textos ("UFRJ",
+    "Universidade Federal do Para", "Banco do Brasil"). Lista vazia =
+    nada a corrigir.
+
+    Separada de `encontrar_dominios_reais` pelo refinamento do piloto 5
+    (item 15 do cabecalho deste arquivo): um NOME mencionado em texto
+    corrido ("entregue pelos Correios" num cenario de logistica) e
+    mencao legitima, nao personificacao -- so conta quando aparece onde
+    a identidade de quem envia/recebe/aponta e de fato reivindicada
+    (remetente, destinatario, links). Quem precisa do criterio antigo,
+    sem distinguir campo, usa `encontrar_instituicoes_reais`.
     """
     achados: List[str] = []
     for texto in textos:
         if not texto:
             continue
         normalizado = _normalizar(texto)
-        for padrao in (_INSTITUICAO_POR_TERMO, _INSTITUICAO_POR_ESTADO, _DOMINIO_REAL):
+        for padrao in (_INSTITUICAO_POR_TERMO, _INSTITUICAO_POR_ESTADO):
             achados.extend(m.group(0) for m in padrao.finditer(normalizado))
         achados.extend(m.group(0) for m in _SIGLA_MAIUSCULA.finditer(_sem_acento(texto)))
+    return list(dict.fromkeys(achados))
+
+
+def encontrar_dominios_reais(*textos: Optional[str]) -> List[str]:
+    """Dominios de instituicoes reais ("receita.gov.br", "bb.com.br")
+    em qualquer dos textos. Lista vazia = nada a corrigir.
+
+    Ao contrario do nome (ver `encontrar_nomes_de_instituicoes_reais`),
+    um dominio real escrito em QUALQUER campo -- inclusive o corpo -- e
+    sempre personificacao: nao ha "mencao inocente" de um dominio real,
+    porque, diferente de citar o nome de uma empresa em prosa, escrever
+    o dominio e a propria forma de apontar para o endereco dela.
+    """
+    achados: List[str] = []
+    for texto in textos:
+        if not texto:
+            continue
+        achados.extend(m.group(0) for m in _DOMINIO_REAL.finditer(_normalizar(texto)))
+    return list(dict.fromkeys(achados))
+
+
+def encontrar_instituicoes_reais(*textos: Optional[str]) -> List[str]:
+    """Nomes, siglas e dominios de instituicoes reais em qualquer dos
+    textos ("UFRJ", "suporte@ufrj.edu.br", "Universidade Federal do
+    Para", "receita.gov.br"), sem repeticao, sem distinguir campo --
+    usada por `limpar_contexto_fundido` (o contexto fundido do RAG nao
+    tem "campos": qualquer mencao a uma instituicao real ali e
+    descartada). Lista vazia = nada a corrigir. O criterio da lista
+    esta em instituicoes_reais.py.
+
+    Para a checagem pos-geracao do item POR CAMPO (personificacao no
+    remetente/dominio/links versus mencao no corpo/assunto -- piloto 5,
+    ver cabecalho deste arquivo), use
+    `encontrar_nomes_de_instituicoes_reais` e `encontrar_dominios_reais`
+    separadamente.
+    """
+    achados: List[str] = []
+    for texto in textos:
+        achados.extend(encontrar_nomes_de_instituicoes_reais(texto))
+        achados.extend(encontrar_dominios_reais(texto))
     return list(dict.fromkeys(achados))
 
 

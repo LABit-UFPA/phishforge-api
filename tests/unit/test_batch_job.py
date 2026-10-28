@@ -191,3 +191,113 @@ async def test_lote_anterior_existente_entra_na_dedup(client):
 
     assert segundo["run_metadata"]["dedup_job_ids"] == [primeiro["job_id"]]
     assert segundo["run_metadata"]["itens_de_lotes_anteriores"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Lote-piloto 5 (correcoes de qualidade, itens 2.1 e 2.4)
+# ---------------------------------------------------------------------------
+
+
+async def test_taxa_de_aproveitamento_e_regeneracoes_sem_nenhuma_regeneracao(client):
+    """Com o gerador fake (nunca regenera), o aproveitamento e 100% e
+    nenhum motivo de regeneracao soma mais que zero.
+    """
+    job = await post_batch_and_get_job(
+        client, {"context": "cobranca de fatura", "difficulties": ["facil"], "total": 2}
+    )
+
+    assert job["taxa_aproveitamento"] == 1.0
+    assert set(job["regeneracoes_por_motivo"]) == {
+        "regeneracoes_por_marcador",
+        "regeneracoes_por_remetente",
+        "regeneracoes_por_destinatario",
+        "regeneracoes_por_instituicao_real",
+        "regeneracoes_por_dominio_caricato",
+        "regeneracoes_por_assunto",
+    }
+    assert all(v == 0 for v in job["regeneracoes_por_motivo"].values())
+
+
+async def test_taxa_de_aproveitamento_reflete_itens_descartados(app_and_fakes):
+    """Mesmo cenario de test_dedup_descarta_item_quase_identico_sem_contar_como_falha:
+    1 de 2 pedidos aceito -- taxa de aproveitamento 0.5, nao 1.0.
+    """
+    client, _fakes = await _client_com_override(
+        app_and_fakes, "response_generator", _ConteudoFixoResponseGenerator()
+    )
+    async with client:
+        job = await post_batch_and_get_job(
+            client, {"context": "cobranca de fatura", "difficulties": ["facil"], "total": 2}
+        )
+
+    assert job["total_generated"] == 1
+    assert job["taxa_aproveitamento"] == 0.5
+
+
+async def test_instituicao_no_payload_fixa_a_organizacao_de_todo_o_lote(client):
+    instituicao = {"nome_base": "Vallonta", "sigla": "VAL", "dominio_oficial": "vallonta.com.br"}
+
+    job = await post_batch_and_get_job(
+        client,
+        {
+            "context": "cobranca de fatura",
+            "difficulties": ["facil", "medio"],
+            "total": 4,
+            "instituicao": instituicao,
+        },
+    )
+
+    assert job["run_metadata"]["instituicao_override"] == instituicao
+    for exemplo in job["examples"]:
+        assert exemplo["variation_spec"]["instituicao"] == instituicao
+
+
+async def test_sem_instituicao_no_payload_override_fica_none(client):
+    job = await post_batch_and_get_job(
+        client, {"context": "cobranca de fatura", "difficulties": ["facil"], "total": 1}
+    )
+
+    assert job["run_metadata"]["instituicao_override"] is None
+
+
+async def test_instituicao_override_real_da_422_sem_criar_job(client, fakes):
+    """Sem esta checagem, uma instituicao real passada por engano faria
+    o bloqueio pos-geracao disparar em TODO item do lote, e a falha so
+    apareceria disfarcada em `failures` depois do job rodar inteiro.
+    """
+    response = await client.post(
+        "/api/v1/generate/batch",
+        json={
+            "context": "cobranca de fatura",
+            "difficulties": ["facil"],
+            "total": 1,
+            "instituicao": {
+                "nome_base": "UFRJ",
+                "sigla": "UFRJ",
+                "dominio_oficial": "ufrj.br",
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert "ufrj" in response.json()["detail"].lower()
+    assert fakes["generation_job_repository"].storage == {}
+
+
+async def test_instituicao_override_caricata_da_422_sem_criar_job(client, fakes):
+    response = await client.post(
+        "/api/v1/generate/batch",
+        json={
+            "context": "cobranca de fatura",
+            "difficulties": ["facil"],
+            "total": 1,
+            "instituicao": {
+                "nome_base": "Universidade Fake",
+                "sigla": "UFK",
+                "dominio_oficial": "universidade-fake.com.br",
+            },
+        },
+    )
+
+    assert response.status_code == 422
+    assert fakes["generation_job_repository"].storage == {}

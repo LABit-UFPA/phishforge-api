@@ -14,11 +14,14 @@ fixam DETALHES dentro do cenario pedido, nunca o trocam.
 """
 
 import random
+import unicodedata
 from itertools import combinations
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from app.domain.models.cue import CueCode
+from app.domain.models.instituicao_ficticia import InstituicaoFicticia
 from app.domain.models.variation_spec import VariationSpec
+from app.domain.services.instituicoes_ficticias import INSTITUICOES
 
 # Nomes brasileiros variados. "Joao", "Maria" e "Silva" ficam de fora de
 # proposito: eram os valores-padrao do modelo no piloto ("Joao Silva",
@@ -99,17 +102,6 @@ COMO_REALIZAR: Dict[CueCode, str] = {
     CueCode.HOMOGLYPH: "um caractere visualmente parecido trocado num domínio ou nome",
 }
 
-ENDERECO_TYPOSQUAT = (
-    "use um domínio que imita o da organização com um caractere trocado, a mais ou a menos"
-)
-ENDERECO_DOMINIO_ERRADO = (
-    "o nome exibido finge ser a organização, mas o endereço usa um domínio de e-mail "
-    "gratuito ou de outra entidade"
-)
-ENDERECO_PLAUSIVEL = (
-    "use um domínio plausível da própria organização, sem erro de digitação: as pistas-alvo "
-    "não incluem pista de domínio"
-)
 # Facil sem pista de dominio no alvo (piloto 3): "livre" puxava dominios
 # caricatos ("universidade123", "donotclickhere"), ecoando o exemplo do
 # prompt. O nivel pede remetente fora da organizacao, mas realista.
@@ -118,6 +110,165 @@ ENDERECO_LIVRE = (
     "outlook, hotmail) com nome de setor, ou o domínio de uma empresa sem relação com o "
     "cenário"
 )
+
+# Webmail gratuito usado tanto no endereco do destinatario quanto no
+# sender_domain_mismatch de facil/medio (piloto 5, itens 2.2 e 2.3):
+# mesma lista que ENDERECO_LIVRE ja cita em prosa.
+WEBMAILS: Tuple[str, ...] = ("gmail.com", "outlook.com", "hotmail.com")
+
+# Dominio do destinatario (piloto 5, item 2.3): "institucional" usa o
+# dominio oficial da propria organizacao do item (ex.: aluno com e-mail
+# da universidade); "pessoal" usa um webmail. Nenhum dos dois pedia
+# antes ao LLM, e o resultado era o LLM completar com a palavra
+# "ficticia" (ex.: aluno@universidadeficticia.com, 17 dos 27 e-mails
+# faceis salvos do piloto 4).
+TIPOS_DESTINATARIO: Tuple[str, ...] = ("institucional", "pessoal")
+
+# Vizinhos visuais usados por `gerar_typosquat` na estrategia "trocar":
+# substituicoes classicas de 1 caractere por outro visualmente parecido
+# (letra->numero e vice-versa, ou letra->letra parecida), coerente com
+# a definicao operacional de `typosquat` em COMO_REALIZAR/cue.py.
+_VIZINHO_VISUAL: Dict[str, str] = {
+    "o": "0", "0": "o", "l": "1", "1": "l", "i": "1", "e": "3",
+    "a": "4", "s": "5", "b": "6", "g": "9", "t": "7", "u": "v",
+    "v": "u", "n": "m", "m": "n",
+}
+_ALFABETO = "abcdefghijklmnopqrstuvwxyz"
+
+
+def gerar_typosquat(dominio_oficial: str, rng: random.Random) -> str:
+    """Dominio que imita `dominio_oficial` com um caractere trocado, a
+    mais ou a menos -- distancia de edicao 1, a mesma definicao
+    operacional que COMO_REALIZAR[TYPOSQUAT] descreve ao LLM e que o
+    manual de anotacao usa (piloto 5, item 2.2). Antes, essa pista
+    ficava so como instrucao em prosa (ENDERECO_TYPOSQUAT) e o lote de
+    10 mostrou o resultado inconsistente: typosquat saiu em so 1 de 4
+    itens que o pediram, e "univesidade.com" ora passava como
+    typosquat, ora era barrado como dominio caricato. Com o dominio
+    exato calculado aqui e colocado na ficha, o LLM so copia.
+
+    So mexe no primeiro rotulo do dominio (antes do primeiro ponto):
+    trocar letra do TLD ("com.br" -> "con.br") nao imita a organizacao,
+    so o sufixo generico que qualquer dominio brasileiro tem.
+    """
+    rotulo, ponto, resto = dominio_oficial.partition(".")
+    estrategia = rng.choice(("trocar", "duplicar", "remover", "inserir"))
+    if estrategia == "remover" and len(rotulo) <= 3:
+        # Rotulo curto demais para perder uma letra sem virar outra
+        # coisa irreconhecivel -- cai para a troca de caractere.
+        estrategia = "trocar"
+    posicao = rng.randrange(len(rotulo))
+    if estrategia == "trocar":
+        original = rotulo[posicao]
+        substituto = _VIZINHO_VISUAL.get(original) or rng.choice(
+            [c for c in _ALFABETO if c != original]
+        )
+        novo_rotulo = rotulo[:posicao] + substituto + rotulo[posicao + 1 :]
+    elif estrategia == "duplicar":
+        novo_rotulo = rotulo[:posicao] + rotulo[posicao] + rotulo[posicao:]
+    elif estrategia == "remover":
+        novo_rotulo = rotulo[:posicao] + rotulo[posicao + 1 :]
+    else:
+        novo_rotulo = rotulo[:posicao] + rng.choice(_ALFABETO) + rotulo[posicao:]
+    return f"{novo_rotulo}{ponto}{resto}"
+
+
+def _dominio_mismatch(
+    difficulty: str, instituicao: InstituicaoFicticia, rng: random.Random
+) -> str:
+    """Dominio para a pista `sender_domain_mismatch` (piloto 5, item
+    2.2): webmail gratuito em facil/medio (o nivel ja descreve esse
+    padrao em prosa); em dificil, o dominio de outra instituicao
+    ficticia da lista -- plausivel, de terceiros, mas sem o erro de
+    digitacao que caracterizaria `typosquat` (as duas pistas precisam
+    continuar distinguiveis, inclusive no dificil).
+    """
+    if difficulty == "dificil":
+        outras = [i.dominio_oficial for i in INSTITUICOES if i != instituicao]
+        return rng.choice(outras)
+    return rng.choice(WEBMAILS)
+
+
+def _slug(nome: str) -> str:
+    """'Larissa Monteiro' -> 'larissa.monteiro', para a parte local de
+    um endereco de e-mail sintetizado (piloto 5, item 2.3).
+    """
+    sem_acento = unicodedata.normalize("NFKD", nome)
+    sem_acento = "".join(c for c in sem_acento if not unicodedata.combining(c))
+    return ".".join(sem_acento.lower().split())
+
+
+def _endereco_destinatario(
+    nome: Optional[str], instituicao: InstituicaoFicticia, tipo: str, rng: random.Random
+) -> str:
+    """Endereco de e-mail LITERAL do destinatario (piloto 5, item 2.3):
+    sem nome (facil, saudacao generica), a parte local e generica mas
+    com um sufixo numerico -- nunca um placeholder como "aluno" sozinho
+    virando "aluno@universidadeficticia.com", o padrao que se repetiu
+    em 17 dos 27 e-mails faceis salvos do piloto 4.
+    """
+    parte_local = _slug(nome) if nome else f"contato{rng.randrange(100, 999)}"
+    dominio = instituicao.dominio_oficial if tipo == "institucional" else rng.choice(WEBMAILS)
+    return f"{parte_local}@{dominio}"
+
+
+def _endereco_e_dominio_da_pista(
+    difficulty: str,
+    pistas: Sequence[CueCode],
+    instituicao: InstituicaoFicticia,
+    rng: random.Random,
+) -> Tuple[str, Optional[str], Optional[str]]:
+    """(instrucao do endereco do remetente, dominio literal da pista de
+    dominio quando houver, onde esse dominio deve aparecer). O dominio
+    e SEMPRE calculado pelo codigo a partir do dominio oficial da ficha
+    (piloto 5, item 2.2: `gerar_typosquat`/`_dominio_mismatch`) -- nunca
+    uma instrucao solta para o LLM inventar, como ENDERECO_TYPOSQUAT e
+    ENDERECO_DOMINIO_ERRADO eram antes desta mudanca.
+    """
+    if CueCode.SENDER_DOMAIN_MISMATCH in pistas:
+        dominio = _dominio_mismatch(difficulty, instituicao, rng)
+        instrucao = (
+            f"o nome exibido finge ser {instituicao.nome_base}, mas o endereço usa o "
+            f"domínio de terceiros {dominio} -- use exatamente este domínio"
+        )
+        if difficulty == "dificil":
+            # O link obrigatorio do dificil aponta para o MESMO dominio
+            # do remetente, sem imitar o oficial com erro de digitacao
+            # -- senao criaria uma 2a pista, alem do orcamento de 1.
+            return (
+                instrucao + "; o link obrigatório aponta para esse mesmo domínio, sem "
+                "imitar o oficial com erro de digitação",
+                dominio,
+                "remetente_e_link",
+            )
+        return instrucao, dominio, "remetente"
+
+    if CueCode.TYPOSQUAT in pistas:
+        dominio = gerar_typosquat(instituicao.dominio_oficial, rng)
+        if difficulty == "dificil":
+            # O typosquat vai no link obrigatorio (ver ficha); o
+            # remetente fica plausivel, dentro do orcamento de 1 pista.
+            return (
+                f"use um endereço no domínio oficial, {instituicao.dominio_oficial}, sem "
+                "erro de digitação -- o link obrigatório é que carrega a pista",
+                dominio,
+                "link",
+            )
+        return (
+            f"use exatamente o domínio {dominio}, que imita {instituicao.dominio_oficial} "
+            "com um caractere trocado, a mais ou a menos",
+            dominio,
+            "remetente",
+        )
+
+    if difficulty == "facil":
+        return ENDERECO_LIVRE, None, None
+    return (
+        f"use um endereço no domínio oficial da organização, {instituicao.dominio_oficial}, "
+        "sem erro de digitação -- as pistas-alvo não incluem pista de domínio",
+        None,
+        None,
+    )
 
 ANGULOS_DE_PRETEXTO: Tuple[str, ...] = (
     "um documento ou comprovante que estaria faltando ou vencido",
@@ -234,14 +385,28 @@ class VariationSampler:
     mesma `rng` semeada, a sequencia de fichas e reproduzivel.
     """
 
-    def __init__(self, rng: Optional[random.Random] = None):
+    def __init__(
+        self,
+        rng: Optional[random.Random] = None,
+        instituicao: Optional[InstituicaoFicticia] = None,
+    ):
         self._rng = rng or random.Random()
         self._ciclos: Dict[str, _Ciclo] = {}
+        # Override do LOTE inteiro (piloto 5, item 2.1): quando dado,
+        # todo item deste sampler usa esta instituicao em vez de
+        # sortear da lista -- e o que permite a planilha do protocolo
+        # fixar a organizacao por celula (BatchGenerationRequest
+        # .instituicao). None sorteia por item, balanceado como as
+        # demais dimensoes da ficha.
+        self._instituicao_fixa = instituicao
 
     def _proximo(self, chave: str, valores: Sequence):
         if chave not in self._ciclos:
             self._ciclos[chave] = _Ciclo(valores, self._rng)
         return self._ciclos[chave].proximo()
+
+    def _instituicao(self) -> InstituicaoFicticia:
+        return self._instituicao_fixa or self._proximo("instituicao", INSTITUICOES)
 
     def _nome(self) -> str:
         return f"{self._proximo('nome', PRIMEIROS_NOMES)} {self._proximo('sobrenome', SOBRENOMES)}"
@@ -265,7 +430,10 @@ class VariationSampler:
 
         estruturas = ESTRUTURAS_FACIL if difficulty == "facil" else ESTRUTURAS_COMPLETAS
         assinatura = self._proximo("assinatura", ASSINATURAS)
+        instituicao = self._instituicao()
+        tipo_destinatario = self._proximo("destinatario_dominio_tipo", TIPOS_DESTINATARIO)
         comum = dict(
+            instituicao=instituicao,
             assinatura=assinatura,
             nome_remetente=self._nome() if assinatura == ASSINATURA_PESSOA else None,
             estilo_assunto=self._proximo("estilo_assunto", ESTILOS_DE_ASSUNTO),
@@ -279,9 +447,16 @@ class VariationSampler:
             # Item legitimo: sempre personalizado (sinal de confianca do
             # prompt legitimo), sem acao sorteada e sem pista; o
             # remetente e sempre da propria organizacao.
+            nome_destinatario = self._nome()
             return VariationSpec(
-                nome_destinatario=self._nome(),
-                endereco_remetente="use o domínio oficial da própria organização",
+                nome_destinatario=nome_destinatario,
+                endereco_destinatario=_endereco_destinatario(
+                    nome_destinatario, instituicao, tipo_destinatario, self._rng
+                ),
+                endereco_remetente=(
+                    f"use um endereço no domínio oficial da organização, "
+                    f"{instituicao.dominio_oficial}"
+                ),
                 **comum,
             )
 
@@ -296,35 +471,21 @@ class VariationSampler:
             acao = self._proximo("acao_com_link", ACOES_COM_LINK)
 
         nome = None if PISTA_FIXA_FACIL in pistas else self._nome()
+        instrucao_endereco, dominio_pista, dominio_pista_em = _endereco_e_dominio_da_pista(
+            difficulty, pistas, instituicao, self._rng
+        )
         return VariationSpec(
             nome_destinatario=nome,
-            endereco_remetente=_instrucao_de_endereco(difficulty, pistas),
+            endereco_destinatario=_endereco_destinatario(
+                nome, instituicao, tipo_destinatario, self._rng
+            ),
+            endereco_remetente=instrucao_endereco,
+            dominio_da_pista=dominio_pista,
+            dominio_da_pista_em=dominio_pista_em,
             acao=acao,
             pistas_alvo=pistas,
             **comum,
         )
-
-
-def _instrucao_de_endereco(difficulty: str, pistas: Sequence[CueCode]) -> str:
-    """Dominio do remetente coerente com as pistas-alvo. No dificil, o
-    typosquat vai no link obrigatorio, entao o remetente fica plausivel.
-    No facil, sem pista de dominio no alvo, o nivel ja pede remetente
-    fora da organizacao -- realista, nunca caricato (ENDERECO_LIVRE).
-    """
-    if CueCode.SENDER_DOMAIN_MISMATCH in pistas:
-        if difficulty == "dificil":
-            # O link obrigatorio do dificil iria para um typosquat por
-            # padrao, criando uma 2a pista alem do orcamento de 1.
-            return (
-                ENDERECO_DOMINIO_ERRADO + "; o link obrigatório aponta para esse mesmo domínio, "
-                "sem imitar o oficial com erro de digitação"
-            )
-        return ENDERECO_DOMINIO_ERRADO
-    if CueCode.TYPOSQUAT in pistas and difficulty != "dificil":
-        return ENDERECO_TYPOSQUAT
-    if difficulty == "facil":
-        return ENDERECO_LIVRE
-    return ENDERECO_PLAUSIVEL
 
 
 def renderizar_ficha(ficha: Optional[VariationSpec]) -> str:
@@ -338,21 +499,35 @@ def renderizar_ficha(ficha: Optional[VariationSpec]) -> str:
 
     if ficha.nome_destinatario:
         destinatario = (
-            f"{ficha.nome_destinatario} -- use este nome na saudação e em `receptor`"
+            f"{ficha.nome_destinatario} <{ficha.endereco_destinatario}> -- use este nome na "
+            "saudação, e use exatamente este endereço em `receptor`"
         )
     else:
         destinatario = (
-            "sem nome -- a saudação deve ser genérica e adequada ao cenário "
-            "(ex.: 'Prezado(a) cliente'), sem nenhum nome de pessoa"
+            f"sem nome -- a saudação deve ser genérica e adequada ao cenário "
+            "(ex.: 'Prezado(a) cliente'), sem nenhum nome de pessoa; `receptor` é exatamente "
+            f"`{ficha.endereco_destinatario}`"
         )
 
     quem_assina = ficha.assinatura
     if ficha.nome_remetente:
         quem_assina += f" -- o nome de quem assina é {ficha.nome_remetente}"
     linhas = [
+        f"- Organização (identidade fictícia fixa -- nunca invente outra): nome-base "
+        f"'{ficha.instituicao.nome_base}', sigla '{ficha.instituicao.sigla}', domínio oficial "
+        f"'{ficha.instituicao.dominio_oficial}'",
         f"- Destinatário: {destinatario}",
         f"- Quem assina (na assinatura, no fim do corpo): {quem_assina}",
         f"- Endereço do remetente (`remetente`, sempre um e-mail): {ficha.endereco_remetente}",
+    ]
+    if ficha.dominio_da_pista:
+        destino = {
+            "remetente": "no endereço do remetente",
+            "link": "no destino (href) do link obrigatório",
+            "remetente_e_link": "no endereço do remetente E no destino (href) do link obrigatório",
+        }[ficha.dominio_da_pista_em]
+        linhas.append(f"- Domínio da pista de domínio: use exatamente `{ficha.dominio_da_pista}` {destino}")
+    linhas += [
         f"- Estilo do assunto: {ficha.estilo_assunto}",
         f"- Detalhe concreto do pretexto (dentro do cenário pedido, sem trocá-lo): "
         f"{ficha.angulo_pretexto}",

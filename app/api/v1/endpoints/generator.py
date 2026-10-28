@@ -1,4 +1,5 @@
 import random
+from typing import Optional
 from uuid import UUID
 
 import asyncpg
@@ -10,9 +11,15 @@ from app.core.config import settings
 from app.core.container import Container
 from app.core.security import limiter
 from app.domain.models.channel import GENERATION_SUPORTADOS, Channel
+from app.domain.models.instituicao_ficticia import InstituicaoFicticia
 from app.domain.models.phishing_email import PhishingEmail
 from app.domain.services.batch_generation_worker import BatchGenerationWorker
 from app.domain.services.generation_pipeline import GenerationPipeline
+from app.domain.services.item_validation import (
+    encontrar_dominios_caricatos,
+    encontrar_instituicoes_reais,
+    encontrar_marcadores,
+)
 from app.domain.services.phishing_service import PhishingEmailService
 from app.domain.services.response_generator import ResponseGenerator
 from app.domain.services.user_answer_evaluator import UserAnswerEvaluator
@@ -30,6 +37,35 @@ from app.infra.database.repositories.generation_job_repository import Generation
 
 app = APIRouter()
 
+# Motivos de regeneracao registrados por item em `validacao` (ver
+# RelatorioValidacao, item_validation.py) -- agregados por lote no GET
+# do job (piloto 5, item 2.4: "registrar a taxa de aproveitamento" e a
+# taxa de bloqueio de instituicao real).
+_MOTIVOS_DE_REGENERACAO = (
+    "regeneracoes_por_marcador",
+    "regeneracoes_por_remetente",
+    "regeneracoes_por_destinatario",
+    "regeneracoes_por_instituicao_real",
+    "regeneracoes_por_dominio_caricato",
+    "regeneracoes_por_assunto",
+)
+
+
+def _agregar_regeneracoes_por_motivo(emails) -> dict:
+    """Soma, por motivo, quantas vezes os itens ACEITOS deste lote
+    precisaram ser gerados de novo (ver `ResponseGenerator
+    ._problema_estrutural`). Nao conta os itens descartados por
+    duplicidade nem os que falharam de vez (esses nao tem `validacao`
+    persistida) -- e o preco do filtro de qualidade sobre o que de fato
+    entrou no corpus, nao uma medida completa de toda tentativa do LLM.
+    """
+    totais = {motivo: 0 for motivo in _MOTIVOS_DE_REGENERACAO}
+    for email in emails:
+        validacao = email.validacao or {}
+        for motivo in _MOTIVOS_DE_REGENERACAO:
+            totais[motivo] += validacao.get(motivo, 0)
+    return totais
+
 
 def _validar_canal_suportado(channel: Channel) -> None:
     """GENERATION_SUPORTADOS esta restrito a `email` por ora (ver
@@ -43,6 +79,34 @@ def _validar_canal_suportado(channel: Channel) -> None:
             detail=(
                 f"canal '{channel.value}' desabilitado na geracao. "
                 f"Canais disponiveis: {sorted(c.value for c in GENERATION_SUPORTADOS)}."
+            ),
+        )
+
+
+def _validar_instituicao_override(instituicao: Optional[InstituicaoFicticia]) -> None:
+    """Override de instituicao (piloto 5, item 2.1) e erro de quem pede
+    (422), antes de criar o job -- sem isso, uma instituicao real
+    passada por engano faria o bloqueio pos-geracao
+    (`ResponseGenerator._problema_estrutural`) disparar em TODO item do
+    lote, e a falha so apareceria disfarcada, item a item, na lista de
+    `failures` depois do job rodar inteiro.
+    """
+    if instituicao is None:
+        return
+    achados = (
+        encontrar_instituicoes_reais(
+            instituicao.nome_base, instituicao.sigla, instituicao.dominio_oficial
+        )
+        + encontrar_dominios_caricatos(instituicao.dominio_oficial)
+        + encontrar_marcadores(instituicao.nome_base, instituicao.dominio_oficial)
+    )
+    if achados:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"instituicao do override parece real, caricata ou um marcador de "
+                f"exemplo: {achados}. Use uma identidade fictícia (ex.: as da lista em "
+                "instituicoes_ficticias.py)."
             ),
         )
 
@@ -219,6 +283,7 @@ async def generate_batch(
     Item legitimo avulso segue disponivel no /generate (is_malicious=false).
     """
     _validar_canal_suportado(payload.channel)
+    _validar_instituicao_override(payload.instituicao)
     if payload.malicious_ratio != 1.0:
         raise HTTPException(
             status_code=422,
@@ -262,6 +327,7 @@ async def generate_batch(
         channel=payload.channel.value,
         dedup_job_ids=list(payload.dedup_job_ids),
         seed=payload.seed,
+        instituicao=payload.instituicao,
     )
 
     return JSONResponse(
@@ -288,6 +354,16 @@ async def get_batch_job(
     sucesso (não só os ids) -- útil para um frontend de curadoria
     revisar sem uma segunda rodada de requisições. `failures` lista as
     tentativas que falharam, separado dos sucessos (issue #8, item 1).
+
+    `taxa_aproveitamento` e `regeneracoes_por_motivo` (piloto 5, item
+    2.4): o aproveitamento (itens aceitos / total pedido) já era
+    calculável a partir dos campos acima, mas precisava ser derivado à
+    mão a cada análise -- aqui fica pronto. `regeneracoes_por_motivo`
+    soma, por motivo, quantas vezes os itens aceitos precisaram ser
+    gerados de novo (inclui `regeneracoes_por_instituicao_real`, a taxa
+    de bloqueio do refinamento de personificação). Os itens que passam
+    no filtro não são amostra aleatória do que o LLM produz -- esse
+    viés de seleção precisa constar em qualquer análise destes números.
     """
     job = await job_repository.get_by_id(job_id)
     if not job:
@@ -308,6 +384,8 @@ async def get_batch_job(
         "total_generated": job.total_generated,
         "total_failed": job.total_failed,
         "total_discarded": job.total_discarded,
+        "taxa_aproveitamento": (job.total_generated / job.total) if job.total else None,
+        "regeneracoes_por_motivo": _agregar_regeneracoes_por_motivo(emails),
         "distribution": job.distribution,
         "examples": examples,
         "failures": [f.model_dump() for f in job.failures],
