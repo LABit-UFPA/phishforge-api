@@ -170,6 +170,8 @@ class Container(containers.DeclarativeContainer):
         model_name=config.MODEL_NAME_LLM,
         temperature=config.LLM_TEMPERATURE,
         anotacao_cega=config.ANOTACAO_CEGA,
+        max_tokens_geracao=config.MAX_TOKENS_GERACAO,
+        max_tokens_anotacao=config.MAX_TOKENS_ANOTACAO,
     )
 
     # model_name explicito (lote-piloto de 26/10/2026): antes o

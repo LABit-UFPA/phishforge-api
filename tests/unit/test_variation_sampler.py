@@ -10,23 +10,29 @@ from itertools import combinations
 import pytest
 
 from app.domain.models.cue import CueCode
+from app.domain.services.instituicoes_ficticias import INSTITUICOES
+from app.domain.services.item_validation import (
+    encontrar_dominios_caricatos,
+    encontrar_instituicoes_reais,
+    encontrar_marcadores,
+)
 from app.domain.services.variation_sampler import (
     ACAO_ANEXO,
     ACOES_COM_LINK,
     ACOES_SEM_LINK,
     ASSINATURA_PESSOA,
     COMO_REALIZAR,
-    ENDERECO_DOMINIO_ERRADO,
     ENDERECO_LIVRE,
-    ENDERECO_PLAUSIVEL,
-    ENDERECO_TYPOSQUAT,
     ESTILOS_DE_ASSUNTO,
     ESTRUTURAS_COMPLETAS,
     PISTA_FIXA_FACIL,
     POOL_DIFICIL,
     POOL_FACIL,
     POOL_MEDIO,
+    TIPOS_DESTINATARIO,
+    WEBMAILS,
     VariationSampler,
+    gerar_typosquat,
     renderizar_ficha,
 )
 
@@ -177,23 +183,34 @@ def test_endereco_do_remetente_segue_as_pistas_alvo_do_medio():
     sampler = _sampler()
     for _ in range(42):
         ficha = sampler.sortear("medio")
+        dominio_oficial = ficha.instituicao.dominio_oficial
         if CueCode.SENDER_DOMAIN_MISMATCH in ficha.pistas_alvo:
-            assert ficha.endereco_remetente == ENDERECO_DOMINIO_ERRADO
+            assert ficha.dominio_da_pista_em == "remetente"
+            assert ficha.dominio_da_pista in WEBMAILS
+            assert dominio_oficial not in ficha.endereco_remetente
         elif CueCode.TYPOSQUAT in ficha.pistas_alvo:
-            assert ficha.endereco_remetente == ENDERECO_TYPOSQUAT
+            assert ficha.dominio_da_pista_em == "remetente"
+            assert ficha.dominio_da_pista != dominio_oficial
+            assert ficha.dominio_da_pista in ficha.endereco_remetente
         else:
-            assert ficha.endereco_remetente == ENDERECO_PLAUSIVEL
+            assert ficha.dominio_da_pista is None
+            assert dominio_oficial in ficha.endereco_remetente
 
 
 def test_dificil_mantem_o_orcamento_de_uma_pista():
     sampler = _sampler()
-    for _ in range(4):
+    for _ in range(20):
         ficha = sampler.sortear("dificil")
         if ficha.pistas_alvo == [CueCode.TYPOSQUAT]:
             # O typosquat vai no link obrigatorio; o remetente fica plausivel.
-            assert ficha.endereco_remetente == ENDERECO_PLAUSIVEL
+            assert ficha.dominio_da_pista_em == "link"
+            assert ficha.instituicao.dominio_oficial in ficha.endereco_remetente
+            assert ficha.dominio_da_pista != ficha.instituicao.dominio_oficial
         else:
+            assert ficha.pistas_alvo == [CueCode.SENDER_DOMAIN_MISMATCH]
+            assert ficha.dominio_da_pista_em == "remetente_e_link"
             assert "link obrigatório aponta para esse mesmo domínio" in ficha.endereco_remetente
+            assert ficha.dominio_da_pista in ficha.endereco_remetente
 
 
 def test_facil_sem_pista_de_dominio_deixa_o_remetente_livre():
@@ -220,3 +237,157 @@ def test_toda_pista_dos_pools_tem_instrucao_de_como_realizar():
 
 def test_scarcity_e_explicada_como_quantidade_e_nao_prazo():
     assert "não é prazo" in COMO_REALIZAR[CueCode.SCARCITY]
+
+
+# ---------------------------------------------------------------------------
+# Lote-piloto 5 (correcoes de qualidade, itens 2.1-2.3)
+# ---------------------------------------------------------------------------
+
+
+def test_instituicao_vem_da_lista_versionada_e_e_balanceada():
+    """2.1: cada item sorteia uma instituicao da lista, em ciclo
+    balanceado -- mesma garantia que as demais dimensoes da ficha.
+    """
+    sampler = _sampler()
+    instituicoes = [sampler.sortear("medio").instituicao for _ in range(len(INSTITUICOES))]
+    assert set(instituicoes) == set(INSTITUICOES)
+
+
+def test_instituicao_fixa_no_construtor_vale_para_todo_o_lote():
+    """2.1: a requisicao do lote pode fixar uma instituicao para a
+    celula inteira (BatchGenerationRequest.instituicao) -- o sampler
+    deixa de sortear e usa sempre a mesma.
+    """
+    fixa = INSTITUICOES[3]
+    sampler = VariationSampler(random.Random(7), instituicao=fixa)
+    for _ in range(10):
+        assert sampler.sortear("facil").instituicao == fixa
+        assert sampler.sortear("medio", is_malicious=False).instituicao == fixa
+
+
+def test_nenhuma_instituicao_ficticia_dispara_os_proprios_detectores():
+    """2.1: a identidade ficticia nao pode disparar o bloqueio de
+    instituicao real, dominio caricato ou marcador -- senao o item
+    recem-criado com ela seria barrado e mandado gerar de novo, o
+    mesmo laco que a ficha pronta existe para romper.
+    """
+    for instituicao in INSTITUICOES:
+        for valor in (
+            instituicao.nome_base,
+            instituicao.sigla,
+            instituicao.dominio_oficial,
+            f"contato@{instituicao.dominio_oficial}",
+        ):
+            assert encontrar_instituicoes_reais(valor) == []
+            assert encontrar_dominios_caricatos(valor) == []
+            assert encontrar_marcadores(valor) == []
+
+
+def test_gerar_typosquat_nunca_repete_o_dominio_oficial():
+    for instituicao in INSTITUICOES:
+        for seed in range(100):
+            typo = gerar_typosquat(instituicao.dominio_oficial, random.Random(seed))
+            assert typo != instituicao.dominio_oficial
+            assert typo.endswith(".com.br")
+            assert encontrar_dominios_caricatos(typo) == []
+
+
+def test_gerar_typosquat_e_reproduzivel_com_a_mesma_semente():
+    a = gerar_typosquat("vallonta.com.br", random.Random(42))
+    b = gerar_typosquat("vallonta.com.br", random.Random(42))
+    assert a == b
+
+
+def test_sender_domain_mismatch_usa_webmail_em_facil_e_medio():
+    sampler = _sampler()
+    for nivel in ("facil", "medio"):
+        fichas = [sampler.sortear(nivel) for _ in range(60)]
+        com_mismatch = [f for f in fichas if CueCode.SENDER_DOMAIN_MISMATCH in f.pistas_alvo]
+        assert com_mismatch
+        assert all(f.dominio_da_pista in WEBMAILS for f in com_mismatch)
+
+
+def test_sender_domain_mismatch_usa_outra_instituicao_no_dificil():
+    sampler = _sampler()
+    fichas = [sampler.sortear("dificil") for _ in range(20)]
+    com_mismatch = [f for f in fichas if f.pistas_alvo == [CueCode.SENDER_DOMAIN_MISMATCH]]
+    assert com_mismatch
+    for ficha in com_mismatch:
+        assert ficha.dominio_da_pista not in WEBMAILS
+        assert ficha.dominio_da_pista != ficha.instituicao.dominio_oficial
+        assert ficha.dominio_da_pista in {i.dominio_oficial for i in INSTITUICOES}
+
+
+def test_endereco_destinatario_institucional_usa_o_dominio_da_organizacao():
+    sampler = _sampler()
+    fichas = [sampler.sortear("medio") for _ in range(40)]
+    institucionais = [
+        f for f in fichas if f.endereco_destinatario.endswith(f"@{f.instituicao.dominio_oficial}")
+    ]
+    pessoais = [f for f in fichas if f.endereco_destinatario.split("@")[1] in WEBMAILS]
+    assert institucionais and pessoais
+
+
+def test_endereco_destinatario_usa_o_nome_normalizado_quando_ha_nome():
+    import unicodedata
+
+    sampler = _sampler()
+    fichas = [sampler.sortear("medio") for _ in range(10)]
+    for ficha in fichas:
+        assert ficha.nome_destinatario
+        usuario, _, _dominio = ficha.endereco_destinatario.partition("@")
+        sem_acento = unicodedata.normalize("NFKD", ficha.nome_destinatario)
+        sem_acento = "".join(c for c in sem_acento if not unicodedata.combining(c))
+        esperado = ".".join(sem_acento.lower().split())
+        assert usuario == esperado
+
+
+def test_endereco_destinatario_sem_nome_nunca_e_um_marcador():
+    """Facil (saudacao generica, sem nome): o endereco nao pode virar um
+    placeholder como "aluno@..." que o proprio validador de marcador
+    reconheceria -- aqui simplesmente nao ha "nome" nenhum para virar
+    marcador, so um contato numerado.
+    """
+    sampler = _sampler()
+    for _ in range(10):
+        ficha = sampler.sortear("facil")
+        assert ficha.nome_destinatario is None
+        usuario = ficha.endereco_destinatario.split("@")[0]
+        assert usuario.startswith("contato")
+        assert encontrar_marcadores(ficha.endereco_destinatario) == []
+
+
+def test_destinatario_tipo_e_balanceado_dentro_do_lote():
+    sampler = _sampler()
+    fichas = [sampler.sortear("medio") for _ in range(len(TIPOS_DESTINATARIO) * 2)]
+    institucional = sum(
+        1 for f in fichas if f.endereco_destinatario.endswith(f.instituicao.dominio_oficial)
+    )
+    pessoal = sum(1 for f in fichas if f.endereco_destinatario.split("@")[1] in WEBMAILS)
+    assert institucional == 2 and pessoal == 2
+
+
+def test_renderizar_ficha_traz_a_identidade_da_organizacao():
+    ficha = _sampler().sortear("medio")
+    texto = renderizar_ficha(ficha)
+    assert ficha.instituicao.nome_base in texto
+    assert ficha.instituicao.sigla in texto
+    assert ficha.instituicao.dominio_oficial in texto
+    assert ficha.endereco_destinatario in texto
+
+
+def test_renderizar_ficha_mostra_o_dominio_da_pista_quando_houver():
+    sampler = _sampler()
+    fichas = [sampler.sortear("medio") for _ in range(42)]
+    com_dominio = [f for f in fichas if f.dominio_da_pista]
+    assert com_dominio
+    for ficha in com_dominio:
+        texto = renderizar_ficha(ficha)
+        assert f"`{ficha.dominio_da_pista}`" in texto
+
+
+def test_item_legitimo_tambem_tem_instituicao_e_endereco_de_destinatario():
+    ficha = _sampler().sortear("medio", is_malicious=False)
+    assert ficha.instituicao in INSTITUICOES
+    assert "@" in ficha.endereco_destinatario
+    assert ficha.dominio_da_pista is None

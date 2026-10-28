@@ -1,6 +1,7 @@
 # app/domain/services/response_generator.py
 
 import logging
+from datetime import datetime
 from typing import Callable, Dict, List, Optional
 
 from langchain_core.prompts import PromptTemplate
@@ -22,8 +23,9 @@ from app.domain.services.item_validation import (
     calcular_spans,
     converter_markdown,
     encontrar_dominios_caricatos,
-    encontrar_instituicoes_reais,
+    encontrar_dominios_reais,
     encontrar_marcadores,
+    encontrar_nomes_de_instituicoes_reais,
     endereco_de_email,
     formula_proibida_no_assunto,
     limpar_contexto_fundido,
@@ -36,11 +38,36 @@ from app.domain.services.variation_sampler import renderizar_ficha
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
+# Teto de tokens de saida das chamadas de geracao e de anotacao (piloto
+# 5, item 2.5): sem teto, uma chamada que entra em repeticao estoura o
+# contexto do modelo (16k tokens -- confirmado em 1 falha por piloto) e
+# so falha DEPOIS de consumir a chamada inteira. Com o teto, a mesma
+# chamada falha cedo e barato (JSON incompleto, erro do parser
+# estruturado) em vez de no limite do modelo. Valores em
+# app.core.config.Settings (MAX_TOKENS_GERACAO/MAX_TOKENS_ANOTACAO);
+# aqui so os defaults para quem instancia a classe direto (testes).
+_MAX_TOKENS_GERACAO_PADRAO = 2000
+_MAX_TOKENS_ANOTACAO_PADRAO = 1000
+
+# Data de hoje por extenso em portugues, sem depender de locale do
+# sistema (piloto 5, item 2.6): um lote saiu com "15 de Outubro" ja no
+# passado porque o prompt nunca dizia ao modelo qual e a data real --
+# ele usava uma data tipica do proprio treinamento.
+_MESES_PT = {
+    1: "janeiro", 2: "fevereiro", 3: "março", 4: "abril", 5: "maio", 6: "junho",
+    7: "julho", 8: "agosto", 9: "setembro", 10: "outubro", 11: "novembro", 12: "dezembro",
+}
+
+
+def _data_atual_por_extenso() -> str:
+    agora = datetime.now()
+    return f"{agora.day} de {_MESES_PT[agora.month]} de {agora.year}"
+
 # Versao do gerador de e-mail (prompts + validacoes), registrada em
 # generation_jobs.run_metadata de cada lote. Mudar prompt ou validacao =
 # mudar esta string, para os lotes de versoes diferentes nao se
 # misturarem na analise.
-VERSAO_GERADOR = "2026-10-27-piloto4"
+VERSAO_GERADOR = "2026-10-28-piloto5"
 
 # Quantas vezes gerar o item de novo quando ele volta estruturalmente
 # invalido (marcador de template, remetente ou destinatario sem e-mail,
@@ -102,27 +129,40 @@ class AnotacaoCega(BaseModel):
 # remetente sem endereco em 4 de 9 itens, "[Informacoes de Contato]" e
 # "Universidade Exemplo" no texto, os 9 assuntos com "Acao Necessaria:".
 # Sem chaves literais no texto: e inserido num PromptTemplate.
+#
+# A identidade da organizacao (piloto 5, item 2.1) deixou de pedir ao
+# LLM para "inventar um nome ficticio": essa instrucao -- repetida 3x
+# com a palavra "ficticia/o" -- era a causa de 22 das 25 falhas do
+# piloto 4 (o modelo escrevia "Universidade Fictícia" ao pe da letra, o
+# validador barrava e mandava gerar de novo com a MESMA instrucao).
+# Agora a identidade vem pronta na ficha (ver VariationSampler e
+# instituicoes_ficticias.py) e o LLM so a usa.
 _REGRAS_DE_FORMA = (
     "### REGRAS DE FORMA (OBRIGATÓRIO)\n"
     "- `remetente` é SEMPRE um endereço de e-mail, opcionalmente com nome de exibição "
     "no formato 'Nome Exibido <endereco@dominio>'. Quem assina, da ficha, aparece na "
     "assinatura no fim do `conteudo`; não substitui o endereço.\n"
     "- O domínio do endereço do remetente segue a linha 'Endereço do remetente' da ficha.\n"
-    "- `receptor` é SEMPRE o endereço de e-mail de quem recebe (com o nome da ficha, se "
-    "houver: 'Nome <endereco@dominio>'), nunca uma saudação nem um grupo como 'Prezados "
-    "Alunos'. A saudação vai na primeira linha do `conteudo`.\n"
+    "- `receptor` é SEMPRE o endereço de e-mail de quem recebe -- use EXATAMENTE o "
+    "endereço indicado na ficha, nunca um endereço inventado (com o nome da ficha na "
+    "frente, se houver: 'Nome <endereco@dominio>'), nunca uma saudação nem um grupo como "
+    "'Prezados Alunos'. A saudação vai na primeira linha do `conteudo`.\n"
     "- Domínios e endereços são realistas: nunca domínios que se denunciam sozinhos, com "
     "'fake', 'falso', 'phishing', 'golpe', 'donotclick', '123' ou parecidos.\n"
     "- `conteudo` é texto simples, sem Markdown: nada de [texto](url) nem **negrito**. Um "
     "link aparece no corpo só pelo texto exibido; o destino fica em `links`.\n"
-    "- A organização do e-mail é SEMPRE fictícia: invente um nome fictício e plausível "
-    "(nunca 'Exemplo', 'XYZ' ou parecidos) e use o mesmo nome em todo o e-mail. Nunca use "
-    "nome, sigla ou domínio de uma instituição real (universidade, banco, órgão público, "
-    "empresa), nem no remetente, no destinatário ou nos links. Se o cenário citar uma "
-    "instituição real, crie uma equivalente fictícia. O domínio oficial dela é coerente "
-    "com esse nome; o do remetente segue a ficha.\n"
+    "- A identidade da organização já vem pronta na FICHA DO ITEM (nome-base, sigla e "
+    "domínio oficial): combine o nome-base com o tipo de organização que o CENÁRIO pede "
+    "(ex.: nome-base 'Vallonta' + cenário de universidade -> 'Universidade Vallonta'; mesmo "
+    "nome-base + cenário de banco -> 'Banco Vallonta') e use esse nome, essa sigla e esse "
+    "domínio em TODO o e-mail. Nunca invente outro nome, sigla ou domínio para a "
+    "organização, e nunca use nome, sigla ou domínio de uma instituição real (universidade, "
+    "banco, órgão público, empresa) em nenhuma parte do e-mail, mesmo que o cenário cite "
+    "uma.\n"
     "- Nunca escreva texto entre colchetes ou entre chaves: todo dado do e-mail (nome, "
-    "telefone, protocolo, contato) aparece preenchido, inventado quando preciso.\n"
+    "telefone, protocolo, contato) aparece preenchido, inventado quando preciso. Nunca use "
+    "a sequência '123456' como número de exemplo (protocolo, pedido, código): é um "
+    "placeholder reconhecível, não um número de verdade.\n"
     "- Siga o estilo de assunto da ficha. Nunca use 'Ação Necessária' ou 'Ação Requerida' "
     "(nem variações) em nenhuma parte do assunto, e não repita o assunto como primeira "
     "linha do `conteudo`.\n\n"
@@ -322,6 +362,8 @@ class ResponseGenerator:
         model_name: str = "gpt-4o-mini",
         temperature: float = 0.7,
         anotacao_cega: bool = False,
+        max_tokens_geracao: int = _MAX_TOKENS_GERACAO_PADRAO,
+        max_tokens_anotacao: int = _MAX_TOKENS_ANOTACAO_PADRAO,
     ):
         # Guardados para o lote registrar com que modelo/temperatura os
         # itens foram gerados (generation_jobs.run_metadata).
@@ -335,12 +377,13 @@ class ResponseGenerator:
         # liga pelo config (ANOTACAO_CEGA).
         self.anotacao_cega = anotacao_cega
         self.annotation_llm = ChatOpenAI(
-            model_name=model_name, api_key=api_key, temperature=0.0
+            model_name=model_name, api_key=api_key, temperature=0.0, max_tokens=max_tokens_anotacao
         ).with_structured_output(AnotacaoCega)
         self.llm = ChatOpenAI(
             model_name=model_name,
             api_key=api_key,
-            temperature=temperature
+            temperature=temperature,
+            max_tokens=max_tokens_geracao,
         ).with_structured_output(GeneratedItemDraft)
 
         self.text_llm = ChatOpenAI(
@@ -350,18 +393,22 @@ class ResponseGenerator:
         )
 
         self.prompt_template = PromptTemplate(
-            input_variables=["context", "difficulty", "relevant_docs", "variacao"],
+            input_variables=["context", "difficulty", "relevant_docs", "variacao", "data_atual"],
             template=(
                 "## 1. INSTRUÇÃO DE SISTEMA\n"
                 "Você é um especialista em cibersegurança especializado na criação de emails de phishing educacionais baseados em pesquisas acadêmicas.\n\n"
-                
+
                 "## 2. CONTEXTO RECUPERADO\n"
                 "**CONHECIMENTO ACADÊMICO DA BASE VETORIAL:**\n"
                 "{relevant_docs}\n\n"
-                
+
                 "## 3. ESPECIFICAÇÃO DA TAREFA\n"
                 "**Nível de Dificuldade:** {difficulty}\n"
-                "**Cenário Específico:** {context}\n\n"
+                "**Cenário Específico:** {context}\n"
+                "**Data de hoje:** {data_atual} -- use-a para qualquer data ou prazo que o "
+                "e-mail mencionar (nunca uma data do passado por engano; prazo de urgência "
+                "continua podendo ser vago, mas se citar uma data concreta, ela é relativa a "
+                "hoje).\n\n"
 
                 "### FICHA DO ITEM (OBRIGATÓRIO -- sorteada pelo sistema para este item)\n"
                 "Cada chamada sua é independente e não sabe o que as outras geraram (ver "
@@ -544,7 +591,7 @@ class ResponseGenerator:
         # real plausivel", entao o raciocinio, os criterios de
         # validacao e o que conta como "bom resultado" sao outros.
         self.legitimate_prompt_template = PromptTemplate(
-            input_variables=["context", "difficulty", "relevant_docs", "variacao"],
+            input_variables=["context", "difficulty", "relevant_docs", "variacao", "data_atual"],
             template=(
                 "## 1. INSTRUÇÃO DE SISTEMA\n"
                 "Você é um especialista em comunicação corporativa e segurança da informação, "
@@ -561,7 +608,10 @@ class ResponseGenerator:
 
                 "## 3. ESPECIFICAÇÃO DA TAREFA\n"
                 "**Nível de Dificuldade:** {difficulty}\n"
-                "**Cenário Específico:** {context}\n\n"
+                "**Cenário Específico:** {context}\n"
+                "**Data de hoje:** {data_atual} -- qualquer prazo ou data que o item citar "
+                "(ver PRAZO REAL E VERIFICÁVEL abaixo) é relativo a hoje, nunca uma data do "
+                "passado.\n\n"
 
                 "### FICHA DO ITEM (OBRIGATÓRIO -- sorteada pelo sistema para este item)\n"
                 "Cada chamada sua é independente e não sabe o que as outras geraram; por isso "
@@ -676,21 +726,26 @@ class ResponseGenerator:
         # PhoneCallItemDraft, PixQrItemDraft) em vez de reusar
         # GeneratedItemDraft, que fica intocado por esta issue.
         self.website_llm = ChatOpenAI(
-            model_name=model_name, api_key=api_key, temperature=temperature
+            model_name=model_name, api_key=api_key, temperature=temperature,
+            max_tokens=max_tokens_geracao,
         ).with_structured_output(WebsiteItemDraft)
         self.phone_call_llm = ChatOpenAI(
-            model_name=model_name, api_key=api_key, temperature=temperature
+            model_name=model_name, api_key=api_key, temperature=temperature,
+            max_tokens=max_tokens_geracao,
         ).with_structured_output(PhoneCallItemDraft)
         self.pix_qr_llm = ChatOpenAI(
-            model_name=model_name, api_key=api_key, temperature=temperature
+            model_name=model_name, api_key=api_key, temperature=temperature,
+            max_tokens=max_tokens_geracao,
         ).with_structured_output(PixQrItemDraft)
         # sms/whatsapp (issue #6, desbloqueados pela phishing-quest-api
         # #68): mesma separacao de LLM/prompt por canal dos 3 acima.
         self.sms_llm = ChatOpenAI(
-            model_name=model_name, api_key=api_key, temperature=temperature
+            model_name=model_name, api_key=api_key, temperature=temperature,
+            max_tokens=max_tokens_geracao,
         ).with_structured_output(SmsItemDraft)
         self.whatsapp_llm = ChatOpenAI(
-            model_name=model_name, api_key=api_key, temperature=temperature
+            model_name=model_name, api_key=api_key, temperature=temperature,
+            max_tokens=max_tokens_geracao,
         ).with_structured_output(WhatsAppItemDraft)
 
         _campos_canal = "content, explicacao, categoria"
@@ -971,6 +1026,7 @@ class ResponseGenerator:
                 "difficulty": difficulty,
                 "relevant_docs": relevant_docs,
                 "variacao": renderizar_ficha(ficha),
+                "data_atual": _data_atual_por_extenso(),
             }
             try:
                 draft = await chain.ainvoke(entrada)
@@ -1069,11 +1125,25 @@ class ResponseGenerator:
             return "remetente_sem_email", draft.remetente
         if endereco_de_email(draft.receptor) is None:
             return "destinatario_sem_email", draft.receptor
-        instituicoes = encontrar_instituicoes_reais(
+        # Instituicao real: bloqueio so em PERSONIFICACAO, nao em
+        # qualquer mencao (piloto 5, item 15 do cabecalho de
+        # item_validation.py). "Entregue pelos Correios" no corpo, num
+        # cenario de logistica, e mencao legitima; "@correios-br.com" no
+        # remetente, ou o dominio real em qualquer campo, e
+        # personificacao. Nome/sigla so contam em remetente/destinatario/
+        # links; dominio real conta em qualquer campo (nao ha "mencao
+        # inocente" de um dominio -- escreve-lo e a propria forma de
+        # apontar para o endereco dele).
+        instituicoes = encontrar_dominios_reais(
             draft.remetente,
             draft.receptor,
             draft.assunto,
             draft.conteudo,
+            *(link.text for link in draft.links),
+            *(link.href for link in draft.links),
+        ) + encontrar_nomes_de_instituicoes_reais(
+            draft.remetente,
+            draft.receptor,
             *(link.text for link in draft.links),
             *(link.href for link in draft.links),
         )

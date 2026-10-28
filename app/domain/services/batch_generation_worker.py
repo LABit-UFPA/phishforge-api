@@ -6,6 +6,7 @@ from uuid import UUID
 
 from app.domain.models.channel import Channel
 from app.domain.models.generation_job import JobStatus
+from app.domain.models.instituicao_ficticia import InstituicaoFicticia
 from app.domain.models.phishing_email import PhishingEmail
 from app.domain.services.generation_pipeline import GenerationPipeline
 from app.domain.services.item_validation import normalizar_assunto
@@ -102,6 +103,7 @@ class BatchGenerationWorker:
         channel: str = "email",
         dedup_job_ids: Optional[Sequence[UUID]] = None,
         seed: Optional[int] = None,
+        instituicao: Optional[InstituicaoFicticia] = None,
     ) -> None:
         try:
             built = await self._pipeline.build_context(context)
@@ -137,7 +139,10 @@ class BatchGenerationWorker:
         # nao veio na requisicao, para o lote poder ser reproduzido.
         if seed is None:
             seed = random.SystemRandom().randrange(2**31)
-        sampler = VariationSampler(random.Random(seed))
+        # `instituicao` (piloto 5, item 2.1): override do lote inteiro,
+        # vindo de BatchGenerationRequest.instituicao -- None sorteia por
+        # item, balanceado (ver VariationSampler).
+        sampler = VariationSampler(random.Random(seed), instituicao=instituicao)
 
         # Mesma logica de distribuicao entre dificuldades da issue #11
         # (nao mexer): o resto vai para as primeiras dificuldades da
@@ -155,6 +160,7 @@ class BatchGenerationWorker:
             "limiar_dedup": self._dedup_threshold,
             "max_dedup_retries": MAX_DEDUP_RETRIES,
             "seed": seed,
+            "instituicao_override": instituicao.model_dump(mode="json") if instituicao else None,
             "ficha_por_item": channel == Channel.EMAIL.value,
             "dedup_job_ids": [str(j) for j in dedup_job_ids],
             "itens_de_lotes_anteriores": itens_de_lotes_anteriores,

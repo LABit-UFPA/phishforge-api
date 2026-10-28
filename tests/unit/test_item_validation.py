@@ -13,8 +13,10 @@ from app.domain.services.item_validation import (
     calcular_spans,
     converter_markdown,
     encontrar_dominios_caricatos,
+    encontrar_dominios_reais,
     encontrar_instituicoes_reais,
     encontrar_marcadores,
+    encontrar_nomes_de_instituicoes_reais,
     endereco_de_email,
     formula_proibida_no_assunto,
     limpar_contexto_fundido,
@@ -413,3 +415,57 @@ def test_limpar_contexto_fundido_tira_assinatura_real_e_marcadores():
 def test_limpar_contexto_fundido_sem_problema_nao_muda_nada():
     texto = "- Autoridade: e-mail se passa pela coordenacao do curso."
     assert limpar_contexto_fundido(texto) == (texto, [])
+
+
+# ---- Correcoes de qualidade do piloto 5 -----------------------------------
+
+
+def test_123456_conta_como_marcador():
+    assert encontrar_marcadores("Protocolo #123456: regularize seu acesso.") == ["123456"]
+    assert encontrar_marcadores("Pedido ORD123456 registrado") == ["123456"]
+
+
+def test_numero_que_nao_e_o_marcador_exato_nao_conta():
+    assert encontrar_marcadores("Protocolo 1234567 registrado") == []
+    assert encontrar_marcadores("Protocolo 0123456 registrado") == []
+    assert encontrar_marcadores("Protocolo 54321 registrado") == []
+
+
+def test_nome_de_instituicao_real_no_corpo_nao_conta_para_a_versao_por_campo():
+    """Piloto 5: o bloqueio disparava em qualquer mencao no corpo
+    ('entregue pelos Correios' num cenario de logistica), nao so em
+    personificacao. A versao por campo usada na checagem pos-geracao
+    (`encontrar_nomes_de_instituicoes_reais`) nao deve achar nada aqui
+    -- so a versao antiga, sem distinguir campo, continua achando.
+    """
+    corpo = "Sua encomenda será entregue pelos Correios na próxima semana."
+    assert encontrar_nomes_de_instituicoes_reais(corpo) == ["correios"]
+    assert encontrar_instituicoes_reais(corpo) == ["correios"]
+
+
+def test_nome_de_instituicao_real_no_remetente_continua_contando():
+    remetente = "Suporte Acadêmico <suporte@educacao.ufrj.br>"
+    assert "ufrj" in encontrar_nomes_de_instituicoes_reais(remetente)
+
+
+def test_dominio_real_conta_em_qualquer_campo_mesmo_sem_ser_remetente():
+    """Diferente do nome, um dominio real escrito no CORPO ainda e
+    personificacao -- nao ha 'mencao inocente' de um dominio.
+    """
+    corpo = "Para mais informações, acesse bb.com.br e confira o comunicado."
+    assert "bb.com.br" in encontrar_dominios_reais(corpo)
+    assert encontrar_nomes_de_instituicoes_reais(corpo) == []
+
+
+def test_encontrar_dominios_reais_e_nomes_somados_reproduzem_a_versao_antiga():
+    for texto in (
+        "UFRJ informa", "suporte@ufrj.edu.br", "Universidade Federal do Pará",
+        "Banco do Brasil", "https://bancodobrasil-seguro.com/login",
+        "acesse receita.gov.br/restituicao", "Sua fatura TIM venceu",
+    ):
+        combinado = list(
+            dict.fromkeys(
+                encontrar_nomes_de_instituicoes_reais(texto) + encontrar_dominios_reais(texto)
+            )
+        )
+        assert combinado == encontrar_instituicoes_reais(texto)

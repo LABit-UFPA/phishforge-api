@@ -11,6 +11,7 @@ import pytest
 
 from app.domain.models.cue import DEFINICOES_OPERACIONAIS, Cue, CueCode
 from app.domain.models.generated_item_draft import GeneratedItemDraft, ValidatedItemDraft
+from app.domain.models.instituicao_ficticia import InstituicaoFicticia
 from app.domain.models.link_ref import LinkRef
 from app.domain.models.phish_scale import PremiseAlignment
 from app.domain.models.phishing_email import PhishingEmail
@@ -24,7 +25,11 @@ from app.domain.services.response_generator import (
 )
 from app.domain.services.variation_sampler import VariationSampler
 
-VARIAVEIS_DO_PROMPT_DE_EMAIL = {"context", "difficulty", "relevant_docs", "variacao"}
+VARIAVEIS_DO_PROMPT_DE_EMAIL = {"context", "difficulty", "relevant_docs", "variacao", "data_atual"}
+
+_INSTITUICAO_DE_TESTE = InstituicaoFicticia(
+    nome_base="Vallonta", sigla="VAL", dominio_oficial="vallonta.com.br"
+)
 
 
 class _ChainSequencia:
@@ -64,7 +69,13 @@ def _draft(
 
 def _ficha_medio(nome="Larissa Monteiro", pistas=(CueCode.URGENCY, CueCode.AUTHORITY)):
     return VariationSpec(
+        instituicao=_INSTITUICAO_DE_TESTE,
         nome_destinatario=nome,
+        endereco_destinatario=(
+            f"{nome.lower().replace(' ', '.')}@{_INSTITUICAO_DE_TESTE.dominio_oficial}"
+            if nome
+            else f"contato@{_INSTITUICAO_DE_TESTE.dominio_oficial}"
+        ),
         assinatura="uma pessoa com nome e cargo",
         nome_remetente="Otávio Brito",
         endereco_remetente="use um domínio plausível da própria organização",
@@ -260,12 +271,17 @@ def test_prompts_de_email_trazem_as_regras_de_forma():
         assert "REGRAS DE FORMA" in template
         assert "Ação Necessária" in template
         assert "em nenhuma parte do assunto" in template
-        assert "nome fictício e plausível" in template
         assert "instituição real" in template
         assert "Se o cenário não dá o nome" not in template
         assert "`receptor` é SEMPRE o endereço de e-mail" in template
         assert "sem Markdown" in template
         assert "empresa123" not in template
+        # Piloto 5: nao pede mais ao LLM para inventar a identidade --
+        # ela ja vem pronta na ficha (nome-base, sigla, dominio).
+        assert "invente um nome fictício" not in template
+        assert "nome-base" in template
+        assert "Data de hoje" in template
+        assert "'123456'" in template
 
 
 def test_prompt_do_anotador_usa_as_definicoes_dos_especialistas_e_nao_ve_a_ficha():
@@ -482,12 +498,33 @@ async def test_regras_de_forma_valem_para_o_item_legitimo():
 
 
 async def test_instituicao_real_que_persiste_vira_item_invalido():
-    chain = _ChainSequencia(_draft("Recadastramento obrigatório no Itaú."))
+    """Instituicao real no REMETENTE (personificacao) continua barrada
+    ate esgotar as regeneracoes -- diferente de uma mencao so no corpo
+    (ver test_mencao_de_instituicao_real_so_no_corpo_nao_faz_gerar_de_novo).
+    """
+    chain = _ChainSequencia(
+        _draft("Texto.", remetente="Atendimento Itaú <atendimento@itau-suporte.com>")
+    )
     with pytest.raises(ItemInvalidoError, match="instituicao_real"):
         await _generator(chain).generate_response(
             difficulty="medio", context="ctx", relevant_docs="docs", variacao=_ficha_medio()
         )
     assert len(chain.entradas) == 3
+
+
+async def test_mencao_de_instituicao_real_so_no_corpo_nao_faz_gerar_de_novo():
+    """Piloto 5 (refinamento do bloqueio): o bloqueio disparava em
+    qualquer MENCAO no corpo, mesmo sem nenhuma personificacao real
+    (remetente, dominio, links) -- 'Recadastramento obrigatório no
+    Itaú' não personifica ninguém, só cita o nome dentro do pretexto.
+    Agora só personificação barra.
+    """
+    chain = _ChainSequencia(_draft("Recadastramento obrigatório no Itaú."))
+    resultado = await _generator(chain).generate_response(
+        difficulty="medio", context="ctx", relevant_docs="docs", variacao=_ficha_medio()
+    )
+    assert len(chain.entradas) == 1
+    assert resultado.validacao["regeneracoes_por_instituicao_real"] == 0
 
 
 

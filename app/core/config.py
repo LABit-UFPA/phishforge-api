@@ -22,6 +22,15 @@ class Settings(BaseSettings):
     # o item pronto. Desligar volta a autoanotacao do gerador.
     ANOTACAO_CEGA: bool = True
 
+    # Teto de tokens de saida das chamadas de geracao e de anotacao
+    # (piloto 5, item 2.5): sem teto, uma chamada que entra em repeticao
+    # estoura o contexto do modelo (16k tokens -- confirmado em 1 falha
+    # por piloto) e so falha DEPOIS de consumir a chamada inteira. Com o
+    # teto, a mesma chamada falha cedo e barato. Anotacao pede menos
+    # texto de saida que geracao, dai o teto menor.
+    MAX_TOKENS_GERACAO: int = 2000
+    MAX_TOKENS_ANOTACAO: int = 1000
+
     QDRANT_URL: str = "http://localhost:6333"
     COLLECTION_NAME: str = "phishing_articles"
 

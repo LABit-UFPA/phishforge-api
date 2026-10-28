@@ -13,6 +13,7 @@ from app.domain.models.generation_job import JobStatus
 from app.domain.models.variation_spec import VariationSpec
 from app.domain.services.batch_generation_worker import BatchGenerationWorker
 from app.domain.services.generation_pipeline import GenerationPipeline
+from app.domain.services.instituicoes_ficticias import INSTITUICOES
 from tests.fakes import (
     FakeEmbeddingClient,
     FakeGenerationJobRepository,
@@ -283,3 +284,49 @@ async def test_assunto_de_lote_anterior_indicado_tambem_conta():
 
     assert lote_b.total_generated == 0
     assert lote_b.total_discarded == 1
+
+
+# ---------------------------------------------------------------------------
+# Lote-piloto 5 (correcoes de qualidade, item 2.1)
+# ---------------------------------------------------------------------------
+
+
+async def test_instituicao_override_vale_para_todo_o_lote():
+    """A requisicao do lote pode fixar uma instituicao para a celula
+    inteira (BatchGenerationRequest.instituicao) -- todo item do lote
+    usa a mesma, em vez de sortear da lista.
+    """
+    worker, jobs, _, rg = _montar()
+    fixa = INSTITUICOES[5]
+
+    await _rodar(worker, jobs, total=4, difficulties=("facil", "medio"), instituicao=fixa)
+
+    fichas = _fichas(rg)
+    assert len(fichas) == 4
+    assert all(f.instituicao == fixa for f in fichas)
+
+
+async def test_sem_override_cada_item_do_lote_sorteia_uma_instituicao():
+    worker, jobs, _, rg = _montar()
+
+    await _rodar(worker, jobs, total=len(INSTITUICOES))
+
+    fichas = _fichas(rg)
+    assert {f.instituicao for f in fichas} == set(INSTITUICOES)
+
+
+async def test_run_metadata_registra_o_override_de_instituicao():
+    worker, jobs, _, _ = _montar()
+    fixa = INSTITUICOES[2]
+
+    job = await _rodar(worker, jobs, total=1, instituicao=fixa)
+
+    assert job.run_metadata["instituicao_override"] == fixa.model_dump(mode="json")
+
+
+async def test_run_metadata_sem_override_registra_none():
+    worker, jobs, _, _ = _montar()
+
+    job = await _rodar(worker, jobs, total=1)
+
+    assert job.run_metadata["instituicao_override"] is None
