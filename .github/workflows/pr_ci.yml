@@ -79,7 +79,13 @@ jobs:
             poetry-${{ runner.os }}-
 
       - name: Instalar dependencias
-        run: poetry install --no-interaction --no-ansi --no-root
+        # `sync` (nao `install`): remove do venv pacotes fora do lock. O
+        # cache do Poetry e restaurado entre runs (restore-keys), e
+        # `install` sozinho nao remove nada -- um torchvision antigo
+        # ficava preso junto do torch CPU e quebrava o import de
+        # sentence-transformers ("operator torchvision::nms does not
+        # exist"). `sync` deixa o venv identico ao lock.
+        run: poetry sync --no-interaction --no-ansi --no-root
 
       # Nenhum teste em tests/unit deve fazer chamada de rede: o LLM,
       # o cross-encoder e a base vetorial sao substituidos por fakes
@@ -144,7 +150,9 @@ jobs:
             poetry-${{ runner.os }}-
 
       - name: Instalar dependencias
-        run: poetry install --no-interaction --no-ansi --no-root
+        # `sync` (nao `install`): ver o comentario no job de testes
+        # unitarios -- remove pacotes fora do lock que o cache carrega.
+        run: poetry sync --no-interaction --no-ansi --no-root
 
       # Usa a MESMA imagem e os MESMOS changelogs do docker-compose e
       # do ambiente real (migrate/changelogs), entao uma migration
