@@ -498,6 +498,26 @@ async def test_pista_de_dominio_ignorada_pelo_llm_nao_e_inventada():
     assert resultado.validacao["cues_completadas_por_construcao"] == []
 
 
+async def test_duas_pistas_de_dominio_faltando_ao_mesmo_tempo_falha_alto():
+    """Defesa contra regressao: so ha um `dominio_da_pista` por ficha
+    (ver VariationSampler._pares_sem_redundancia_de_dominio). Se os
+    pools algum dia voltarem a permitir typosquat e
+    sender_domain_mismatch juntos no alvo sem atualizar esta funcao,
+    ela deve falhar alto -- nao atribuir o mesmo dominio as duas pistas
+    por engano.
+    """
+    ficha = _ficha_medio(
+        pistas=(CueCode.TYPOSQUAT, CueCode.SENDER_DOMAIN_MISMATCH)
+    ).model_copy(update={"dominio_da_pista": "vall0nta.com.br", "dominio_da_pista_em": "link"})
+    gerado = _draft("Texto.")
+    gerado.links = [LinkRef(text="Acessar conta", href="https://vall0nta.com.br/login")]
+
+    with pytest.raises(ValueError, match="mais de uma pista de dominio"):
+        await _generator(_ChainSequencia(gerado)).generate_response(
+            difficulty="dificil", context="ctx", relevant_docs="docs", variacao=ficha
+        )
+
+
 async def test_instituicao_real_no_remetente_faz_gerar_de_novo():
     """Teste da versao do piloto 3: dominios da UFRJ num cenario que so
     dizia 'universidade federal brasileira'.

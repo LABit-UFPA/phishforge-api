@@ -1216,6 +1216,10 @@ class ResponseGenerator:
         juntas no alvo de um item (ver VariationSampler
         ._pares_sem_redundancia_de_dominio): so ha um
         `dominio_da_pista` por ficha, entao no maximo uma pista falta.
+        A checagem abaixo torna essa dependencia explicita -- se um
+        pool voltar a permitir as duas juntas sem atualizar esta
+        funcao, falha alto em vez de atribuir o mesmo dominio as duas
+        pistas por engano.
         """
         if ficha is None or not ficha.dominio_da_pista:
             return cues
@@ -1225,6 +1229,12 @@ class ResponseGenerator:
         ]
         if not faltando:
             return cues
+        if len(faltando) > 1:
+            raise ValueError(
+                f"mais de uma pista de dominio faltando ({[p.value for p in faltando]}) para "
+                "um unico dominio_da_pista -- ver VariationSampler"
+                "._pares_sem_redundancia_de_dominio"
+            )
 
         dominio = ficha.dominio_da_pista
         if dominio in (draft.remetente or ""):
