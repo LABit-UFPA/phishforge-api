@@ -5,7 +5,15 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     MODEL_NAME_EMBEDDING: str = "all-MiniLM-L6-v2"
-    
+
+    # Provedor do LLM de GERACAO (normalizacao, HyDE, fusao, geracao do
+    # item e anotacao as cegas -- todas as etapas de geracao). `openai`
+    # ou `anthropic`. O embedding NAO segue este seletor: continua
+    # OpenAI (`OPENAI_API_KEY`), porque trocar o modelo de embedding
+    # mudaria o espaco vetorial e exigiria reindexar a base Qdrant.
+    # `MODEL_NAME_LLM` e o id do modelo DENTRO do provider escolhido.
+    LLM_PROVIDER: str = "openai"
+
     MODEL_NAME_LLM: str = "gpt-4o-mini"
 
     # Temperatura das chains que GERAM itens (email e canais novos). As
@@ -45,7 +53,16 @@ class Settings(BaseSettings):
     # (ver main.py) -- issue #12.
     EMBEDDING_DIMENSION: int = 1536
 
+    # Chave do provider OpenAI: usada pelo LLM de geracao quando
+    # LLM_PROVIDER=openai, pelo embedding (sempre) e pelo juiz do RAGAS
+    # nos scripts de avaliacao.
     OPENAI_API_KEY: str = ""
+
+    # Chave do provider Anthropic: usada pelo LLM de geracao quando
+    # LLM_PROVIDER=anthropic. Vazia quando so se usa OpenAI. Distinta da
+    # `API_KEY` abaixo, que e autenticacao servidor-a-servidor, nao
+    # chave de modelo.
+    ANTHROPIC_API_KEY: str = ""
 
     # Limiar de similaridade de cosseno (0..1) acima do qual dois itens
     # do MESMO lote sao considerados quase-duplicados (issue #11b).

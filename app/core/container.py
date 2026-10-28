@@ -172,16 +172,22 @@ class Container(containers.DeclarativeContainer):
         anotacao_cega=config.ANOTACAO_CEGA,
         max_tokens_geracao=config.MAX_TOKENS_GERACAO,
         max_tokens_anotacao=config.MAX_TOKENS_ANOTACAO,
+        provider=config.LLM_PROVIDER,
+        anthropic_api_key=config.ANTHROPIC_API_KEY,
     )
 
     # model_name explicito (lote-piloto de 26/10/2026): antes o
     # normalizador ficava sempre no default da classe ("gpt-4o-mini",
     # alias sem snapshot), entao fixar o snapshot em MODEL_NAME_LLM nao
     # fixava esta etapa -- e ela reescreve o contexto que chega ao gerador.
+    # Mesmo provider do gerador (LLM_PROVIDER): a normalizacao e uma
+    # etapa de geracao e segue o seletor junto.
     prompt_normalizer = providers.Singleton(
         PromptNormalizer,
         api_key=config.OPENAI_API_KEY,
         model_name=config.MODEL_NAME_LLM,
+        provider=config.LLM_PROVIDER,
+        anthropic_api_key=config.ANTHROPIC_API_KEY,
     )
 
     user_answer_evaluator = providers.Singleton(
