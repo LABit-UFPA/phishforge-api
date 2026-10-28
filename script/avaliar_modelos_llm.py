@@ -36,10 +36,11 @@ anteriores para os numeros serem comparaveis: user_input = consulta de
 busca (contexto) / cenario de geracao (resposta); retrieved_contexts =
 top-N documentos pos-rerank; response = e-mail gerado.
 
-Como rodar (precisa de RAGAS e langchain-anthropic instalados -- ambos
-nas deps do projeto):
+Como rodar. O RAGAS fica no grupo opcional `evaluation` (nao entra na
+imagem de producao), entao instale COM esse grupo; o langchain-anthropic
+ja e dep principal:
 
-    poetry install
+    poetry install --with evaluation
     # Qdrant no ar e as chaves no .env (OPENAI_API_KEY, ANTHROPIC_API_KEY)
     poetry run python -m script.avaliar_modelos_llm --dry-run   # confere o plano SEM gastar API
     poetry run python -m script.avaliar_modelos_llm             # roda de verdade

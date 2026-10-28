@@ -14,9 +14,28 @@ pydantic = "^2.10.6"
 pydantic-settings = "^2.7.1"
 qdrant-client = ">=1.15.0,<1.16.0"
 sentence-transformers = "^3.4.1"
-torch = "^2.6.0"
-torchvision = "^0.21.0"
-torchaudio = "^2.6.0"
+# torch da build CPU no Linux (Docker/CI), nao a padrao do PyPI: a
+# padrao arrasta ~3-4 GB de wheels CUDA (nvidia-*-cu12, triton) que a
+# imagem nunca usa -- o compose nao reserva GPU e o codigo cai em `cpu`
+# por `torch.cuda.is_available()`. Era o grosso dos ~15 min de build.
+# So no Linux: no mac/windows o torch do PyPI ja e CPU (nao ha CUDA
+# nessas plataformas no indice padrao), e o indice whl/cpu nem sempre
+# tem wheel pra elas -- apontar a fonte CPU para todas quebraria o
+# `poetry install` local nesses sistemas. torchvision/torchaudio
+# sairam: nenhum modulo os importa e nenhum pacote do lock os exige
+# (so sentence-transformers precisa de torch).
+#
+# Versao FIXA em 2.6.0 (nao `^2.6.0`): o intuito e so trocar a wheel
+# CUDA pela CPU, sem subir a versao. Com `^2.6.0` o resolvedor pegava a
+# mais nova do indice CPU (2.14.1+cpu), que nao casa com a versao de
+# `transformers`/`torchvision` ja travada no projeto -- no CI isso
+# quebrava o import de sentence-transformers com "operator
+# torchvision::nms does not exist". Fixar em 2.6.0 mantem tudo na
+# mesma versao do main, so em build CPU.
+torch = [
+    {version = "2.6.0", source = "pytorch-cpu", markers = "sys_platform == 'linux'"},
+    {version = "2.6.0", source = "pypi", markers = "sys_platform != 'linux'"},
+]
 langchain-community = "^0.3.16"
 pypdf = "^5.2.0"
 langchain-openai = "^0.3.28"
@@ -24,11 +43,31 @@ langchain-anthropic = "^0.3.0"
 pymupdf = "^1.26.3"
 asyncpg = "^0.30.0"
 dependency-injector = "^4.48.2"
-ragas = "^0.3.5"
-datasets = "^4.1.1"
 tracing-lib = {git = "https://github.com/GoLogann/tracing-lib.git"}
 slowapi = "^0.1.9"
 pyjwt = "^2.14.0"
+
+# Indice CPU-only do PyTorch. `priority = "explicit"` => so os pacotes
+# que apontam `source = "pytorch-cpu"` (torch) vem daqui; todo o resto
+# continua vindo do PyPI.
+[[tool.poetry.source]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
+
+# Avaliacao RAGAS: so os scripts de experimento (script/evaluate_ragas.py,
+# script/experiments/) importam `app.domain.services.evaluation`; nada em
+# `app/` ou `main.py` usa, e o Dockerfile nem copia `script/`. Grupo
+# opcional => fora do `poetry install --only main` da imagem (tira
+# `datasets`/`pyarrow` e companhia). Para rodar os scripts:
+# `poetry install --with evaluation`.
+[tool.poetry.group.evaluation]
+optional = true
+
+[tool.poetry.group.evaluation.dependencies]
+ragas = "^0.3.5"
+datasets = "^4.1.1"
+
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.4"
 pytest-asyncio = "^1.4.0"
