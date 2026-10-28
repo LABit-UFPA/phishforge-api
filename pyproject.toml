@@ -65,7 +65,11 @@ priority = "explicit"
 optional = true
 
 [tool.poetry.group.evaluation.dependencies]
-ragas = "^0.3.5"
+# Pin EXATO (nao `^`): a versao do RAGAS e parte do instrumento de
+# medicao da comparacao de modelos (vai pro artigo), entao fica fixa e
+# reproduzivel. 0.4.x trouxe a API `collections`/`ascore`/`.value` que
+# `app/domain/services/evaluation.py` usa.
+ragas = "0.4.3"
 datasets = "^4.1.1"
 
 [tool.poetry.group.dev.dependencies]

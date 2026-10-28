@@ -42,8 +42,14 @@ ja e dep principal:
 
     poetry install --with evaluation
     # Qdrant no ar e as chaves no .env (OPENAI_API_KEY, ANTHROPIC_API_KEY)
+    poetry run python -m script.avaliar_modelos_llm --smoke     # valida o RAGAS 0.4 com 1 avaliacao (~3 chamadas)
     poetry run python -m script.avaliar_modelos_llm --dry-run   # confere o plano SEM gastar API
     poetry run python -m script.avaliar_modelos_llm             # roda de verdade
+
+Usa RAGAS 0.4 (metricas em `ragas.metrics.collections`, `ascore`/`.value`,
+juiz via `llm_factory` e embeddings via `embedding_factory`). A versao do
+RAGAS e parte do instrumento de medicao -- registre-a no artigo junto do
+juiz e do embedding.
 
 ANTES de rodar, PREENCHA os ids de modelo OpenAI marcados com
 `<<PREENCHER-...>>` abaixo e o `JUIZ_RAGAS_MODEL` com os ids EXATOS da
@@ -66,10 +72,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from openai import AsyncOpenAI
 from qdrant_client import QdrantClient
-from ragas.embeddings import LangchainEmbeddingsWrapper
-from ragas.llms import LangchainLLMWrapper
+from ragas.embeddings.base import embedding_factory
+from ragas.llms import llm_factory
 
 sys.path.append(str(Path(__file__).parent.parent))
 
@@ -285,12 +291,14 @@ class Avaliador:
         )
         self.reranker = ReRanker()
 
-        # Juiz RAGAS fixo (nao e nenhum modelo testado).
-        self.eval_llm = LangchainLLMWrapper(
-            ChatOpenAI(model=JUIZ_RAGAS_MODEL, api_key=self.openai_key)
-        )
-        self.eval_embeddings = LangchainEmbeddingsWrapper(
-            OpenAIEmbeddings(model=JUIZ_RAGAS_EMBEDDING, openai_api_key=self.openai_key)
+        # Juiz RAGAS fixo (nao e nenhum modelo testado), na API nativa do
+        # RAGAS 0.4: as metricas de `collections` chamam `.agenerate` no
+        # LLM do `llm_factory` e usam o embedding do `embedding_factory`
+        # -- os wrappers Langchain da 0.3 nao servem para elas.
+        judge_client = AsyncOpenAI(api_key=self.openai_key)
+        self.eval_llm = llm_factory(JUIZ_RAGAS_MODEL, client=judge_client)
+        self.eval_embeddings = embedding_factory(
+            "openai", model=JUIZ_RAGAS_EMBEDDING, client=judge_client
         )
 
         self.resultados: list[ResultadoItem] = []
@@ -549,6 +557,36 @@ def _dry_run(contextos, repeticoes):
     print("Confira os ids e rode sem --dry-run para valer.")
 
 
+async def _smoke():
+    """Uma chamada real das 3 metricas RAGAS em dados minimos (sem RAG,
+    sem gerador), so para validar o wiring do RAGAS 0.4 + juiz + chaves
+    antes de gastar na comparacao cheia. Custa ~3 chamadas ao juiz.
+    """
+    _validar_sem_placeholder()
+    if not settings.OPENAI_API_KEY:
+        raise SystemExit("OPENAI_API_KEY nao configurada (.env).")
+    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    eval_llm = llm_factory(JUIZ_RAGAS_MODEL, client=client)
+    eval_embeddings = embedding_factory("openai", model=JUIZ_RAGAS_EMBEDDING, client=client)
+    print(f"Smoke test do RAGAS 0.4 com juiz={JUIZ_RAGAS_MODEL} ...")
+    scores = await run_ragas_evaluation(
+        search_question="phishing email urgency social engineering tactics",
+        generation_question="Write a phishing email about a pending enrollment issue.",
+        expanded_answer="De: secretaria@uni.test\nAssunto: Pendencia\n\nRegularize sua matricula pelo link ate amanha.",
+        full_answer="De: secretaria@uni.test\nAssunto: Pendencia\n\nRegularize sua matricula pelo link ate amanha.",
+        contexts=["Phishing emails often use urgency and a deadline to pressure the victim."],
+        eval_llm=eval_llm,
+        eval_embeddings=eval_embeddings,
+    )
+    print("Resultado:", scores)
+    if scores.get("error"):
+        raise SystemExit(f"Smoke test FALHOU: {scores['error']}")
+    faltando = [k for k in ("context_relevance", "faithfulness", "response_relevancy") if scores.get(k) is None]
+    if faltando:
+        raise SystemExit(f"Smoke test incompleto -- metricas sem nota: {faltando}")
+    print("Smoke test OK: as 3 metricas retornaram nota. Pode rodar a comparacao cheia.")
+
+
 async def _main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--xlsx", type=Path, default=XLSX_PADRAO, help="caminho do registro_lotes.xlsx")
@@ -557,7 +595,12 @@ async def _main():
     ap.add_argument("--seed", type=int, default=42, help="semente da amostra estratificada")
     ap.add_argument("--out", type=Path, default=Path(__file__).parent.parent / "avaliacoes_antigas" / "resultados")
     ap.add_argument("--dry-run", action="store_true", help="mostra o plano e sai, sem chamar API")
+    ap.add_argument("--smoke", action="store_true", help="valida o RAGAS 0.4 com 1 avaliacao minima (~3 chamadas ao juiz)")
     args = ap.parse_args()
+
+    if args.smoke:
+        await _smoke()
+        return
 
     _validar_sem_placeholder()
     todos = _ler_aba_lotes(args.xlsx)
