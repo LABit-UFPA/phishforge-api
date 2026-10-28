@@ -361,6 +361,20 @@ POOL_DIFICIL: Tuple[CueCode, ...] = (
     CueCode.SENDER_DOMAIN_MISMATCH,
 )
 
+# typosquat e sender_domain_mismatch sao as duas formas de "o dominio
+# do remetente esta errado" -- redundantes juntas, porque so uma pode
+# ser realizada no endereco do remetente de um item
+# (_endereco_e_dominio_da_pista checa sender_domain_mismatch primeiro;
+# a outra ficaria no alvo sem nenhum artefato no e-mail). Facil e medio
+# sorteiam PARES do pool (ver _pistas_alvo) e os dois pools tem as duas
+# pistas, entao o par saia sem querer -- filtrado aqui, antes do ciclo
+# balanceado.
+_PAR_REDUNDANTE_DE_DOMINIO = frozenset({CueCode.TYPOSQUAT, CueCode.SENDER_DOMAIN_MISMATCH})
+
+
+def _pares_sem_redundancia_de_dominio(pool: Tuple[CueCode, ...]) -> List[Tuple[CueCode, CueCode]]:
+    return [par for par in combinations(pool, 2) if frozenset(par) != _PAR_REDUNDANTE_DE_DOMINIO]
+
 
 class _Ciclo:
     """Percorre `valores` embaralhados, sem repetir ate esgotar a lista;
@@ -413,10 +427,12 @@ class VariationSampler:
 
     def _pistas_alvo(self, difficulty: str) -> List[CueCode]:
         if difficulty == "facil":
-            par = self._proximo("pistas_facil", list(combinations(POOL_FACIL, 2)))
+            par = self._proximo("pistas_facil", _pares_sem_redundancia_de_dominio(POOL_FACIL))
             return [PISTA_FIXA_FACIL, *par]
         if difficulty == "medio":
-            return list(self._proximo("pistas_medio", list(combinations(POOL_MEDIO, 2))))
+            return list(
+                self._proximo("pistas_medio", _pares_sem_redundancia_de_dominio(POOL_MEDIO))
+            )
         if difficulty == "dificil":
             return [self._proximo("pistas_dificil", POOL_DIFICIL)]
         raise ValueError(f"dificuldade fora do vocabulario: '{difficulty}'")

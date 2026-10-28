@@ -217,6 +217,14 @@ class RelatorioValidacao(BaseModel):
     # encontradas que nao estavam no alvo. Vazias quando nao ha ficha.
     pistas_alvo_ausentes: List[CueCode] = Field(default_factory=list)
     pistas_fora_do_alvo: List[CueCode] = Field(default_factory=list)
+    # Pistas de dominio (typosquat, sender_domain_mismatch) inseridas
+    # por construcao, nao autoanotadas pelo LLM nem pelo anotador as
+    # cegas -- ver ResponseGenerator
+    # ._completar_pistas_de_dominio_por_construcao. O artefato dessas
+    # pistas fica no remetente ou num link, raramente citado de volta
+    # no corpo, e o prompt pede evidencia como trecho do corpo -- no
+    # piloto 5, 0 de 8 typosquats-alvo saíram autoanotados.
+    cues_completadas_por_construcao: List[CueCode] = Field(default_factory=list)
 
 
 def _normalizar(texto: str) -> str:
