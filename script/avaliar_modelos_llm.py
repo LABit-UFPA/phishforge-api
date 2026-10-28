@@ -23,13 +23,21 @@ O que mudou e por que:
   qualidade do gerador. Idem o modelo de embedding do RAGAS. Ambos
   OpenAI, fixos.
 
-Metricas (reference-free, sem ground truth), coerentes com o que o
-artigo ja reporta:
+Metricas (reference-free, sem ground truth), as MESMAS da Tabela 2 do
+artigo:
 - Relevancia do contexto: os documentos recuperados sao relevantes para
-  a consulta de busca.
-- Relevancia da resposta: o e-mail gerado responde ao cenario pedido.
-- Faithfulness: o e-mail se sustenta nos documentos recuperados.
+  a consulta de busca (qualidade da recuperacao; ~constante entre os
+  modelos, serve de sanidade do pipeline).
+- Relevancia da resposta: o e-mail gerado responde ao cenario pedido
+  (o diferenciador real entre modelos).
 - Tempo medio de geracao (pipeline de ponta a ponta, por item).
+
+NAO usa Faithfulness: ela mede quantas afirmacoes da resposta se
+sustentam no contexto recuperado -- faz sentido em RAG-QA, nao numa
+geracao criativa. O e-mail de phishing e um cenario ficticio que NAO
+deve repetir os artigos academicos, entao faithfulness fica baixo por
+desenho (nao mede a qualidade do gerador). A Tabela 2 do artigo ja
+usava so rel. contexto + rel. resposta.
 
 Mapeamento RAGAS (QA -> geracao), mantido identico ao dos experimentos
 anteriores para os numeros serem comparaveis: user_input = consulta de
@@ -399,6 +407,11 @@ class Avaliador:
                 contexts=contexts,
                 eval_llm=self.eval_llm,
                 eval_embeddings=self.eval_embeddings,
+                # Faithfulness nao se aplica a geracao criativa (o e-mail
+                # ficticio nao deve repetir os artigos recuperados) --
+                # ver docstring de run_ragas_evaluation. A comparacao usa
+                # rel. contexto + rel. resposta (como a Tabela 2 do artigo).
+                incluir_faithfulness=False,
             )
             tempo = (datetime.now() - inicio).total_seconds()
             logger.info(
@@ -490,9 +503,12 @@ def _agregar(resultados: list[ResultadoItem], chave) -> dict:
 
 
 def _tabela_markdown(por_modelo: dict) -> str:
+    # Rel. contexto + rel. resposta + tempo (as mesmas colunas da Tabela
+    # 2 do artigo). Faithfulness fica de fora: nao se aplica a geracao
+    # criativa (ver run_ragas_evaluation).
     linhas = [
-        "| Modelo | Tier | Rel. contexto (%) | Rel. resposta (%) | Faithfulness (%) | Tempo (s) | n |",
-        "|---|---|---|---|---|---|---|",
+        "| Modelo | Tier | Rel. contexto (%) | Rel. resposta (%) | Tempo (s) | n |",
+        "|---|---|---|---|---|---|",
     ]
     def pct(m, d):
         if m is None:
@@ -506,7 +522,6 @@ def _tabela_markdown(por_modelo: dict) -> str:
             f"| {spec.label} | {spec.tier} | "
             f"{pct(a['context_relevance'], a['context_relevance_std'])} | "
             f"{pct(a['response_relevancy'], a['response_relevancy_std'])} | "
-            f"{pct(a['faithfulness'], a['faithfulness_std'])} | "
             f"{a['tempo_s']:.1f} | {a['n']} |"
         )
     return "\n".join(linhas)
@@ -520,6 +535,13 @@ def salvar_relatorio(av: Avaliador, contextos, repeticoes, out_dir: Path) -> Pat
     relatorio = {
         "metadata": {
             "timestamp": datetime.now().isoformat(),
+            "ragas_versao": "0.4.3",
+            "metricas": ["context_relevance", "response_relevancy"],
+            "metricas_nota": (
+                "Faithfulness fora de proposito: nao se aplica a geracao criativa "
+                "(o e-mail ficticio nao deve repetir os artigos recuperados). Mesmas "
+                "metricas da Tabela 2 do artigo (rel. contexto + rel. resposta)."
+            ),
             "modelos": [vars(m) for m in MODELOS_A_TESTAR],
             "juiz_ragas": JUIZ_RAGAS_MODEL,
             "embedding_ragas": JUIZ_RAGAS_EMBEDDING,
@@ -605,19 +627,44 @@ async def _smoke():
     eval_llm = _build_juiz_ragas(client)
     eval_embeddings = embedding_factory("openai", model=JUIZ_RAGAS_EMBEDDING, client=client)
     print(f"[1/2] Smoke do juiz RAGAS 0.4 ({JUIZ_RAGAS_MODEL}) ...")
+    # Par realista (consulta de busca <-> contexto academico <-> e-mail
+    # coerente com o cenario), para as duas metricas usadas (rel.
+    # contexto e rel. resposta) saírem numa faixa representativa -- nao
+    # um toco desalinhado. So demonstra o wiring; nao substitui a
+    # comparacao real sobre os contextos do xlsx. Faithfulness fica de
+    # fora (nao se aplica a geracao criativa; ver run_ragas_evaluation).
+    email_exemplo = (
+        "De: Secretaria Academica <secretaria@uni-exemplo.edu.br>\n"
+        "Para: joao.silva@uni-exemplo.edu.br\n"
+        "Assunto: Pendencia na sua matricula do semestre\n\n"
+        "Prezado Joao,\n\n"
+        "Identificamos uma pendencia de documentacao na sua matricula deste "
+        "semestre. Para evitar o cancelamento da inscricao nas disciplinas, "
+        "regularize seus dados no portal do aluno ate amanha as 18h pelo "
+        "endereco informado abaixo. Em caso de duvida, procure a secretaria.\n\n"
+        "Atenciosamente,\nSecretaria Academica"
+    )
     scores = await run_ragas_evaluation(
-        search_question="phishing email urgency social engineering tactics",
-        generation_question="Write a phishing email about a pending enrollment issue.",
-        expanded_answer="De: secretaria@uni.test\nAssunto: Pendencia\n\nRegularize sua matricula pelo link ate amanha.",
-        full_answer="De: secretaria@uni.test\nAssunto: Pendencia\n\nRegularize sua matricula pelo link ate amanha.",
-        contexts=["Phishing emails often use urgency and a deadline to pressure the victim."],
+        search_question="phishing email pending enrollment urgency deadline credential link",
+        generation_question=(
+            "Write a realistic phishing email, from a university, warning a "
+            "student about a pending enrollment issue that must be resolved via a link."
+        ),
+        expanded_answer=email_exemplo,
+        full_answer=email_exemplo,
+        contexts=[
+            "Phishing emails frequently impersonate a trusted institution and create "
+            "urgency with a short deadline, directing the victim to a link to 'resolve' "
+            "a pending issue and disclose credentials."
+        ],
         eval_llm=eval_llm,
         eval_embeddings=eval_embeddings,
+        incluir_faithfulness=False,
     )
-    print("    Resultado:", scores)
+    print("    Resultado (rel. contexto / rel. resposta):", scores)
     if scores.get("error"):
         raise SystemExit(f"Smoke do juiz FALHOU: {scores['error']}")
-    faltando = [k for k in ("context_relevance", "faithfulness", "response_relevancy") if scores.get(k) is None]
+    faltando = [k for k in ("context_relevance", "response_relevancy") if scores.get(k) is None]
     if faltando:
         raise SystemExit(f"Smoke do juiz incompleto -- metricas sem nota: {faltando}")
 

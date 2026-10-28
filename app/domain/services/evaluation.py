@@ -30,6 +30,7 @@ async def run_ragas_evaluation(
     contexts: list[str],
     eval_llm: Any,
     eval_embeddings: Any,
+    incluir_faithfulness: bool = True,
 ) -> dict:
     """
     Executa avaliação RAGAS - TUDO EM INGLÊS.
@@ -45,10 +46,18 @@ async def run_ragas_evaluation(
     Métricas:
     - Context Relevance: os contextos recuperados sao relevantes para a
       consulta de busca. Precisa de contexto -> None se nao houver.
-    - Faithfulness: a resposta se sustenta nos contextos. Precisa de
-      contexto -> None se nao houver.
     - Answer/Response Relevancy: a resposta responde ao cenario pedido.
       Nao usa contexto (so user_input + response), mas usa embeddings.
+    - Faithfulness (OPCIONAL, default ligado por compatibilidade): mede
+      quantas afirmacoes da resposta se sustentam no contexto. Faz
+      sentido em RAG-QA, NAO numa geracao criativa: o e-mail de phishing
+      e um cenario ficticio que nao deve repetir os artigos academicos
+      recuperados, entao faithfulness fica baixo por desenho e nao mede
+      qualidade do gerador. A comparacao de modelos passa
+      `incluir_faithfulness=False` (ver script/avaliar_modelos_llm.py);
+      a propria Tabela 2 do artigo ja usava so rel. contexto + rel.
+      resposta. Mantido como opcao para quem avalia um fluxo RAG-QA de
+      verdade.
     """
     resultado = {
         "context_relevance": None,
@@ -60,19 +69,20 @@ async def run_ragas_evaluation(
 
         if tem_contexto:
             context_scorer = ContextRelevance(llm=eval_llm)
-            faithfulness_scorer = Faithfulness(llm=eval_llm)
             resultado["context_relevance"] = _valor(
                 await context_scorer.ascore(
                     user_input=search_question, retrieved_contexts=contexts
                 )
             )
-            resultado["faithfulness"] = _valor(
-                await faithfulness_scorer.ascore(
-                    user_input=search_question,
-                    response=full_answer,
-                    retrieved_contexts=contexts,
+            if incluir_faithfulness:
+                faithfulness_scorer = Faithfulness(llm=eval_llm)
+                resultado["faithfulness"] = _valor(
+                    await faithfulness_scorer.ascore(
+                        user_input=search_question,
+                        response=full_answer,
+                        retrieved_contexts=contexts,
+                    )
                 )
-            )
 
         relevancy_scorer = AnswerRelevancy(llm=eval_llm, embeddings=eval_embeddings)
         resultado["response_relevancy"] = _valor(
