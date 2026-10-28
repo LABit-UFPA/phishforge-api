@@ -1,8 +1,9 @@
 import logging
 
 from langchain_core.prompts import PromptTemplate
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
+
+from app.domain.services.llm_factory import PROVIDER_OPENAI, build_chat_model
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +18,24 @@ class NormalizedQuery(BaseModel):
 
 
 class PromptNormalizer:
-    def __init__(self, api_key: str, model_name: str = "gpt-4o-mini"):
+    def __init__(
+        self,
+        api_key: str,
+        model_name: str = "gpt-4o-mini",
+        provider: str = PROVIDER_OPENAI,
+        anthropic_api_key: str = "",
+    ):
+        # `api_key` e a chave OpenAI (nome mantido para nao quebrar
+        # chamadores antigos). `provider`/`anthropic_api_key` permitem o
+        # normalizador seguir o mesmo provider do gerador (LLM_PROVIDER).
         self.model_name = model_name
-        self.llm = ChatOpenAI(
-            model_name=model_name, api_key=api_key, temperature=0.0
+        self.provider = provider
+        self.llm = build_chat_model(
+            provider,
+            model_name,
+            openai_api_key=api_key,
+            anthropic_api_key=anthropic_api_key,
+            temperature=0.0,
         ).with_structured_output(NormalizedQuery)
 
         self.prompt_template = PromptTemplate(

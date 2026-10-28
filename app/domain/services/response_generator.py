@@ -35,8 +35,8 @@ from app.domain.services.item_validation import (
     remover_pistas_de_dominio_sem_dominio,
     remover_saudacao_generica_falsa,
 )
+from app.domain.services.llm_factory import PROVIDER_OPENAI, build_chat_model
 from app.domain.services.variation_sampler import renderizar_ficha
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
 # Teto de tokens de saida das chamadas de geracao e de anotacao (piloto
@@ -361,15 +361,48 @@ class ResponseGenerator:
         self,
         api_key: str,
         model_name: str = "gpt-4o-mini",
-        temperature: float = 0.7,
+        temperature: Optional[float] = 0.7,
         anotacao_cega: bool = False,
         max_tokens_geracao: int = _MAX_TOKENS_GERACAO_PADRAO,
         max_tokens_anotacao: int = _MAX_TOKENS_ANOTACAO_PADRAO,
+        provider: str = PROVIDER_OPENAI,
+        anthropic_api_key: str = "",
     ):
         # Guardados para o lote registrar com que modelo/temperatura os
         # itens foram gerados (generation_jobs.run_metadata).
         self.model_name = model_name
         self.temperature = temperature
+        self.provider = provider
+        # `api_key` e a chave OpenAI (nome mantido para nao quebrar os
+        # chamadores e testes antigos, que passam so `api_key=`). Com
+        # provider=anthropic, o LLM de geracao usa `anthropic_api_key`;
+        # a chave OpenAI segue valendo para quem precisar (embedding).
+        # Todas as chains de geracao (anotacao, item, HyDE/fusao via
+        # text_llm e os 5 canais) passam pelo mesmo provider -- ver
+        # llm_factory.build_chat_model.
+        #
+        # `temperature=None` => modelo de reasoning (OpenAI o-series e
+        # alguns GPT-5), que rejeita `temperature != 1`. Nesse modo
+        # TODAS as sub-chains omitem temperature (inclusive as que
+        # usariam 0.0/0.2): `_temp` abaixo zera o valor fixo quando a
+        # temperatura base e None, para o item comparavel na avaliacao
+        # nao quebrar na chamada.
+        modo_reasoning = temperature is None
+
+        def _temp(valor_fixo):
+            return None if modo_reasoning else valor_fixo
+
+        def _chat(temperatura, max_tokens=None):
+            return build_chat_model(
+                provider,
+                model_name,
+                openai_api_key=api_key,
+                anthropic_api_key=anthropic_api_key,
+                temperature=temperatura,
+                max_tokens=max_tokens,
+            )
+
+        self._chat = _chat
         # Piloto 2: com o gerador anotando as proprias pistas sabendo as
         # pistas-alvo, as anotadas coincidiram 100% com o alvo mesmo
         # quando o texto nao as sustentava. Ligado, `cues` e
@@ -377,21 +410,14 @@ class ResponseGenerator:
         # item pronto. Default False aqui (testes antigos); o container
         # liga pelo config (ANOTACAO_CEGA).
         self.anotacao_cega = anotacao_cega
-        self.annotation_llm = ChatOpenAI(
-            model_name=model_name, api_key=api_key, temperature=0.0, max_tokens=max_tokens_anotacao
-        ).with_structured_output(AnotacaoCega)
-        self.llm = ChatOpenAI(
-            model_name=model_name,
-            api_key=api_key,
-            temperature=temperature,
-            max_tokens=max_tokens_geracao,
-        ).with_structured_output(GeneratedItemDraft)
-
-        self.text_llm = ChatOpenAI(
-            model_name=model_name,
-            api_key=api_key,
-            temperature=0.2
+        self.annotation_llm = _chat(_temp(0.0), max_tokens_anotacao).with_structured_output(
+            AnotacaoCega
         )
+        self.llm = _chat(temperature, max_tokens_geracao).with_structured_output(
+            GeneratedItemDraft
+        )
+
+        self.text_llm = _chat(_temp(0.2))
 
         self.prompt_template = PromptTemplate(
             input_variables=["context", "difficulty", "relevant_docs", "variacao", "data_atual"],
@@ -726,28 +752,23 @@ class ResponseGenerator:
         # ja usa (#3), so que schemas diferentes (WebsiteItemDraft,
         # PhoneCallItemDraft, PixQrItemDraft) em vez de reusar
         # GeneratedItemDraft, que fica intocado por esta issue.
-        self.website_llm = ChatOpenAI(
-            model_name=model_name, api_key=api_key, temperature=temperature,
-            max_tokens=max_tokens_geracao,
-        ).with_structured_output(WebsiteItemDraft)
-        self.phone_call_llm = ChatOpenAI(
-            model_name=model_name, api_key=api_key, temperature=temperature,
-            max_tokens=max_tokens_geracao,
-        ).with_structured_output(PhoneCallItemDraft)
-        self.pix_qr_llm = ChatOpenAI(
-            model_name=model_name, api_key=api_key, temperature=temperature,
-            max_tokens=max_tokens_geracao,
-        ).with_structured_output(PixQrItemDraft)
+        self.website_llm = _chat(temperature, max_tokens_geracao).with_structured_output(
+            WebsiteItemDraft
+        )
+        self.phone_call_llm = _chat(temperature, max_tokens_geracao).with_structured_output(
+            PhoneCallItemDraft
+        )
+        self.pix_qr_llm = _chat(temperature, max_tokens_geracao).with_structured_output(
+            PixQrItemDraft
+        )
         # sms/whatsapp (issue #6, desbloqueados pela phishing-quest-api
         # #68): mesma separacao de LLM/prompt por canal dos 3 acima.
-        self.sms_llm = ChatOpenAI(
-            model_name=model_name, api_key=api_key, temperature=temperature,
-            max_tokens=max_tokens_geracao,
-        ).with_structured_output(SmsItemDraft)
-        self.whatsapp_llm = ChatOpenAI(
-            model_name=model_name, api_key=api_key, temperature=temperature,
-            max_tokens=max_tokens_geracao,
-        ).with_structured_output(WhatsAppItemDraft)
+        self.sms_llm = _chat(temperature, max_tokens_geracao).with_structured_output(
+            SmsItemDraft
+        )
+        self.whatsapp_llm = _chat(temperature, max_tokens_geracao).with_structured_output(
+            WhatsAppItemDraft
+        )
 
         _campos_canal = "content, explicacao, categoria"
 

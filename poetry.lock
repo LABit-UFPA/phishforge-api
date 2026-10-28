@@ -139,6 +139,34 @@ files = [
 ]
 
 [[package]]
+name = "anthropic"
+version = "0.85.0"
+description = "The official Python library for the anthropic API"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "anthropic-0.85.0-py3-none-any.whl", hash = "sha256:b4f54d632877ed7b7b29c6d9ba7299d5e21c4c92ae8de38947e9d862bff74adf"},
+    {file = "anthropic-0.85.0.tar.gz", hash = "sha256:d45b2f38a1efb1a5d15515a426b272179a0d18783efa2bb4c3925fa773eb50b9"},
+]
+
+[package.dependencies]
+anyio = ">=3.5.0,<5"
+distro = ">=1.7.0,<2"
+docstring-parser = ">=0.15,<1"
+httpx = ">=0.25.0,<1"
+jiter = ">=0.4.0,<1"
+pydantic = ">=1.9.0,<3"
+sniffio = "*"
+typing-extensions = ">=4.10,<5"
+
+[package.extras]
+aiohttp = ["aiohttp", "httpx-aiohttp (>=0.1.9)"]
+bedrock = ["boto3 (>=1.28.57)", "botocore (>=1.31.57)"]
+mcp = ["mcp (>=1.0) ; python_version >= \"3.10\""]
+vertex = ["google-auth[requests] (>=2,<3)"]
+
+[[package]]
 name = "anyio"
 version = "4.8.0"
 description = "High level compatibility layer for multiple asynchronous event loop implementations"
@@ -693,7 +721,7 @@ version = "0.17.0"
 description = "Parse Python docstrings in reST, Google and Numpydoc format"
 optional = false
 python-versions = ">=3.8"
-groups = ["evaluation"]
+groups = ["main", "evaluation"]
 files = [
     {file = "docstring_parser-0.17.0-py3-none-any.whl", hash = "sha256:cf2569abd23dce8099b300f9b4fa8191e9582dda731fd533daf54c4551658708"},
     {file = "docstring_parser-0.17.0.tar.gz", hash = "sha256:583de4a309722b3315439bb31d64ba3eebada841f2e2cee23b99df001434c912"},
@@ -1530,6 +1558,23 @@ PyYAML = ">=5.3"
 requests = ">=2,<3"
 SQLAlchemy = ">=1.4,<3"
 tenacity = ">=8.1.0,<8.4.0 || >8.4.0,<10"
+
+[[package]]
+name = "langchain-anthropic"
+version = "0.3.18"
+description = "An integration package connecting AnthropicMessages and LangChain"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "langchain_anthropic-0.3.18-py3-none-any.whl", hash = "sha256:1be6ece317f08b3d780671fd4425b1dd05fd291a751e3debe3d4704bcf785082"},
+    {file = "langchain_anthropic-0.3.18.tar.gz", hash = "sha256:f18970ae58fc4d79c8431dd67f8ab777de5e6d2f92285c8c9af1999cd126fb0a"},
+]
+
+[package.dependencies]
+anthropic = ">=0.60.0,<1"
+langchain-core = ">=0.3.72,<1.0.0"
+pydantic = ">=2.7.4,<3.0.0"
 
 [[package]]
 name = "langchain-community"
@@ -5014,4 +5059,4 @@ cffi = ["cffi (>=1.11)"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<4.0"
-content-hash = "da342b51072ac028b03246980e95f99f52cb35452eccbad999dc1bdc45281590"
+content-hash = "4cdb486110d6c6f8895331f113717f1d5fc1d89c10c46bb59109553ca69d0b3b"
