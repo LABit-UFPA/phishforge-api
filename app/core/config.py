@@ -75,6 +75,22 @@ class Settings(BaseSettings):
     # chave de modelo.
     ANTHROPIC_API_KEY: str = ""
 
+    # Concorrencia da geracao de um lote (item 6 do plano de producao): o
+    # Sonnet 4.6 leva ~124 s por item, entao 3.000 itens em serie seriam
+    # ~104 h. Com N itens gerando em paralelo (semaforo), o lote de 50 cai
+    # para minutos. O dedup e o balanceamento de ficha continuam corretos
+    # porque a decisao de aceite roda em secao sincrona (atomica no asyncio)
+    # -- ver BatchGenerationWorker. 1 = geracao serial (comportamento antigo).
+    BATCH_CONCURRENCY: int = 8
+
+    # Backoff exponencial quando a API do provider responde 429 (limite de
+    # taxa) ou 529 (sobrecarga): espera BASE, 2*BASE, 4*BASE... ate
+    # BATCH_MAX_TENTATIVAS_TAXA tentativas; depois o erro fica VISIVEL (o
+    # item falha, nao e silenciado). So reusa a geracao, nao conta como
+    # regeneracao de item invalido nem como descarte por duplicidade.
+    BATCH_BACKOFF_BASE_SECONDS: float = 2.0
+    BATCH_MAX_TENTATIVAS_TAXA: int = 5
+
     # Limiar de similaridade de cosseno (0..1) acima do qual dois itens
     # do MESMO lote sao considerados quase-duplicados (issue #11b).
     # Com o mesmo context/dificuldade/documentos, a unica variacao
