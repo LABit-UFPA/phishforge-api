@@ -17,32 +17,31 @@ O que mudou e por que:
   provider do ResponseGenerator/PromptNormalizer. E o que a decisao de
   producao faz (LLM_PROVIDER vale para todas as etapas de geracao),
   entao a comparacao mede o que producao realmente faria com cada modelo.
-- **Juiz fixo.** O avaliador RAGAS (o LLM que pontua) e UM so modelo,
-  igual para todos os testados, e NAO e nenhum dos testados -- senao a
-  comparacao mediria vies de auto-preferencia e variacao do juiz, nao a
-  qualidade do gerador. Idem o modelo de embedding do RAGAS. Ambos
-  OpenAI, fixos.
+- **Juiz duplo na rubrica (anti-vies de vendor).** A comparacao e
+  cross-vendor (2 geradores OpenAI x 2 Anthropic). Um juiz unico de um
+  fornecedor tende a favorecer saidas do proprio fornecedor, enviesando
+  a nota. Entao a RUBRICA de qualidade e pontuada por DOIS juizes fixos,
+  um de cada fornecedor (OpenAI e Anthropic), ambos distintos dos
+  modelos testados e de capacidade comparavel. Reportamos a nota de cada
+  juiz, o ranking dos modelos sob cada um e a concordancia (Spearman +
+  rankings identicos?): ranking estavel entre juizes => o vies nao
+  dirige o resultado; ranking divergente => a divergencia e o achado.
 
-Metricas (reference-free, sem ground truth), as MESMAS da Tabela 2 do
-artigo:
-- Relevancia do contexto: os documentos recuperados sao relevantes para
-  a consulta de busca (qualidade da recuperacao; ~constante entre os
-  modelos, serve de sanidade do pipeline).
-- Relevancia da resposta: o e-mail gerado responde ao cenario pedido
-  (o diferenciador real entre modelos).
-- Tempo medio de geracao (pipeline de ponta a ponta, por item).
+Metricas:
+- **Qualidade (rubrica 1-5)** -- o diferenciador do gerador: o juiz da
+  uma nota ao e-mail por criterios explicitos (ver avaliar_qualidade_
+  rubrica), ciente do cenario e do nivel. Pontuada pelos DOIS juizes.
+- **Relevancia do contexto** -- qualidade da recuperacao (~constante
+  entre modelos, mesmo retriever); juiz UNICO (OpenAI), pois vies de
+  vendor ali e irrelevante. Serve de sanidade do pipeline.
+- **Tempo** medio de geracao (pipeline de ponta a ponta, por item).
 
-NAO usa Faithfulness: ela mede quantas afirmacoes da resposta se
-sustentam no contexto recuperado -- faz sentido em RAG-QA, nao numa
-geracao criativa. O e-mail de phishing e um cenario ficticio que NAO
-deve repetir os artigos academicos, entao faithfulness fica baixo por
-desenho (nao mede a qualidade do gerador). A Tabela 2 do artigo ja
-usava so rel. contexto + rel. resposta.
-
-Mapeamento RAGAS (QA -> geracao), mantido identico ao dos experimentos
-anteriores para os numeros serem comparaveis: user_input = consulta de
-busca (contexto) / cenario de geracao (resposta); retrieved_contexts =
-top-N documentos pos-rerank; response = e-mail gerado.
+NAO usa Faithfulness nem Answer Relevancy: sao metricas de RAG-QA (a
+resposta ancorada no contexto / respondendo a uma pergunta). Na nossa
+tarefa (instrucao -> e-mail ficticio) faithfulness fica baixo por
+desenho e answer relevancy e ruidosa (o user_input e instrucao, nao
+pergunta -- um e-mail melhor chegou a pontuar MENOS). Por isso a
+qualidade e medida por rubrica, nao por essas metricas.
 
 Como rodar. O RAGAS fica no grupo opcional `evaluation` (nao entra na
 imagem de producao), entao instale COM esse grupo; o langchain-anthropic
@@ -59,10 +58,10 @@ juiz via `llm_factory` e embeddings via `embedding_factory`). A versao do
 RAGAS e parte do instrumento de medicao -- registre-a no artigo junto do
 juiz e do embedding.
 
-Os ids dos modelos (MODELOS_A_TESTAR) e do juiz (JUIZ_RAGAS_MODEL) ja
-estao preenchidos no topo deste arquivo. Se precisar trocar, use o id
-EXATO da API (nome comercial nao e id de API); o script valida que o
-juiz nao coincide com nenhum modelo testado.
+Os ids dos modelos (MODELOS_A_TESTAR) e dos juizes (JUIZ_RUBRICA_OPENAI
+e JUIZ_RUBRICA_ANTHROPIC) ja estao preenchidos no topo deste arquivo. Se
+precisar trocar, use o id EXATO da API (nome comercial nao e id de API);
+o script valida que nenhum juiz coincide com um modelo testado.
 """
 
 import argparse
@@ -80,6 +79,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 from qdrant_client import QdrantClient
 from ragas.embeddings.base import embedding_factory
@@ -141,11 +141,29 @@ MODELOS_A_TESTAR: list[ModelSpec] = [
     ModelSpec("Claude Sonnet 5.5", "medio", PROVIDER_ANTHROPIC, "claude-sonnet-5-5"),
 ]
 
-# Juiz RAGAS: FIXO e igual para todos, distinto dos dois tiers testados
-# (evita vies de auto-preferencia). ~$5/$30 por 1M.
-JUIZ_RAGAS_MODEL = "gpt-5.5"
+# Juizes da RUBRICA de qualidade: DOIS fixos, um de cada fornecedor,
+# ambos distintos dos modelos testados e de capacidade comparavel. A
+# comparacao e cross-vendor (2 geradores OpenAI x 2 Anthropic); um juiz
+# unico de um fornecedor tende a favorecer as saidas do proprio
+# fornecedor (self-preference de vendor), enviesando a nota. Com um juiz
+# de cada lado medimos cada modelo pelos dois e olhamos se o RANKING se
+# mantem -- ranking estavel => o vies nao dirige o resultado.
+JUIZ_RUBRICA_OPENAI = "gpt-5.5"           # ~$5/$30 por 1M
+JUIZ_RUBRICA_ANTHROPIC = "claude-opus-5-5"  # flagship, nao e nenhum dos testados
 
-# Embedding do RAGAS (Response Relevancy), fixo e igual para todos.
+# Juiz de context_relevance e o embedding: UNICO (OpenAI). Context
+# relevance mede recuperacao (~constante entre modelos, mesmo retriever),
+# nao qualidade de geracao -- vies de vendor ali e irrelevante, nao
+# precisa de juiz duplo.
+JUIZ_CONTEXT_RELEVANCE = JUIZ_RUBRICA_OPENAI
+
+# Versao dos criterios da rubrica (o artigo precisa citar o instrumento
+# completo: versao do RAGAS + ids dos juizes + embedding + versao da
+# rubrica). Bump a cada mudanca nos criterios de _RUBRICA_QUALIDADE.
+RUBRICA_VERSAO = "2026-10-28-v1"
+
+# Embedding do RAGAS, fixo e igual para todos (usado por context_relevance
+# e, se ligado, por answer relevancy).
 JUIZ_RAGAS_EMBEDDING = "text-embedding-3-large"
 
 # Embedding da BASE vetorial (retrieve) -- o mesmo com que a colecao foi
@@ -284,14 +302,18 @@ class ResultadoItem:
     cenario: str
     repeticao: int
     context_relevance: Optional[float]  # recuperacao (sanidade do pipeline)
-    qualidade: Optional[float]  # rubrica 1-5 (diferenciador do gerador)
-    qualidade_justificativa: Optional[str]
+    # Rubrica 1-5 por DOIS juizes (um de cada fornecedor) -- diferenciador
+    # do gerador, blindado contra self-preference de vendor.
+    qualidade_openai: Optional[float]
+    qualidade_anthropic: Optional[float]
+    qualidade_justificativa_openai: Optional[str]
+    qualidade_justificativa_anthropic: Optional[str]
     tempo_s: float
     erro: Optional[str] = None
 
 
-def _build_juiz_ragas(client):
-    """Juiz RAGAS (llm_factory) com correcao do bug de deteccao da
+def _build_juiz_openai(model: str, client):
+    """Juiz RAGAS OpenAI (llm_factory) com correcao do bug de deteccao da
     ragas 0.4.3: para um modelo com minor version no nome (ex.:
     `gpt-5.5`), o `is_reasoning_model` da ragas faz `int("5.5")` ->
     ValueError e NAO mapeia `max_tokens` -> `max_completion_tokens`,
@@ -301,14 +323,47 @@ def _build_juiz_ragas(client):
     mao: `max_completion_tokens` no lugar de `max_tokens`,
     `temperature=1` (unico aceito) e sem `top_p`.
     """
-    juiz = llm_factory(JUIZ_RAGAS_MODEL, client=client)
-    if openai_exige_max_completion_tokens(JUIZ_RAGAS_MODEL):
+    juiz = llm_factory(model, client=client)
+    if openai_exige_max_completion_tokens(model):
         args = getattr(juiz, "model_args", None)
         if isinstance(args, dict):
             max_t = args.pop("max_tokens", 1024)
             args.setdefault("max_completion_tokens", max_t)
             args.pop("top_p", None)
             args["temperature"] = 1.0
+    return juiz
+
+
+def _build_juiz_anthropic(model: str, raw_client):
+    """Juiz RAGAS Anthropic.
+
+    NAO usa `llm_factory(provider='anthropic')`: para anthropic o ragas
+    0.4.3 chama `instructor.from_anthropic(client)` SEM `mode`, caindo no
+    default ANTHROPIC_TOOLS (tool_choice forcado), que modelos como
+    `claude-opus-5-5` rejeitam (HTTP 400: "tool_choice type 'tool'/'any'
+    not supported for this model"). O `mode=` do llm_factory e ignorado
+    nesse ramo.
+
+    Entao montamos a mesma classe (InstructorLLM) na mao, com o cliente
+    instructor em modo JSON (prefill, sem tool_choice). O bug do
+    `int("5.5")` nao afeta aqui: `_map_openai_params` so roda para
+    provider openai/azure; anthropic faz pass-through dos model_args
+    (temperature/top_p/max_tokens), todos aceitos pela API da Anthropic.
+    """
+    import instructor
+    from ragas.llms.base import InstructorLLM
+
+    patched = instructor.from_anthropic(raw_client, mode=instructor.Mode.ANTHROPIC_JSON)
+    juiz = InstructorLLM(client=patched, model=model, provider=PROVIDER_ANTHROPIC)
+    # Modelos de reasoning da Anthropic (claude-opus-5-5) depreciam
+    # `temperature` (e `top_p`): a API recusa com 400. O pass-through dos
+    # model_args enviaria o default 0.01 -- removemos os dois (max_tokens
+    # fica: a API da Anthropic sempre exige). Mesma ideia do patch do
+    # juiz OpenAI gpt-5.5.
+    args = getattr(juiz, "model_args", None)
+    if isinstance(args, dict):
+        args.pop("temperature", None)
+        args.pop("top_p", None)
     return juiz
 
 
@@ -329,15 +384,22 @@ class Avaliador:
         )
         self.reranker = ReRanker()
 
-        # Juiz RAGAS fixo (nao e nenhum modelo testado), na API nativa do
-        # RAGAS 0.4: as metricas de `collections` chamam `.agenerate` no
-        # LLM do `llm_factory` e usam o embedding do `embedding_factory`
-        # -- os wrappers Langchain da 0.3 nao servem para elas.
-        judge_client = AsyncOpenAI(api_key=self.openai_key)
-        self.eval_llm = _build_juiz_ragas(judge_client)
+        # Juizes RAGAS (API nativa 0.4: as metricas/rubrica chamam
+        # `.agenerate` no LLM do `llm_factory`; o embedding vem do
+        # `embedding_factory`). A RUBRICA e pontuada pelos DOIS (um de
+        # cada fornecedor). context_relevance usa so o OpenAI.
+        openai_client = AsyncOpenAI(api_key=self.openai_key)
+        self.juiz_openai = _build_juiz_openai(JUIZ_RUBRICA_OPENAI, openai_client)
         self.eval_embeddings = embedding_factory(
-            "openai", model=JUIZ_RAGAS_EMBEDDING, client=judge_client
+            "openai", model=JUIZ_RAGAS_EMBEDDING, client=openai_client
         )
+        # context_relevance usa o juiz OpenAI (unico).
+        self.eval_llm = self.juiz_openai
+
+        if not self.anthropic_key:
+            raise SystemExit("ANTHROPIC_API_KEY nao configurada (.env) -- juiz duplo exige.")
+        anthropic_client = AsyncAnthropic(api_key=self.anthropic_key)
+        self.juiz_anthropic = _build_juiz_anthropic(JUIZ_RUBRICA_ANTHROPIC, anthropic_client)
 
         self.resultados: list[ResultadoItem] = []
 
@@ -417,29 +479,39 @@ class Avaliador:
                 incluir_faithfulness=False,
                 incluir_response_relevancy=False,
             )
-            qual = await avaliar_qualidade_rubrica(
-                self.eval_llm, cenario=ctx.texto, nivel=ctx.nivel, email=so_corpo
+            # Rubrica pontuada pelos DOIS juizes (um de cada fornecedor),
+            # para blindar contra self-preference de vendor.
+            qual_o = await avaliar_qualidade_rubrica(
+                self.juiz_openai, cenario=ctx.texto, nivel=ctx.nivel, email=so_corpo
+            )
+            qual_a = await avaliar_qualidade_rubrica(
+                self.juiz_anthropic, cenario=ctx.texto, nivel=ctx.nivel, email=so_corpo
             )
             tempo = (datetime.now() - inicio).total_seconds()
             logger.info(
-                "OK %s | %s %s %s rep%d | cr=%s qual=%s t=%.1fs",
+                "OK %s | %s %s %s rep%d | cr=%s qual(o/a)=%s/%s t=%.1fs",
                 spec.label, ctx.eixo, ctx.nivel, ctx.cenario, repeticao,
-                _fmt(scores.get("context_relevance")), _fmt(qual.get("qualidade")),
+                _fmt(scores.get("context_relevance")),
+                _fmt(qual_o.get("qualidade")), _fmt(qual_a.get("qualidade")),
                 tempo,
             )
             return ResultadoItem(
                 **base,
                 context_relevance=scores.get("context_relevance"),
-                qualidade=qual.get("qualidade"),
-                qualidade_justificativa=qual.get("qualidade_justificativa"),
+                qualidade_openai=qual_o.get("qualidade"),
+                qualidade_anthropic=qual_a.get("qualidade"),
+                qualidade_justificativa_openai=qual_o.get("qualidade_justificativa"),
+                qualidade_justificativa_anthropic=qual_a.get("qualidade_justificativa"),
                 tempo_s=tempo,
             )
         except Exception as e:
             tempo = (datetime.now() - inicio).total_seconds()
             logger.error("ERRO %s | %s %s %s: %s", spec.label, ctx.eixo, ctx.nivel, ctx.cenario, e)
             return ResultadoItem(
-                **base, context_relevance=None, qualidade=None,
-                qualidade_justificativa=None, tempo_s=tempo, erro=str(e),
+                **base, context_relevance=None,
+                qualidade_openai=None, qualidade_anthropic=None,
+                qualidade_justificativa_openai=None, qualidade_justificativa_anthropic=None,
+                tempo_s=tempo, erro=str(e),
             )
 
     async def rodar(self, contextos: list[Contexto], repeticoes: int):
@@ -495,26 +567,103 @@ def _agregar(resultados: list[ResultadoItem], chave) -> dict:
     for g, rs in grupos.items():
         ok = [r for r in rs if r.erro is None]
         cr_m, cr_d = _media_desvio([r.context_relevance for r in ok])
-        q_m, q_d = _media_desvio([r.qualidade for r in ok])
+        qo_m, qo_d = _media_desvio([r.qualidade_openai for r in ok])
+        qa_m, qa_d = _media_desvio([r.qualidade_anthropic for r in ok])
         t_m, _ = _media_desvio([r.tempo_s for r in ok])
         saida[g] = {
             "n": len(ok),
             "erros": len(rs) - len(ok),
             "context_relevance": cr_m, "context_relevance_std": cr_d,
-            "qualidade": q_m, "qualidade_std": q_d,
+            "qualidade_openai": qo_m, "qualidade_openai_std": qo_d,
+            "qualidade_anthropic": qa_m, "qualidade_anthropic_std": qa_d,
+            # Media dos dois juizes: nota "consenso" por modelo.
+            "qualidade_media_juizes": (
+                (qo_m + qa_m) / 2 if (qo_m is not None and qa_m is not None) else None
+            ),
             "tempo_s": t_m,
         }
     return saida
 
 
+def _spearman(pares: list[tuple[float, float]]) -> Optional[float]:
+    """Correlacao de Spearman (rho) entre duas series pareadas, com
+    ranks medios para empates (notas 1-5 empatam muito). None quando ha
+    menos de 2 pares ou variancia zero. Implementada na mao para nao
+    depender de scipy.
+    """
+    pares = [(a, b) for a, b in pares if isinstance(a, (int, float)) and isinstance(b, (int, float))]
+    if len(pares) < 2:
+        return None
+
+    def ranks(valores: list[float]) -> list[float]:
+        ordenado = sorted(range(len(valores)), key=lambda i: valores[i])
+        r = [0.0] * len(valores)
+        i = 0
+        while i < len(ordenado):
+            j = i
+            while j + 1 < len(ordenado) and valores[ordenado[j + 1]] == valores[ordenado[i]]:
+                j += 1
+            rank_medio = (i + j) / 2 + 1  # ranks de 1..n, media no empate
+            for k in range(i, j + 1):
+                r[ordenado[k]] = rank_medio
+            i = j + 1
+        return r
+
+    xa = ranks([a for a, _ in pares])
+    xb = ranks([b for _, b in pares])
+    n = len(pares)
+    ma, mb = sum(xa) / n, sum(xb) / n
+    cov = sum((xa[i] - ma) * (xb[i] - mb) for i in range(n))
+    va = sum((xa[i] - ma) ** 2 for i in range(n)) ** 0.5
+    vb = sum((xb[i] - mb) ** 2 for i in range(n)) ** 0.5
+    if va == 0 or vb == 0:
+        return None
+    return cov / (va * vb)
+
+
+def _concordancia_juizes(resultados: list[ResultadoItem]) -> dict:
+    """Concordancia entre os dois juizes na rubrica: Spearman das notas
+    por item, taxa de concordancia exata (mesma nota 1-5), e os rankings
+    dos modelos sob cada juiz -- com a leitura central do metodo: se o
+    ranking dos 4 modelos e o mesmo sob os dois juizes, o vies de vendor
+    nao esta dirigindo o resultado.
+    """
+    ok = [
+        r for r in resultados
+        if r.erro is None and r.qualidade_openai is not None and r.qualidade_anthropic is not None
+    ]
+    pares = [(r.qualidade_openai, r.qualidade_anthropic) for r in ok]
+    rho = _spearman(pares)
+    exata = (
+        sum(1 for a, b in pares if a == b) / len(pares) if pares else None
+    )
+
+    por_modelo = _agregar(ok, lambda r: r.label)
+    def ranking(chave_nota: str) -> list[str]:
+        itens = [(lbl, a[chave_nota]) for lbl, a in por_modelo.items() if a[chave_nota] is not None]
+        return [lbl for lbl, _ in sorted(itens, key=lambda t: t[1], reverse=True)]
+
+    rank_openai = ranking("qualidade_openai")
+    rank_anthropic = ranking("qualidade_anthropic")
+    return {
+        "n_itens": len(pares),
+        "spearman_notas_por_item": rho,
+        "concordancia_exata": exata,
+        "ranking_juiz_openai": rank_openai,
+        "ranking_juiz_anthropic": rank_anthropic,
+        "rankings_identicos": rank_openai == rank_anthropic and bool(rank_openai),
+    }
+
+
 def _tabela_markdown(por_modelo: dict) -> str:
-    # Qualidade (rubrica 1-5, o diferenciador do gerador) + rel. contexto
+    # Qualidade (rubrica 1-5) pontuada pelos DOIS juizes + rel. contexto
     # (recuperacao / sanidade do pipeline) + tempo. Faithfulness e answer
     # relevancy ficam de fora (metricas de RAG-QA, ver run_ragas_evaluation
     # e a rubrica).
     linhas = [
-        "| Modelo | Tier | Qualidade (1-5) | Rel. contexto (%) | Tempo (s) | n |",
-        "|---|---|---|---|---|---|",
+        "| Modelo | Tier | Qual. juiz OpenAI (1-5) | Qual. juiz Anthropic (1-5) "
+        "| Rel. contexto (%) | Tempo (s) | n |",
+        "|---|---|---|---|---|---|---|",
     ]
     def pct(m, d):
         if m is None:
@@ -530,10 +679,28 @@ def _tabela_markdown(por_modelo: dict) -> str:
             continue
         linhas.append(
             f"| {spec.label} | {spec.tier} | "
-            f"{nota(a['qualidade'], a['qualidade_std'])} | "
+            f"{nota(a['qualidade_openai'], a['qualidade_openai_std'])} | "
+            f"{nota(a['qualidade_anthropic'], a['qualidade_anthropic_std'])} | "
             f"{pct(a['context_relevance'], a['context_relevance_std'])} | "
             f"{a['tempo_s']:.1f} | {a['n']} |"
         )
+    return "\n".join(linhas)
+
+
+def _bloco_concordancia(conc: dict) -> str:
+    def f3(v):
+        return f"{v:.3f}" if isinstance(v, (int, float)) else "—"
+    linhas = [
+        "## Concordancia entre juizes (rubrica)",
+        f"- Spearman das notas por item: {f3(conc['spearman_notas_por_item'])} "
+        f"(n={conc['n_itens']})",
+        f"- Concordancia exata (mesma nota 1-5): "
+        f"{f3(conc['concordancia_exata'] * 100) if conc['concordancia_exata'] is not None else '—'}%",
+        f"- Ranking sob o juiz OpenAI:    {' > '.join(conc['ranking_juiz_openai']) or '—'}",
+        f"- Ranking sob o juiz Anthropic: {' > '.join(conc['ranking_juiz_anthropic']) or '—'}",
+        f"- Rankings identicos entre os juizes: "
+        f"{'SIM -- o vies de vendor nao esta dirigindo o resultado' if conc['rankings_identicos'] else 'NAO -- a divergencia e o achado'}",
+    ]
     return "\n".join(linhas)
 
 
@@ -541,28 +708,34 @@ def salvar_relatorio(av: Avaliador, contextos, repeticoes, out_dir: Path) -> Pat
     por_modelo = _agregar(av.resultados, lambda r: r.label)
     por_tier = _agregar(av.resultados, lambda r: r.tier)
     por_nivel = _agregar(av.resultados, lambda r: f"{r.label} | {r.nivel}")
+    concordancia = _concordancia_juizes(av.resultados)
 
     relatorio = {
         "metadata": {
             "timestamp": datetime.now().isoformat(),
             "ragas_versao": "0.4.3",
-            "metricas": ["qualidade_rubrica_1a5", "context_relevance"],
+            "rubrica_versao": RUBRICA_VERSAO,
+            "metricas": ["qualidade_rubrica_1a5 (2 juizes)", "context_relevance"],
             "metricas_nota": (
-                "Qualidade: rubrica holistica 1-5 (ciente do nivel) dada pelo juiz "
-                "fixo -- diferenciador do gerador. Context relevance: qualidade da "
-                "recuperacao (sanidade do pipeline). Faithfulness e answer relevancy "
-                "ficaram de fora: metricas de RAG-QA, nao medem bem geracao criativa "
-                "(o e-mail ficticio nao deve repetir os artigos; o user_input e "
-                "instrucao, nao pergunta)."
+                "Qualidade: rubrica holistica 1-5 (ciente do nivel), pontuada por DOIS "
+                "juizes fixos (um de cada fornecedor) para blindar contra "
+                "self-preference de vendor -- diferenciador do gerador. Context "
+                "relevance: qualidade da recuperacao (juiz unico OpenAI; ~constante "
+                "entre modelos, vies de vendor irrelevante). Faithfulness e answer "
+                "relevancy ficaram de fora: metricas de RAG-QA, nao medem bem geracao "
+                "criativa."
             ),
             "modelos": [vars(m) for m in MODELOS_A_TESTAR],
-            "juiz_ragas": JUIZ_RAGAS_MODEL,
+            "juiz_rubrica_openai": JUIZ_RUBRICA_OPENAI,
+            "juiz_rubrica_anthropic": JUIZ_RUBRICA_ANTHROPIC,
+            "juiz_context_relevance": JUIZ_CONTEXT_RELEVANCE,
             "embedding_ragas": JUIZ_RAGAS_EMBEDDING,
             "embedding_base": EMBEDDING_DA_BASE,
             "contextos": [c.lote_id for c in contextos],
             "repeticoes": repeticoes,
             "total_itens": len(av.resultados),
         },
+        "concordancia_juizes": concordancia,
         "por_modelo": por_modelo,
         "por_tier": por_tier,
         "por_modelo_e_nivel": por_nivel,
@@ -574,11 +747,12 @@ def salvar_relatorio(av: Avaliador, contextos, repeticoes, out_dir: Path) -> Pat
     caminho.write_text(json.dumps(relatorio, ensure_ascii=False, indent=2), encoding="utf-8")
     (out_dir / f"comparacao_modelos_{ts}.md").write_text(
         "# Comparacao de modelos (RAGAS)\n\n"
-        f"Juiz: `{JUIZ_RAGAS_MODEL}` · amostra: {len(contextos)} contextos · "
-        f"repeticoes: {repeticoes}\n\n" + _tabela_markdown(por_modelo) + "\n",
+        f"Juizes da rubrica: `{JUIZ_RUBRICA_OPENAI}` (OpenAI) + `{JUIZ_RUBRICA_ANTHROPIC}` "
+        f"(Anthropic) · amostra: {len(contextos)} contextos · repeticoes: {repeticoes}\n\n"
+        + _tabela_markdown(por_modelo) + "\n\n" + _bloco_concordancia(concordancia) + "\n",
         encoding="utf-8",
     )
-    print("\n" + _tabela_markdown(por_modelo) + "\n")
+    print("\n" + _tabela_markdown(por_modelo) + "\n\n" + _bloco_concordancia(concordancia) + "\n")
     logger.info("Relatorio salvo em %s", caminho)
     return caminho
 
@@ -589,57 +763,67 @@ def salvar_relatorio(av: Avaliador, contextos, repeticoes, out_dir: Path) -> Pat
 
 
 def _validar_sem_placeholder():
+    juizes_rubrica = [JUIZ_RUBRICA_OPENAI, JUIZ_RUBRICA_ANTHROPIC]
     pend = [m.model for m in MODELOS_A_TESTAR if "PREENCHER" in m.model]
-    if "PREENCHER" in JUIZ_RAGAS_MODEL:
-        pend.append(JUIZ_RAGAS_MODEL)
+    pend += [j for j in juizes_rubrica if "PREENCHER" in j]
     if pend:
         raise SystemExit(
             "Preencha os ids de modelo antes de rodar (ainda ha placeholders): "
             + ", ".join(pend)
-            + "\nEdite MODELOS_A_TESTAR e JUIZ_RAGAS_MODEL no topo deste arquivo."
+            + "\nEdite MODELOS_A_TESTAR e JUIZ_RUBRICA_* no topo deste arquivo."
         )
-    juizes = {m.model for m in MODELOS_A_TESTAR}
-    if JUIZ_RAGAS_MODEL in juizes:
+    testados = {m.model for m in MODELOS_A_TESTAR}
+    colididos = [j for j in juizes_rubrica if j in testados]
+    if colididos:
         raise SystemExit(
-            f"O juiz ({JUIZ_RAGAS_MODEL}) nao pode ser um dos modelos testados "
-            "(vies de auto-preferencia)."
+            f"Juiz(es) tambem na lista de testados: {colididos} -- "
+            "o juiz nao pode ser um modelo testado (vies de auto-preferencia)."
         )
 
 
 def _dry_run(contextos, repeticoes):
-    n_gen_calls = len(MODELOS_A_TESTAR) * len(contextos) * repeticoes * 3  # norm+hyde+fusao+ger ~ 3-4
-    n_juiz_calls = len(MODELOS_A_TESTAR) * len(contextos) * repeticoes * 3  # 3 metricas RAGAS
+    itens = len(MODELOS_A_TESTAR) * len(contextos) * repeticoes
+    n_gen_calls = itens * 3  # norm + hyde + fusao + geracao ~ 3-4 por item
+    n_juiz_calls = itens * 3  # context_relevance (~2 chamadas) + rubrica x2 juizes
     print("=== PLANO (dry-run, nada foi chamado) ===")
     print(f"Modelos: {[m.label + ' (' + m.model + ')' for m in MODELOS_A_TESTAR]}")
-    print(f"Juiz RAGAS fixo: {JUIZ_RAGAS_MODEL}")
+    print(f"Juizes da rubrica: {JUIZ_RUBRICA_OPENAI} (OpenAI) + {JUIZ_RUBRICA_ANTHROPIC} (Anthropic)")
+    print(f"Juiz de context_relevance: {JUIZ_CONTEXT_RELEVANCE}")
     print(f"Contextos ({len(contextos)}): {[c.lote_id for c in contextos]}")
     print(f"Repeticoes: {repeticoes}")
-    print(f"Itens avaliados: {len(MODELOS_A_TESTAR) * len(contextos) * repeticoes}")
-    print(f"~Chamadas de geracao: ~{n_gen_calls} | ~Chamadas do juiz: ~{n_juiz_calls}")
+    print(f"Itens avaliados: {itens}")
+    print(f"~Chamadas de geracao: ~{n_gen_calls} | ~Chamadas de juiz: ~{n_juiz_calls}")
     print("Confira os ids e rode sem --dry-run para valer.")
 
 
 async def _smoke():
-    """Valida, com poucas chamadas reais e sem RAG, as duas pontas que
-    so a execucao real exercita:
+    """Valida, com poucas chamadas reais e sem RAG, as pontas que so a
+    execucao real exercita:
 
-    1. Juiz RAGAS 0.4 (as 3 metricas em dados minimos) -- ~3 chamadas.
-    2. Gerador OpenAI de nova geracao (build_chat_model) -- 1 chamada
-       trivial por modelo OpenAI testado, para pegar o problema de
-       parametro (max_tokens vs max_completion_tokens / temperature)
-       antes da comparacao cheia.
+    1. Juiz OpenAI: context_relevance + rubrica.
+    2. Juiz Anthropic: rubrica (confirma o wiring do 2o fornecedor).
+    3. Geradores OpenAI de nova geracao (build_chat_model) -- 1 chamada
+       trivial cada, para pegar problema de parametro (max_tokens vs
+       max_completion_tokens / temperature) antes da comparacao cheia.
 
-    Nao testa Qdrant, Anthropic nem o pipeline RAG completo.
+    Nao testa Qdrant nem o pipeline RAG completo. Anthropic como gerador
+    nao e exercitado aqui (so como juiz); a rodada cheia o cobre.
     """
     _validar_sem_placeholder()
     if not settings.OPENAI_API_KEY:
         raise SystemExit("OPENAI_API_KEY nao configurada (.env).")
+    if not settings.ANTHROPIC_API_KEY:
+        raise SystemExit("ANTHROPIC_API_KEY nao configurada (.env) -- juiz duplo exige.")
 
-    # 1. Juiz RAGAS
-    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-    eval_llm = _build_juiz_ragas(client)
-    eval_embeddings = embedding_factory("openai", model=JUIZ_RAGAS_EMBEDDING, client=client)
-    print(f"[1/2] Smoke do juiz RAGAS 0.4 + rubrica ({JUIZ_RAGAS_MODEL}) ...")
+    # Juizes
+    openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    juiz_openai = _build_juiz_openai(JUIZ_RUBRICA_OPENAI, openai_client)
+    eval_embeddings = embedding_factory("openai", model=JUIZ_RAGAS_EMBEDDING, client=openai_client)
+    juiz_anthropic = _build_juiz_anthropic(
+        JUIZ_RUBRICA_ANTHROPIC, AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+    )
+    eval_llm = juiz_openai
+    print(f"[1/2] Smoke dos juizes RAGAS 0.4 (OpenAI={JUIZ_RUBRICA_OPENAI}, Anthropic={JUIZ_RUBRICA_ANTHROPIC}) ...")
     # Par realista (consulta de busca <-> contexto academico <-> e-mail
     # coerente com o cenario). So demonstra o wiring (rel. contexto +
     # rubrica de qualidade); nao substitui a comparacao real sobre os
@@ -673,18 +857,24 @@ async def _smoke():
         incluir_faithfulness=False,
         incluir_response_relevancy=False,
     )
-    qual = await avaliar_qualidade_rubrica(
-        eval_llm,
-        cenario="E-mail de uma universidade avisando o estudante sobre uma pendencia de matricula.",
-        nivel="Médio",
-        email=email_exemplo,
+    cenario_exemplo = (
+        "E-mail de uma universidade avisando o estudante sobre uma pendencia de matricula."
+    )
+    qual_o = await avaliar_qualidade_rubrica(
+        juiz_openai, cenario=cenario_exemplo, nivel="Médio", email=email_exemplo
+    )
+    qual_a = await avaliar_qualidade_rubrica(
+        juiz_anthropic, cenario=cenario_exemplo, nivel="Médio", email=email_exemplo
     )
     print("    Rel. contexto:", scores.get("context_relevance"))
-    print(f"    Qualidade (rubrica 1-5): {qual.get('qualidade')} -- {qual.get('qualidade_justificativa')}")
+    print(f"    Qualidade juiz OpenAI (1-5): {qual_o.get('qualidade')} -- {qual_o.get('qualidade_justificativa')}")
+    print(f"    Qualidade juiz Anthropic (1-5): {qual_a.get('qualidade')} -- {qual_a.get('qualidade_justificativa')}")
     if scores.get("error") or scores.get("context_relevance") is None:
         raise SystemExit(f"Smoke do juiz (rel. contexto) FALHOU: {scores.get('error')}")
-    if qual.get("qualidade") is None:
-        raise SystemExit(f"Smoke da rubrica FALHOU: {qual.get('error')}")
+    if qual_o.get("qualidade") is None:
+        raise SystemExit(f"Smoke da rubrica (juiz OpenAI) FALHOU: {qual_o.get('error')}")
+    if qual_a.get("qualidade") is None:
+        raise SystemExit(f"Smoke da rubrica (juiz Anthropic) FALHOU: {qual_a.get('error')}")
 
     # 2. Geradores OpenAI (so os OpenAI; Anthropic e outra API/credencial)
     print("[2/2] Smoke dos geradores OpenAI (1 chamada trivial cada) ...")
@@ -703,7 +893,8 @@ async def _smoke():
         texto = getattr(resp, "content", str(resp))
         print(f"    {spec.label} ({spec.model}): OK -> {str(texto)[:40]!r}")
 
-    print("\nSmoke OK: juiz RAGAS 0.4 e geradores OpenAI respondem. Pode rodar a comparacao cheia.")
+    print("\nSmoke OK: os dois juizes (OpenAI + Anthropic) pontuam a rubrica e os "
+          "geradores OpenAI respondem. Pode rodar a comparacao cheia.")
 
 
 async def _main():
