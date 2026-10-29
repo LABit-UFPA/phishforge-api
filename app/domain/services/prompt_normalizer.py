@@ -4,7 +4,7 @@ from typing import Optional
 from langchain_core.prompts import PromptTemplate
 from pydantic import BaseModel, Field
 
-from app.domain.services.llm_factory import PROVIDER_OPENAI, build_chat_model
+from app.domain.services.llm_factory import PROVIDER_OPENAI, build_structured_llm
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,8 @@ class PromptNormalizer:
         provider: str = PROVIDER_OPENAI,
         anthropic_api_key: str = "",
         seed: Optional[int] = None,
+        temperature: Optional[float] = 0.0,
+        max_tokens: Optional[int] = None,
     ):
         # `api_key` e a chave OpenAI (nome mantido para nao quebrar
         # chamadores antigos). `provider`/`anthropic_api_key` permitem o
@@ -33,16 +35,34 @@ class PromptNormalizer:
         # `seed`: reprodutibilidade best-effort na OpenAI (ignorado na
         # Anthropic -- ver build_chat_model); usado pela comparacao de
         # modelos para fixar a normalizacao junto da geracao.
+        # `temperature`: default 0.0 (normalizacao deterministica, producao
+        # com gpt-4o-mini). Mas modelos de reasoning so aceitam o default do
+        # provider: OpenAI (gpt-5+/o-series) a omite sempre; os Claude 5.5
+        # RECUSAM temperature != 1 ("temperature is deprecated for this
+        # model"). Por isso o chamador passa temperature=None para esses
+        # (ver construir_gerador) -- com None, build_chat_model nao envia 0.0
+        # (Anthropic cai no default 1; OpenAI omite).
+        # `max_tokens`: default None (sem teto na producao). Modelos de
+        # reasoning GASTAM tokens raciocinando ANTES do JSON tambem no
+        # normalizador: no default de 2000 da Anthropic, o Claude Haiku 5.5
+        # exauria o orcamento raciocinando e devolvia vazio. O chamador passa
+        # um teto generoso para reasoning (ver construir_gerador).
         self.model_name = model_name
         self.provider = provider
-        self.llm = build_chat_model(
+        # O normalizador tambem usa saida estruturada: via build_structured_llm
+        # para funcionar nos Claude de reasoning (instructor JSON-mode, sem
+        # tool_choice/thinking), que de outra forma estouravam no normalize,
+        # antes mesmo da geracao (ver build_structured_llm).
+        self.llm = build_structured_llm(
             provider,
             model_name,
+            NormalizedQuery,
             openai_api_key=api_key,
             anthropic_api_key=anthropic_api_key,
-            temperature=0.0,
+            temperature=temperature,
+            max_tokens=max_tokens,
             seed=seed,
-        ).with_structured_output(NormalizedQuery)
+        )
 
         self.prompt_template = PromptTemplate(
             input_variables=["user_context"],

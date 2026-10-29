@@ -74,6 +74,7 @@ import statistics
 import sys
 import zipfile
 import xml.etree.ElementTree as ET
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -97,13 +98,14 @@ from app.domain.services.generation_pipeline import TOP_N_PARA_FUSAO, TOP_K_RETR
 from app.domain.services.llm_factory import (
     PROVIDER_ANTHROPIC,
     PROVIDER_OPENAI,
-    build_chat_model,
     openai_exige_max_completion_tokens,
 )
 from app.domain.services.openai.embedding_client import OpenAIEmbeddingClient
 from app.domain.services.prompt_normalizer import PromptNormalizer
 from app.domain.services.reranker import ReRanker
-from app.domain.services.response_generator import ResponseGenerator
+from app.domain.models.variation_spec import VariationSpec
+from app.domain.services.response_generator import ItemInvalidoError, ResponseGenerator
+from app.domain.services.variation_sampler import VariationSampler
 from app.infra.qdrant.store import QdrantVectorStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -123,22 +125,40 @@ class ModelSpec:
     tier: str  # "pequeno" | "medio"
     provider: str  # PROVIDER_OPENAI | PROVIDER_ANTHROPIC
     model: str  # id EXATO da API (nao o nome comercial)
-    # False para modelos de reasoning (o-series e alguns GPT-5) que
-    # rejeitam temperature != 1 -- o gerador entao omite temperature em
-    # todas as sub-chains.
+    # False para modelos de reasoning (o-series e GPT-5+, e os Claude 5.5)
+    # que rejeitam temperature != 1 -- o gerador entao omite temperature em
+    # todas as sub-chains. Os 4 modelos testados sao reasoning.
     supports_temperature: bool = True
 
 
+# Modelos de reasoning gastam tokens de saida RACIOCINANDO antes do JSON; o
+# cap de producao (2000, do gpt-4o-mini) trunca a geracao -- GPT-6 Luna deu
+# "length limit reached" em 11/15 no 1o run cheio. Cap generoso so para o
+# eval (reasoning + JSON).
+MAX_TOKENS_GERACAO_REASONING = 16000
+
 # Ids definidos pelo pesquisador (out/2026). Pares de tier entre OpenAI e
 # Anthropic: pequeno/barato e medio. Precos aproximados (entrada/saida por
-# 1M de tokens) sao so referencia de custo, nao entram na medicao.
+# 1M de tokens) sao so referencia de custo, nao entram na medicao. Os 4 sao
+# modelos de reasoning: supports_temperature=False (temperatura omitida). Os
+# Claude de reasoning geram saida estruturada via tool_choice="auto" (ver
+# with_structured_output_compat), nao por thinking.
 MODELOS_A_TESTAR: list[ModelSpec] = [
     # Tier pequeno/barato
-    ModelSpec("GPT-6 Luna", "pequeno", PROVIDER_OPENAI, "gpt-6-luna"),        # ~$0.10/$0.50 por 1M
-    ModelSpec("Claude Haiku 5.5", "pequeno", PROVIDER_ANTHROPIC, "claude-haiku-5-5"),
+    ModelSpec("GPT-6 Luna", "pequeno", PROVIDER_OPENAI, "gpt-6-luna",          # ~$0.10/$0.50 por 1M
+              supports_temperature=False),
+    ModelSpec("Claude Haiku 5.5", "pequeno", PROVIDER_ANTHROPIC, "claude-haiku-5-5",
+              supports_temperature=False),
     # Tier medio
-    ModelSpec("GPT-6 Sol", "medio", PROVIDER_OPENAI, "gpt-6-sol"),           # ~$2/$10 por 1M
-    ModelSpec("Claude Sonnet 5.5", "medio", PROVIDER_ANTHROPIC, "claude-sonnet-5-5"),
+    ModelSpec("GPT-6 Sol", "medio", PROVIDER_OPENAI, "gpt-6-sol",              # ~$2/$10 por 1M
+              supports_temperature=False),
+    # claude-sonnet-4-6 (nao o 5-5): o sonnet-5-5 retornava VAZIO de forma
+    # erratica em TODOS os mecanismos de saida estruturada (tool_choice
+    # forcado/auto, instructor JSON/reasoning-tools, structured output
+    # nativo) -- inviavel para pesquisa. A serie 4.x e estavel (mesmo
+    # mecanismo instructor JSON-mode do juiz opus-4-8).
+    ModelSpec("Claude Sonnet 4.6", "medio", PROVIDER_ANTHROPIC, "claude-sonnet-4-6",
+              supports_temperature=False),
 ]
 
 # Juizes da RUBRICA de qualidade: DOIS fixos, um de cada fornecedor,
@@ -323,6 +343,11 @@ class ResultadoItem:
     # e-mails que os juizes pontuaram -- sem pagar uma 2a geracao.
     item: Optional[dict] = None
     erro: Optional[str] = None
+    # Categoria da falha (quando erro != None), para o relatorio separar
+    # RECUSA de conteudo (achado do estudo -- ex.: Anthropic recusar gerar
+    # phishing) de erro de infra/limite/validacao. Melhor-esforco (ver
+    # _classificar_erro); a mensagem crua fica em `erro`.
+    erro_tipo: Optional[str] = None
 
 
 def _build_juiz_openai(model: str, client):
@@ -380,6 +405,109 @@ def _build_juiz_anthropic(model: str, raw_client):
     return juiz
 
 
+def construir_gerador(
+    spec: ModelSpec, openai_key: str, anthropic_key: str, seed: Optional[int]
+) -> tuple[ResponseGenerator, PromptNormalizer]:
+    """Gerador + normalizador para `spec`, com os ajustes por modelo que a
+    comparacao exige:
+    - temperatura omitida em reasoning (supports_temperature=False);
+    - cap de saida generoso (reasoning gasta tokens ANTES do JSON -- o cap
+      padrao truncava o GPT-6 Luna);
+    - saida estruturada dos Claude de reasoning via tool_choice="auto"
+      (tratado dentro de ResponseGenerator/PromptNormalizer por
+      with_structured_output_compat -- eles recusam o tool_choice forcado).
+
+    Usada pela rodada E pelo --smoke -- mesma construcao nos dois, para o
+    smoke exercitar o caminho real de geracao (nao um ainvoke cru, que foi
+    o furo que deixou o 1o run cheio falhar em producao).
+    """
+    temp = settings.LLM_TEMPERATURE if spec.supports_temperature else None
+    rg = ResponseGenerator(
+        api_key=openai_key,
+        model_name=spec.model,
+        temperature=temp,
+        provider=spec.provider,
+        anthropic_api_key=anthropic_key,
+        seed=seed,
+        max_tokens_geracao=MAX_TOKENS_GERACAO_REASONING,
+    )
+    norm = PromptNormalizer(
+        api_key=openai_key,
+        model_name=spec.model,
+        provider=spec.provider,
+        anthropic_api_key=anthropic_key,
+        seed=seed,
+        # Reasoning (supports_temperature=False): omite a temperatura 0.0 do
+        # normalizador -- os Claude 5.5 recusam temperature != 1. Nao-reasoning
+        # mantem 0.0 (normalizacao deterministica).
+        temperature=(0.0 if spec.supports_temperature else None),
+        # Reasoning gasta tokens raciocinando ANTES do JSON tambem aqui; o
+        # default 2000 da Anthropic exauria o Haiku 5.5 (devolvia vazio).
+        max_tokens=MAX_TOKENS_GERACAO_REASONING,
+    )
+    return rg, norm
+
+
+def _ficha_do_contexto(ctx: Contexto, difficulty: str, seed: Optional[int]) -> VariationSpec:
+    """Ficha de variacao DETERMINISTICA por contexto: a MESMA para os 4
+    modelos (comparacao justa), derivada do codigo do contexto (lote_id) +
+    seed global. Com isso o eval usa o mesmo prompt ficha-driven da producao,
+    e as pistas-alvo ficam fixas por contexto -- a ADERENCIA a elas vira
+    metrica objetiva e comparavel entre modelos (a validacao do item calcula
+    pistas_alvo_ausentes/fora_do_alvo sobre essas pistas). O VariationSampler
+    com uma rng semeada e reproduzivel.
+    """
+    rng = random.Random(f"{seed}:{ctx.lote_id}")
+    return VariationSampler(rng=rng).sortear(difficulty, is_malicious=True)
+
+
+def _classificar_erro(exc: Exception) -> str:
+    """Categoria best-effort da falha de um item, para o relatorio separar o
+    que e falha do MODELO (recusa de conteudo -- achado do estudo) do que e
+    falha de INFRA/integracao (tokens, HTTP, formato de saida, validacao do
+    pipeline). A mensagem crua fica preservada em ResultadoItem.erro.
+
+    Categorias:
+    - recusa: o modelo se negou a gerar (politica/conteudo). Inclui o
+      "list index out of range" do instructor+Anthropic, que e a assinatura
+      de resposta VAZIA (tipicamente recusa suave) nesses modelos.
+    - limite_tokens: saida truncada por teto de tokens.
+    - validacao: item gerado reprovado nas regras do pipeline (ItemInvalido).
+    - formato: modelo respondeu, mas sem saida estruturada valida (JSON
+      invalido / nao chamou a tool) -- falha de integracao, nao do modelo.
+    - http: erro de rede/status da API (timeout, 429, 5xx).
+    - tool_choice: 400 de tool_choice (nao deve ocorrer apos o JSON-mode).
+    - outro: nao classificado.
+    """
+    if isinstance(exc, ItemInvalidoError):
+        return "validacao"
+    msg = str(exc).lower()
+    if any(k in msg for k in (
+        "refus", "stop_reason", "usage policy", "content filter",
+        "content_policy", "content management policy", "blocked", "safety",
+        "index out of range",  # instructor+Anthropic: resposta vazia (recusa suave)
+    )):
+        return "recusa"
+    if any(k in msg for k in (
+        "length limit", "max_tokens", "max_completion_tokens", "max output",
+        "maximum context",
+    )):
+        return "limite_tokens"
+    if "tool_choice" in msg:
+        return "tool_choice"
+    if any(k in msg for k in (
+        "timeout", "timed out", "connection", "rate limit", "429",
+        "too many requests", "500", "502", "503", "overloaded", "httpx",
+    )):
+        return "http"
+    if any(k in msg for k in (
+        "instructorretry", "validation error", "could not parse", "failed to parse",
+        "no tool call", "nonetype", "json",
+    )):
+        return "formato"  # respondeu mas sem saida estruturada valida (integracao)
+    return "outro"
+
+
 class Avaliador:
     def __init__(self, seed: Optional[int] = None):
         if not settings.OPENAI_API_KEY:
@@ -424,23 +552,7 @@ class Avaliador:
         self.resultados: list[ResultadoItem] = []
 
     def _gerador(self, spec: ModelSpec) -> tuple[ResponseGenerator, PromptNormalizer]:
-        temp = settings.LLM_TEMPERATURE if spec.supports_temperature else None
-        rg = ResponseGenerator(
-            api_key=self.openai_key,
-            model_name=spec.model,
-            temperature=temp,
-            provider=spec.provider,
-            anthropic_api_key=self.anthropic_key,
-            seed=self.seed,
-        )
-        norm = PromptNormalizer(
-            api_key=self.openai_key,
-            model_name=spec.model,
-            provider=spec.provider,
-            anthropic_api_key=self.anthropic_key,
-            seed=self.seed,
-        )
-        return rg, norm
+        return construir_gerador(spec, self.openai_key, self.anthropic_key, self.seed)
 
     async def _avaliar_item(
         self, spec: ModelSpec, ctx: Contexto, repeticao: int
@@ -477,11 +589,18 @@ class Avaliador:
                 generation_context=generation_context, contexts=contexts
             )
 
+            # Ficha deterministica por contexto (VariationSampler): a MESMA
+            # para os 4 modelos neste contexto, derivada do codigo do contexto
+            # + seed -> comparacao justa e reproduzivel, no MESMO prompt que a
+            # producao usa. Com a ficha, o item traz pistas-alvo, e a validacao
+            # calcula pistas_alvo_ausentes -> aderencia vira metrica primaria.
+            ficha = _ficha_do_contexto(ctx, difficulty, self.seed)
             draft = await rg.generate_response(
                 difficulty=difficulty,
                 context=generation_context,
                 relevant_docs=fused,
                 is_malicious=True,
+                variacao=ficha,
             )
             # mode="json": o item vai inteiro para o JSON do relatorio
             # (campo `item`), entao enums/aninhados tem de sair ja
@@ -537,12 +656,16 @@ class Avaliador:
             )
         except Exception as e:
             tempo = (datetime.now() - inicio).total_seconds()
-            logger.error("ERRO %s | %s %s %s: %s", spec.label, ctx.eixo, ctx.nivel, ctx.cenario, e)
+            tipo = _classificar_erro(e)
+            logger.error(
+                "ERRO[%s] %s | %s %s %s: %s",
+                tipo, spec.label, ctx.eixo, ctx.nivel, ctx.cenario, e,
+            )
             return ResultadoItem(
                 **base, context_relevance=None,
                 qualidade_openai=None, qualidade_anthropic=None,
                 qualidade_justificativa_openai=None, qualidade_justificativa_anthropic=None,
-                tempo_s=tempo, erro=str(e),
+                tempo_s=tempo, erro=str(e), erro_tipo=tipo,
             )
 
     async def rodar(self, contextos: list[Contexto], repeticoes: int):
@@ -601,9 +724,14 @@ def _agregar(resultados: list[ResultadoItem], chave) -> dict:
         qo_m, qo_d = _media_desvio([r.qualidade_openai for r in ok])
         qa_m, qa_d = _media_desvio([r.qualidade_anthropic for r in ok])
         t_m, _ = _media_desvio([r.tempo_s for r in ok])
+        # Erros por categoria (recusa de conteudo vs infra/limite/validacao):
+        # a taxa de recusa e um achado do estudo, nao pode sumir como "erro".
+        erros_tipo = Counter(r.erro_tipo or "outro" for r in rs if r.erro is not None)
         saida[g] = {
             "n": len(ok),
             "erros": len(rs) - len(ok),
+            "erros_por_tipo": dict(erros_tipo),
+            "taxa_recusa": (erros_tipo.get("recusa", 0) / len(rs)) if rs else None,
             "context_relevance": cr_m, "context_relevance_std": cr_d,
             "qualidade_openai": qo_m, "qualidade_openai_std": qo_d,
             "qualidade_anthropic": qa_m, "qualidade_anthropic_std": qa_d,
@@ -693,7 +821,7 @@ def _tabela_markdown(por_modelo: dict) -> str:
     # e a rubrica).
     linhas = [
         "| Modelo | Tier | Qual. juiz OpenAI (1-5) | Qual. juiz Anthropic (1-5) "
-        "| Rel. contexto (%) | Tempo (s) | n |",
+        "| Rel. contexto (%) | Tempo (s) | n (erros) |",
         "|---|---|---|---|---|---|---|",
     ]
     def pct(m, d):
@@ -708,12 +836,15 @@ def _tabela_markdown(por_modelo: dict) -> str:
         a = por_modelo.get(spec.label)
         if not a:
             continue
+        # tempo_s e None quando o modelo nao teve NENHUM item OK (era o
+        # crash do 1o run: f"{None:.1f}"). Guard aqui.
+        tempo = f"{a['tempo_s']:.1f}" if a["tempo_s"] is not None else "—"
         linhas.append(
             f"| {spec.label} | {spec.tier} | "
             f"{nota(a['qualidade_openai'], a['qualidade_openai_std'])} | "
             f"{nota(a['qualidade_anthropic'], a['qualidade_anthropic_std'])} | "
             f"{pct(a['context_relevance'], a['context_relevance_std'])} | "
-            f"{a['tempo_s']:.1f} | {a['n']} |"
+            f"{tempo} | {a['n']} ({a['erros']}) |"
         )
     return "\n".join(linhas)
 
@@ -732,6 +863,27 @@ def _bloco_concordancia(conc: dict) -> str:
         f"- Rankings identicos entre os juizes: "
         f"{'SIM -- o vies de vendor nao esta dirigindo o resultado' if conc['rankings_identicos'] else 'NAO -- a divergencia e o achado'}",
     ]
+    return "\n".join(linhas)
+
+
+def _bloco_erros(por_modelo: dict) -> str:
+    """Erros por modelo SEPARANDO recusa de conteudo (achado do estudo --
+    ex.: um gerador recusar criar phishing) de infra/limite/validacao. A
+    taxa de recusa so ganha chao com por_celula>=2-3 (com n=1 por celula e
+    ruidosa). A mensagem crua de cada erro fica em detalhado[].erro.
+    """
+    linhas = ["## Erros por modelo (recusa vs infra/limite/validacao)"]
+    for spec in MODELOS_A_TESTAR:
+        a = por_modelo.get(spec.label)
+        if not a:
+            continue
+        tipos = a.get("erros_por_tipo") or {}
+        detalhe = ", ".join(f"{k}={v}" for k, v in sorted(tipos.items())) or "nenhum"
+        tr = a.get("taxa_recusa")
+        tr_s = f"{tr * 100:.0f}%" if isinstance(tr, (int, float)) else "—"
+        linhas.append(
+            f"- {spec.label}: {a['erros']} erro(s) [{detalhe}] · taxa de recusa: {tr_s}"
+        )
     return "\n".join(linhas)
 
 
@@ -762,6 +914,21 @@ def salvar_relatorio(av: Avaliador, contextos, repeticoes, out_dir: Path) -> Pat
             "juiz_context_relevance": JUIZ_CONTEXT_RELEVANCE,
             "embedding_ragas": JUIZ_RAGAS_EMBEDDING,
             "embedding_base": EMBEDDING_DA_BASE,
+            # ASSIMETRIA DE METODO (documentar no artigo): a saida estruturada
+            # dos geradores usa mecanismos diferentes por fornecedor. OpenAI
+            # tem saida estruturada nativa confiavel; nos Claude 5.5 de
+            # reasoning, nenhum caminho do langchain-anthropic e confiavel
+            # (tool_choice forcado -> 400; "auto" -> o modelo as vezes nao
+            # chama a tool, varia por prompt; thinking.enabled -> recusado,
+            # pedem "adaptive"), entao usamos instructor em JSON-mode -- o
+            # MESMO mecanismo (ja validado) do juiz Anthropic. Thinking
+            # desligado nos dois. Isso evita penalizar os Claude por falhas de
+            # integracao em vez de qualidade do modelo.
+            "saida_estruturada": {
+                "openai": "with_structured_output nativo (tool calling)",
+                "anthropic": "instructor Mode.ANTHROPIC_JSON (prefill, sem tool_choice/thinking)",
+                "thinking": "desligado (ambos os fornecedores)",
+            },
             "contextos": [c.lote_id for c in contextos],
             "repeticoes": repeticoes,
             "seed": av.seed,
@@ -790,10 +957,14 @@ def salvar_relatorio(av: Avaliador, contextos, repeticoes, out_dir: Path) -> Pat
         "# Comparacao de modelos (RAGAS)\n\n"
         f"Juizes da rubrica: `{JUIZ_RUBRICA_OPENAI}` (OpenAI) + `{JUIZ_RUBRICA_ANTHROPIC}` "
         f"(Anthropic) · amostra: {len(contextos)} contextos · repeticoes: {repeticoes}\n\n"
-        + _tabela_markdown(por_modelo) + "\n\n" + _bloco_concordancia(concordancia) + "\n",
+        + _tabela_markdown(por_modelo) + "\n\n" + _bloco_erros(por_modelo) + "\n\n"
+        + _bloco_concordancia(concordancia) + "\n",
         encoding="utf-8",
     )
-    print("\n" + _tabela_markdown(por_modelo) + "\n\n" + _bloco_concordancia(concordancia) + "\n")
+    print(
+        "\n" + _tabela_markdown(por_modelo) + "\n\n" + _bloco_erros(por_modelo) + "\n\n"
+        + _bloco_concordancia(concordancia) + "\n"
+    )
     logger.info("Relatorio salvo em %s", caminho)
     return caminho
 
@@ -917,29 +1088,77 @@ async def _smoke():
     if qual_a.get("qualidade") is None:
         raise SystemExit(f"Smoke da rubrica (juiz Anthropic) FALHOU: {qual_a.get('error')}")
 
-    # 2. Geradores OpenAI (so os OpenAI; Anthropic e outra API/credencial).
-    # Passa `seed` aqui de proposito: valida que os modelos de nova geracao
-    # (gpt-6-*) ACEITAM o parametro antes da rodada cheia -- seed foi o 4o
-    # parametro provider-especifico que poderia dar 400 (como max_tokens e
-    # temperature deram).
-    print("[2/2] Smoke dos geradores OpenAI (1 chamada trivial cada, com seed) ...")
+    # 2. Geradores -- os QUATRO x os 3 NIVEIS, pelo CAMINHO REAL (normalize +
+    # generate_response FICHA-DRIVEN, o mesmo da producao), nao um ainvoke
+    # cru. Sem Qdrant (relevant_docs triviais). Classificacao por item:
+    #  - draft valido        -> OK (integracao ok; confere ficha aplicada:
+    #                           variation_spec + target_cues + pistas_alvo_ausentes);
+    #  - ItemInvalidoError   -> OK p/ gate (API/ficha ok; validacao de conteudo
+    #                           barrou no contexto trivial);
+    #  - recusa              -> AVISA (modelo devolveu vazio; vira TAXA DE
+    #                           RECUSA na cheia -- nao bloqueia o gate);
+    #  - formato/tool_choice/limite/http/outro -> FALHA de integracao (bloqueia).
+    # Gate (criterios do pesquisador): nenhuma falha de integracao; ao menos 1
+    # item com a ficha de fato aplicada.
+    print("[2/2] Smoke dos geradores (4 modelos x 3 niveis, ficha-driven real) ...")
+    docs_trivial = (
+        "Phishing emails impersonate a trusted institution and create urgency with a short "
+        "deadline, directing the victim to a link to resolve a pending issue."
+    )
+    ctx_por_nivel = {
+        "Fácil": Contexto("SMOKE-F", "E0", "Fácil", "A",
+                          "Uma organizacao avisa uma pessoa sobre uma pendencia simples a resolver."),
+        "Médio": Contexto("SMOKE-M", "E0", "Médio", "A",
+                          "Uma organizacao notifica uma pessoa sobre uma pendencia a regularizar."),
+        "Difícil": Contexto("SMOKE-D", "E0", "Difícil", "A",
+                            "Uma organizacao comunica uma pessoa sobre um procedimento a confirmar."),
+    }
+    falhas, recusas = [], []
+    ficha_aplicada = False
     for spec in MODELOS_A_TESTAR:
-        if spec.provider != PROVIDER_OPENAI:
-            continue
-        temp = settings.LLM_TEMPERATURE if spec.supports_temperature else None
-        chat = build_chat_model(
-            spec.provider, spec.model, openai_api_key=settings.OPENAI_API_KEY,
-            temperature=temp, max_tokens=64, seed=42,
+        rg, norm = construir_gerador(
+            spec, settings.OPENAI_API_KEY, settings.ANTHROPIC_API_KEY, seed=42
         )
-        try:
-            resp = await chat.ainvoke("Responda apenas: ok")
-        except Exception as e:
-            raise SystemExit(f"Smoke do gerador {spec.label} ({spec.model}) FALHOU: {e}")
-        texto = getattr(resp, "content", str(resp))
-        print(f"    {spec.label} ({spec.model}): OK -> {str(texto)[:40]!r}")
-
-    print("\nSmoke OK: os dois juizes (OpenAI + Anthropic) pontuam a rubrica e os "
-          "geradores OpenAI respondem. Pode rodar a comparacao cheia.")
+        for nivel, ctx in ctx_por_nivel.items():
+            difficulty = Difficulty(nivel).value
+            ficha = _ficha_do_contexto(ctx, difficulty, seed=42)
+            try:
+                normalized = await norm.normalize(ctx.texto)
+                draft = await rg.generate_response(
+                    difficulty=difficulty, context=normalized.generation_context,
+                    relevant_docs=docs_trivial, is_malicious=True, variacao=ficha,
+                )
+                email = draft.model_dump(mode="json") if hasattr(draft, "model_dump") else dict(draft)
+                val = email.get("validacao") or {}
+                tc = email.get("target_cues")
+                tem_ficha = bool(email.get("variation_spec")) and tc and "pistas_alvo_ausentes" in val
+                ficha_aplicada = ficha_aplicada or tem_ficha
+                print(
+                    f"    {spec.label} [{nivel}]: OK -> assunto={str(email.get('assunto'))[:38]!r} "
+                    f"target_cues={tc} ausentes={val.get('pistas_alvo_ausentes')}"
+                )
+            except ItemInvalidoError as e:
+                print(f"    {spec.label} [{nivel}]: OK (API/ficha ok; validacao barrou: {str(e)[:70]})")
+            except Exception as e:
+                tipo = _classificar_erro(e)
+                if tipo == "recusa":
+                    recusas.append(f"{spec.label}[{nivel}]")
+                    print(f"    {spec.label} [{nivel}]: ⚠ RECUSA -> {str(e)[:90]}")
+                else:
+                    falhas.append(f"{spec.label}[{nivel}] [{tipo}]")
+                    print(f"    {spec.label} [{nivel}]: FALHOU [{tipo}] -> {str(e)[:130]}")
+    if falhas:
+        raise SystemExit("Smoke dos geradores FALHOU (integracao): " + "; ".join(falhas))
+    if not ficha_aplicada:
+        raise SystemExit(
+            "Smoke: nenhum item veio com variation_spec + target_cues + "
+            "pistas_alvo_ausentes -- a ficha nao esta sendo aplicada."
+        )
+    if recusas:
+        print("\n⚠ RECUSAS (modelo devolveu vazio; vira taxa de recusa na cheia): "
+              + "; ".join(recusas))
+    print("\nSmoke [2/2] OK: integracao valida nos 3 niveis e ficha aplicada "
+          "(target_cues/pistas_alvo_ausentes presentes).")
 
 
 async def _main():
