@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 from langchain_core.prompts import PromptTemplate
 from pydantic import BaseModel, Field
@@ -24,10 +25,14 @@ class PromptNormalizer:
         model_name: str = "gpt-4o-mini",
         provider: str = PROVIDER_OPENAI,
         anthropic_api_key: str = "",
+        seed: Optional[int] = None,
     ):
         # `api_key` e a chave OpenAI (nome mantido para nao quebrar
         # chamadores antigos). `provider`/`anthropic_api_key` permitem o
         # normalizador seguir o mesmo provider do gerador (LLM_PROVIDER).
+        # `seed`: reprodutibilidade best-effort na OpenAI (ignorado na
+        # Anthropic -- ver build_chat_model); usado pela comparacao de
+        # modelos para fixar a normalizacao junto da geracao.
         self.model_name = model_name
         self.provider = provider
         self.llm = build_chat_model(
@@ -36,6 +41,7 @@ class PromptNormalizer:
             openai_api_key=api_key,
             anthropic_api_key=anthropic_api_key,
             temperature=0.0,
+            seed=seed,
         ).with_structured_output(NormalizedQuery)
 
         self.prompt_template = PromptTemplate(

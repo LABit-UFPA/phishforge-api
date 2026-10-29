@@ -367,6 +367,7 @@ class ResponseGenerator:
         max_tokens_anotacao: int = _MAX_TOKENS_ANOTACAO_PADRAO,
         provider: str = PROVIDER_OPENAI,
         anthropic_api_key: str = "",
+        seed: Optional[int] = None,
     ):
         # Guardados para o lote registrar com que modelo/temperatura os
         # itens foram gerados (generation_jobs.run_metadata).
@@ -392,6 +393,11 @@ class ResponseGenerator:
         def _temp(valor_fixo):
             return None if modo_reasoning else valor_fixo
 
+        # `seed`: reprodutibilidade best-effort na OpenAI (ignorado na
+        # Anthropic -- ver build_chat_model). Vale para TODAS as sub-chains
+        # (item, anotacao, HyDE/fusao via text_llm e os 5 canais), ja que
+        # todas sao construidas por este `_chat`. Default None => geracao
+        # de producao segue sem seed, como antes.
         def _chat(temperatura, max_tokens=None):
             return build_chat_model(
                 provider,
@@ -400,6 +406,7 @@ class ResponseGenerator:
                 anthropic_api_key=anthropic_api_key,
                 temperature=temperatura,
                 max_tokens=max_tokens,
+                seed=seed,
             )
 
         self._chat = _chat

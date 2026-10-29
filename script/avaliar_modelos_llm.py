@@ -149,7 +149,13 @@ MODELOS_A_TESTAR: list[ModelSpec] = [
 # de cada lado medimos cada modelo pelos dois e olhamos se o RANKING se
 # mantem -- ranking estavel => o vies nao dirige o resultado.
 JUIZ_RUBRICA_OPENAI = "gpt-5.5"           # ~$5/$30 por 1M
-JUIZ_RUBRICA_ANTHROPIC = "claude-opus-5-5"  # flagship, nao e nenhum dos testados
+# claude-opus-4-8 (nao o flagship claude-opus-5-5): o 5-5 RECUSA pontuar a
+# rubrica (stop_reason='refusal', category 'cyber') ao ver um e-mail de
+# phishing + o pedido de avalia-lo -- confirmado no --smoke, inclusive com
+# preambulo defensivo explicito, devolvia qualidade_anthropic=None e
+# inviabilizava o juiz duplo. O opus-4-8 (modelo anterior) avalia o
+# conteudo defensivo sem recusar. Nao e nenhum dos modelos testados.
+JUIZ_RUBRICA_ANTHROPIC = "claude-opus-4-8"
 
 # Juiz de context_relevance e o embedding: UNICO (OpenAI). Context
 # relevance mede recuperacao (~constante entre modelos, mesmo retriever),
@@ -309,6 +315,13 @@ class ResultadoItem:
     qualidade_justificativa_openai: Optional[str]
     qualidade_justificativa_anthropic: Optional[str]
     tempo_s: float
+    # Item gerado COMPLETO (draft.model_dump): conteudo, remetente,
+    # assunto, links, cues, premise_alignment, phish_scale
+    # (difficulty_estimated) e validacao (regeneracoes, pistas removidas,
+    # pistas_alvo_ausentes/fora_do_alvo). Persistido para calcular
+    # aderencia/dificuldade/diversidade/vazamento OFFLINE sobre os MESMOS
+    # e-mails que os juizes pontuaram -- sem pagar uma 2a geracao.
+    item: Optional[dict] = None
     erro: Optional[str] = None
 
 
@@ -368,11 +381,18 @@ def _build_juiz_anthropic(model: str, raw_client):
 
 
 class Avaliador:
-    def __init__(self):
+    def __init__(self, seed: Optional[int] = None):
         if not settings.OPENAI_API_KEY:
             raise SystemExit("OPENAI_API_KEY nao configurada (.env).")
         self.openai_key = settings.OPENAI_API_KEY
         self.anthropic_key = settings.ANTHROPIC_API_KEY
+        # Semente de geracao (reprodutibilidade, exigencia do protocolo).
+        # A MESMA que estratifica a amostra -- uma rodada inteira fica
+        # presa a uma seed. Chega ao gerador/normalizador via _gerador ->
+        # build_chat_model: best-effort na OpenAI, ignorada na Anthropic
+        # (sem parametro de seed) -- por isso o item gerado e persistido
+        # por linha, a reprodutibilidade que vale cross-vendor.
+        self.seed = seed
 
         # --- componentes COMPARTILHADOS (constantes entre todos os modelos) ---
         self.qdrant = QdrantClient(url=settings.QDRANT_URL)
@@ -411,12 +431,14 @@ class Avaliador:
             temperature=temp,
             provider=spec.provider,
             anthropic_api_key=self.anthropic_key,
+            seed=self.seed,
         )
         norm = PromptNormalizer(
             api_key=self.openai_key,
             model_name=spec.model,
             provider=spec.provider,
             anthropic_api_key=self.anthropic_key,
+            seed=self.seed,
         )
         return rg, norm
 
@@ -461,7 +483,11 @@ class Avaliador:
                 relevant_docs=fused,
                 is_malicious=True,
             )
-            email = draft.model_dump() if hasattr(draft, "model_dump") else dict(draft)
+            # mode="json": o item vai inteiro para o JSON do relatorio
+            # (campo `item`), entao enums/aninhados tem de sair ja
+            # serializaveis (str, nao membros de Enum nem datetime). Os
+            # campos de texto que _formatar_email le ficam identicos.
+            email = draft.model_dump(mode="json") if hasattr(draft, "model_dump") else dict(draft)
             full_answer, so_corpo = _formatar_email(email)
 
             # Metricas da comparacao: rel. contexto (recuperacao) +
@@ -503,6 +529,11 @@ class Avaliador:
                 qualidade_justificativa_openai=qual_o.get("qualidade_justificativa"),
                 qualidade_justificativa_anthropic=qual_a.get("qualidade_justificativa"),
                 tempo_s=tempo,
+                # Guarda o item COMPLETO que os juizes acabaram de pontuar
+                # (o mesmo `email` ja formatado acima). Antes era descartado
+                # aqui -- a aderencia/dificuldade/diversidade/vazamento viram
+                # calculaveis offline sobre ESTE e-mail, sem uma 2a geracao.
+                item=email,
             )
         except Exception as e:
             tempo = (datetime.now() - inicio).total_seconds()
@@ -733,6 +764,16 @@ def salvar_relatorio(av: Avaliador, contextos, repeticoes, out_dir: Path) -> Pat
             "embedding_base": EMBEDDING_DA_BASE,
             "contextos": [c.lote_id for c in contextos],
             "repeticoes": repeticoes,
+            "seed": av.seed,
+            "reprodutibilidade": (
+                f"Seed {av.seed} fixa (1) a amostra estratificada de contextos e (2) a "
+                "geracao via build_chat_model. OpenAI: seed best-effort (determinismo "
+                "dependente do system_fingerprint). Anthropic: NAO tem parametro de seed, "
+                "logo suas geracoes nao sao bit-reproduziveis. Por isso cada linha de "
+                "'detalhado' guarda o item gerado COMPLETO (campo 'item'): a aderencia/"
+                "dificuldade/diversidade/vazamento se calculam offline sobre os MESMOS "
+                "e-mails que os juizes pontuaram, sem uma 2a geracao paga."
+            ),
             "total_itens": len(av.resultados),
         },
         "concordancia_juizes": concordancia,
@@ -876,15 +917,19 @@ async def _smoke():
     if qual_a.get("qualidade") is None:
         raise SystemExit(f"Smoke da rubrica (juiz Anthropic) FALHOU: {qual_a.get('error')}")
 
-    # 2. Geradores OpenAI (so os OpenAI; Anthropic e outra API/credencial)
-    print("[2/2] Smoke dos geradores OpenAI (1 chamada trivial cada) ...")
+    # 2. Geradores OpenAI (so os OpenAI; Anthropic e outra API/credencial).
+    # Passa `seed` aqui de proposito: valida que os modelos de nova geracao
+    # (gpt-6-*) ACEITAM o parametro antes da rodada cheia -- seed foi o 4o
+    # parametro provider-especifico que poderia dar 400 (como max_tokens e
+    # temperature deram).
+    print("[2/2] Smoke dos geradores OpenAI (1 chamada trivial cada, com seed) ...")
     for spec in MODELOS_A_TESTAR:
         if spec.provider != PROVIDER_OPENAI:
             continue
         temp = settings.LLM_TEMPERATURE if spec.supports_temperature else None
         chat = build_chat_model(
             spec.provider, spec.model, openai_api_key=settings.OPENAI_API_KEY,
-            temperature=temp, max_tokens=64,
+            temperature=temp, max_tokens=64, seed=42,
         )
         try:
             resp = await chat.ainvoke("Responda apenas: ok")
@@ -902,7 +947,7 @@ async def _main():
     ap.add_argument("--xlsx", type=Path, default=XLSX_PADRAO, help="caminho do registro_lotes.xlsx")
     ap.add_argument("--por-celula", type=int, default=1, help="cenarios por eixo x nivel (default 1 => 15 contextos)")
     ap.add_argument("--repeticoes", type=int, default=1, help="execucoes por contexto (p/ o +/- de variacao)")
-    ap.add_argument("--seed", type=int, default=42, help="semente da amostra estratificada")
+    ap.add_argument("--seed", type=int, default=42, help="semente: amostra estratificada + geracao (best-effort OpenAI; Anthropic nao tem seed)")
     ap.add_argument("--out", type=Path, default=Path(__file__).parent.parent / "avaliacoes_antigas" / "resultados")
     ap.add_argument("--dry-run", action="store_true", help="mostra o plano e sai, sem chamar API")
     ap.add_argument("--smoke", action="store_true", help="valida o RAGAS 0.4 com 1 avaliacao minima (~3 chamadas ao juiz)")
@@ -922,7 +967,7 @@ async def _main():
         _dry_run(contextos, args.repeticoes)
         return
 
-    av = Avaliador()
+    av = Avaliador(seed=args.seed)
     await av.rodar(contextos, args.repeticoes)
     salvar_relatorio(av, contextos, args.repeticoes, args.out)
     print("\nConcluido.")
