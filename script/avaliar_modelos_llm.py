@@ -668,12 +668,64 @@ class Avaliador:
                 tempo_s=tempo, erro=str(e), erro_tipo=tipo,
             )
 
-    async def rodar(self, contextos: list[Contexto], repeticoes: int):
-        for spec in MODELOS_A_TESTAR:
-            for rep in range(1, repeticoes + 1):
-                for ctx in contextos:
-                    r = await self._avaliar_item(spec, ctx, rep)
-                    self.resultados.append(r)
+    def _carregar_checkpoint(self, checkpoint_path: Optional[Path]) -> set:
+        """Resume: pre-carrega os itens ja concluidos de uma rodada anterior.
+
+        Cada item e gravado em JSONL assim que termina (ver `rodar`), entao
+        um timeout/crash no meio da rodada NAO perde o que ja foi pago --
+        uma re-execucao com os mesmos parametros retoma de onde parou. A
+        1a tentativa da cheia estourou o `timeout` com ~81/180 itens e
+        nada salvo (o relatorio so e escrito no fim); este checkpoint
+        existe para isso nao se repetir. Retorna o conjunto de chaves
+        (label, lote_id, repeticao) ja feitas.
+        """
+        feitos: set = set()
+        if not checkpoint_path or not checkpoint_path.exists():
+            return feitos
+        for linha in checkpoint_path.read_text(encoding="utf-8").splitlines():
+            linha = linha.strip()
+            if not linha:
+                continue
+            try:
+                r = ResultadoItem(**json.loads(linha))
+            except Exception:
+                # linha truncada (crash no meio de uma escrita): ignora.
+                continue
+            chave = (r.label, r.lote_id, r.repeticao)
+            if chave in feitos:
+                continue
+            feitos.add(chave)
+            self.resultados.append(r)
+        if feitos:
+            logger.info(
+                "Resume: %d itens carregados do checkpoint %s", len(feitos), checkpoint_path
+            )
+        return feitos
+
+    async def rodar(
+        self,
+        contextos: list[Contexto],
+        repeticoes: int,
+        checkpoint_path: Optional[Path] = None,
+    ):
+        feitos = self._carregar_checkpoint(checkpoint_path)
+        ckpt = open(checkpoint_path, "a", encoding="utf-8") if checkpoint_path else None
+        try:
+            for spec in MODELOS_A_TESTAR:
+                for rep in range(1, repeticoes + 1):
+                    for ctx in contextos:
+                        if (spec.label, ctx.lote_id, rep) in feitos:
+                            continue
+                        r = await self._avaliar_item(spec, ctx, rep)
+                        self.resultados.append(r)
+                        if ckpt is not None:
+                            # grava+flush por item: o custo ja pago sobrevive
+                            # a um timeout/crash do processo.
+                            ckpt.write(json.dumps(vars(r), ensure_ascii=False) + "\n")
+                            ckpt.flush()
+        finally:
+            if ckpt is not None:
+                ckpt.close()
 
 
 # ---- formatacao e relatorio -----------------------------------------------
@@ -1168,6 +1220,18 @@ async def _main():
     ap.add_argument("--repeticoes", type=int, default=1, help="execucoes por contexto (p/ o +/- de variacao)")
     ap.add_argument("--seed", type=int, default=42, help="semente: amostra estratificada + geracao (best-effort OpenAI; Anthropic nao tem seed)")
     ap.add_argument("--out", type=Path, default=Path(__file__).parent.parent / "avaliacoes_antigas" / "resultados")
+    ap.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help="JSONL de checkpoint (resume). Default: <out>/checkpoint_seed<seed>_pc<por_celula>_rep<rep>.jsonl. "
+        "Grava cada item ao terminar; re-rodar com os mesmos parametros retoma de onde parou.",
+    )
+    ap.add_argument(
+        "--sem-checkpoint",
+        action="store_true",
+        help="desliga o checkpoint/resume (nao grava JSONL incremental).",
+    )
     ap.add_argument("--dry-run", action="store_true", help="mostra o plano e sai, sem chamar API")
     ap.add_argument("--smoke", action="store_true", help="valida o RAGAS 0.4 com 1 avaliacao minima (~3 chamadas ao juiz)")
     args = ap.parse_args()
@@ -1186,8 +1250,15 @@ async def _main():
         _dry_run(contextos, args.repeticoes)
         return
 
+    checkpoint_path: Optional[Path] = None
+    if not args.sem_checkpoint:
+        checkpoint_path = args.checkpoint or (
+            args.out / f"checkpoint_seed{args.seed}_pc{args.por_celula}_rep{args.repeticoes}.jsonl"
+        )
+        args.out.mkdir(parents=True, exist_ok=True)
+
     av = Avaliador(seed=args.seed)
-    await av.rodar(contextos, args.repeticoes)
+    await av.rodar(contextos, args.repeticoes, checkpoint_path=checkpoint_path)
     salvar_relatorio(av, contextos, args.repeticoes, args.out)
     print("\nConcluido.")
 

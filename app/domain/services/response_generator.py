@@ -68,6 +68,40 @@ def _data_atual_por_extenso() -> str:
     agora = datetime.now()
     return f"{agora.day} de {_MESES_PT[agora.month]} de {agora.year}"
 
+
+def _texto_da_resposta(response) -> str:
+    """Texto plano de um AIMessage, seja qual for o provider.
+
+    Na OpenAI `message.content` e uma str. Na Anthropic (sobretudo os
+    modelos de reasoning) vem como LISTA de blocos -- p.ex.
+    [{'type': 'thinking', ...}, {'type': 'text', 'text': '...'}] -- e um
+    `.content.strip()` direto quebrava com "'list' object has no attribute
+    'strip'", derrubando HyDE e a fusao de contexto para o fallback APENAS
+    nos modelos Anthropic (RAG degradado so de um lado -> confundidor na
+    comparacao de modelos). Aqui concatenamos os blocos de texto e
+    ignoramos os de raciocinio.
+    """
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        partes = []
+        for bloco in content:
+            if isinstance(bloco, str):
+                partes.append(bloco)
+            elif isinstance(bloco, dict):
+                # blocos de texto da Anthropic/LangChain: {'type':'text','text':...}
+                if bloco.get("type") == "text" and bloco.get("text"):
+                    partes.append(bloco["text"])
+                elif bloco.get("type") in (None, "output_text") and bloco.get("text"):
+                    partes.append(bloco["text"])
+            else:
+                texto = getattr(bloco, "text", None)
+                if texto:
+                    partes.append(texto)
+        return "".join(partes)
+    return str(content or "")
+
 # Versao do gerador de e-mail (prompts + validacoes), registrada em
 # generation_jobs.run_metadata de cada lote. Mudar prompt ou validacao =
 # mudar esta string, para os lotes de versoes diferentes nao se
@@ -1472,7 +1506,7 @@ class ResponseGenerator:
         """
         try:
             response = await self.hyde_chain.ainvoke({"query": query})
-            return response.content.strip().strip('"')
+            return _texto_da_resposta(response).strip().strip('"')
         except Exception as e:
             logging.error(f"Error generating hypothetical answer: {e}")
             return query
@@ -1530,7 +1564,7 @@ class ResponseGenerator:
                 "generation_context": generation_context,
                 "full_context_text": full_context_text
             })
-            fundido = response.content.strip()
+            fundido = _texto_da_resposta(response).strip()
         except Exception as e:
             logging.error(f"Error fusing context: {e}")
             fundido = full_context_text
@@ -1579,7 +1613,7 @@ class ResponseGenerator:
                 "text_to_translate": text,
                 "difficulty": difficulty
             })
-            return response.content.strip()
+            return _texto_da_resposta(response).strip()
         except Exception as e:
             logging.error(f"Error translating to English: {e}")
             return text
