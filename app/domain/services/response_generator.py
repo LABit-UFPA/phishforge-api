@@ -107,7 +107,7 @@ def _texto_da_resposta(response) -> str:
 # generation_jobs.run_metadata de cada lote. Mudar prompt ou validacao =
 # mudar esta string, para os lotes de versoes diferentes nao se
 # misturarem na analise.
-VERSAO_GERADOR = "2026-10-28-piloto5"
+VERSAO_GERADOR = "2026-10-29-piloto6-antidisclaimer"
 
 # Quantas vezes gerar o item de novo quando ele volta estruturalmente
 # invalido (marcador de template, remetente ou destinatario sem e-mail,
@@ -206,14 +206,21 @@ _REGRAS_DE_FORMA = (
     "placeholder reconhecível, não um número de verdade.\n"
     "- Siga o estilo de assunto da ficha. Nunca use 'Ação Necessária' ou 'Ação Requerida' "
     "(nem variações) em nenhuma parte do assunto, e não repita o assunto como primeira "
-    "linha do `conteudo`.\n"
+    "linha do `conteudo`.\n\n"
+)
+
+# Regra anti-disclaimer: SO no prompt malicioso (nao em _REGRAS_DE_FORMA, que
+# o prompt legitimo tambem usa -- um e-mail legitimo pode falar de
+# conscientizacao/phishing). Um phishing que narra "isto e uma simulacao" se
+# auto-denuncia (achado da comparacao: GPT-6 Luna fazia isso em 56% dos itens).
+_REGRA_ANTI_DISCLAIMER = (
+    "### SEM META-NARRAÇÃO (OBRIGATÓRIO)\n"
     "- Escreva o e-mail EXATAMENTE como o atacante o enviaria à vítima. NUNCA narre, dentro "
     "do e-mail (assunto, remetente ou corpo), que ele é uma simulação, um exercício de "
     "conscientização, um exemplo, um material educativo, algo fictício, ou que 'não é uma "
     "comunicação real' -- um phishing de verdade jamais se denuncia assim, e esse aviso "
-    "torna o item inútil como exemplo. Nunca escreva a palavra 'phishing' no e-mail. Toda "
-    "ressalva, aviso de segurança ou análise vai SOMENTE no campo `explicacao`, fora do "
-    "e-mail.\n\n"
+    "torna o item inútil como exemplo. Toda ressalva, aviso de segurança ou análise vai "
+    "SOMENTE no campo `explicacao`, fora do e-mail.\n\n"
 )
 
 
@@ -519,6 +526,7 @@ class ResponseGenerator:
                 "template no texto, como [Nome] ou [Nome do Estudante]: use exatamente o nome "
                 "da ficha, ou uma saudação genérica quando a ficha disser que não há nome.\n\n"
                 f"{_REGRAS_DE_FORMA}"
+                f"{_REGRA_ANTI_DISCLAIMER}"
 
                 "### VARIEDADE ESTRUTURAL (OBRIGATÓRIO -- validado empiricamente na issue #20)\n"
                 "Uma checagem contra geração real mostrou dois problemas que já foram "
@@ -1115,7 +1123,7 @@ class ResponseGenerator:
                 logging.error(f"Error generating response: {e}")
                 raise e
 
-            problema = self._problema_estrutural(draft)
+            problema = self._problema_estrutural(draft, is_malicious=is_malicious)
             if problema is None:
                 break
             motivo, detalhe = problema
@@ -1186,13 +1194,19 @@ class ResponseGenerator:
             }
         )
 
-    def _problema_estrutural(self, draft: GeneratedItemDraft):
+    def _problema_estrutural(self, draft: GeneratedItemDraft, is_malicious: bool = True):
         """(motivo, detalhe) quando o item nao pode ser usado como veio,
         ou None. Marcador de template (piloto 1 e 2), remetente sem
         endereco de e-mail (piloto 2), destinatario sem e-mail e dominio
         caricato (piloto 3), instituicao real ou "Acao Necessaria" no
         assunto (teste da versao do piloto 3). Vale para phishing e
         legitimo: senao a regra vira atalho para o rotulo.
+
+        A checagem de disclaimer de simulacao (ver abaixo) e a UNICA
+        condicionada a `is_malicious`: um e-mail legitimo PODE narrar
+        simulacao/conscientizacao/phishing (um aviso de seguranca de
+        verdade), entao la isso nao e auto-denuncia -- so num phishing e que
+        anunciar-se como exercicio educativo estraga o item.
         """
         textos_de_link = [link.text for link in draft.links]
         # O endereco do destinatario so e checado quanto a colchetes:
@@ -1245,17 +1259,19 @@ class ResponseGenerator:
         if formula:
             return "assunto_proibido", formula
         # Meta-narracao de "simulacao/conscientizacao" no proprio e-mail:
-        # o e-mail que se anuncia como exercicio educativo se auto-denuncia e
-        # nao serve de exemplo. Checa remetente/assunto/corpo e o texto dos
-        # links (a analise fica em `explicacao`, fora do e-mail -- nao entra).
-        disclaimer = encontrar_disclaimer_de_simulacao(
-            draft.remetente,
-            draft.assunto,
-            draft.conteudo,
-            *(link.text for link in draft.links),
-        )
-        if disclaimer:
-            return "disclaimer_simulacao", disclaimer
+        # o phishing que se anuncia como exercicio educativo se auto-denuncia
+        # e nao serve de exemplo. So para item malicioso (ver docstring).
+        # Checa remetente/assunto/corpo e o texto dos links (a analise fica
+        # em `explicacao`, fora do e-mail -- nao entra).
+        if is_malicious:
+            disclaimer = encontrar_disclaimer_de_simulacao(
+                draft.remetente,
+                draft.assunto,
+                draft.conteudo,
+                *(link.text for link in draft.links),
+            )
+            if disclaimer:
+                return "disclaimer_simulacao", disclaimer
         return None
 
     async def _anotar_as_cegas(self, draft: GeneratedItemDraft, cenario: str) -> AnotacaoCega:

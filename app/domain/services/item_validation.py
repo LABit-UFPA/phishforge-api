@@ -173,15 +173,20 @@ _DOMINIO_CARICATO = re.compile(
 # Alta precisao de proposito: so expressoes que um phishing real nunca traz.
 # "treinamento"/"exercicio" sozinhos NAO entram (podem ser pretexto legitimo:
 # "conclua seu treinamento obrigatorio"); so quando colados ao enquadramento
-# educativo/de simulacao. Casa sobre texto ja normalizado (sem acento,
-# minusculo) -- ver encontrar_disclaimer_de_simulacao.
+# educativo/de simulacao. A palavra "phishing" sozinha tambem NAO entra: um
+# e-mail (ate um phishing como isca) pode cita-la, e nos 59 itens reais nenhum
+# contaminado dependia SO dela (vinha sempre com simulac/conscientizac). Casa
+# sobre texto ja normalizado (sem acento, minusculo) -- ver
+# encontrar_disclaimer_de_simulacao. So aplicada a item MALICIOSO (ver
+# _problema_estrutural): e-mail legitimo pode falar de simulacao/phishing (um
+# aviso de conscientizacao verdadeiro), entao la nao conta como auto-denuncia.
 _DISCLAIMER_SIMULACAO = re.compile(
     r"simulac|simulad[oa]|conscientizac|ficticio|ficticia"
     r"|material educativo|exercicio (?:educativo|de conscientiz|de seguranc)"
     r"|exemplo de conscientiz|para fins (?:deste exemplo|educativos|de treinamento)"
     r"|faz parte (?:do exercicio|da simulac|de uma simulac|deste exercicio)"
     r"|nao e (?:uma? )?(?:comunicac|aviso|e-?mail|mensagem|solicitac|oferta|cobranc)[a-z]* real"
-    r"|nao e real|\bphishing\b"
+    r"|nao e real"
 )
 
 # Sintaxe Markdown no corpo (issue #51; piloto 3: 28 de 50 itens).

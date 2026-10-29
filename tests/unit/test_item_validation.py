@@ -511,11 +511,16 @@ def test_disclaimer_vazio_quando_email_e_limpo():
         "Conclua seu treinamento obrigatório de integração até sexta-feira.",
         "O exercício fiscal de 2026 exige a atualização do seu cadastro.",
         "Segue o cronograma de treinamento da nova equipe de vendas.",
+        # "phishing" sozinho NAO dispara (ate um phishing como isca pode cita-la;
+        # um aviso de seguranca verdadeiro tambem) -- so o enquadramento
+        # simulacao/conscientizacao conta.
+        "Cuidado com tentativas de phishing: nunca compartilhe sua senha.",
+        "Nossa equipe nunca pede senha por e-mail; desconfie de phishing.",
     ],
 )
 def test_pretexto_legitimo_nao_dispara_falso_positivo(pretexto_legitimo):
-    # "treinamento"/"exercicio" sozinhos sao pretextos validos de phishing;
-    # so o enquadramento educativo/de simulacao conta.
+    # "treinamento"/"exercicio"/"phishing" sozinhos sao validos; so o
+    # enquadramento educativo/de simulacao conta.
     assert encontrar_disclaimer_de_simulacao(pretexto_legitimo) == []
 
 

@@ -104,7 +104,11 @@ from app.domain.services.openai.embedding_client import OpenAIEmbeddingClient
 from app.domain.services.prompt_normalizer import PromptNormalizer
 from app.domain.services.reranker import ReRanker
 from app.domain.models.variation_spec import VariationSpec
-from app.domain.services.response_generator import ItemInvalidoError, ResponseGenerator
+from app.domain.services.response_generator import (
+    VERSAO_GERADOR,
+    ItemInvalidoError,
+    ResponseGenerator,
+)
 from app.domain.services.variation_sampler import VariationSampler
 from app.infra.qdrant.store import QdrantVectorStore
 
@@ -473,6 +477,9 @@ def _classificar_erro(exc: Exception) -> str:
       de resposta VAZIA (tipicamente recusa suave) nesses modelos.
     - limite_tokens: saida truncada por teto de tokens.
     - validacao: item gerado reprovado nas regras do pipeline (ItemInvalido).
+    - disclaimer: subcaso de validacao -- o modelo insistiu em narrar
+      "simulacao/conscientizacao" no e-mail e falhou apos as regeneracoes
+      (achado por modelo: alguns so geram se auto-denunciando).
     - formato: modelo respondeu, mas sem saida estruturada valida (JSON
       invalido / nao chamou a tool) -- falha de integracao, nao do modelo.
     - http: erro de rede/status da API (timeout, 429, 5xx).
@@ -480,6 +487,11 @@ def _classificar_erro(exc: Exception) -> str:
     - outro: nao classificado.
     """
     if isinstance(exc, ItemInvalidoError):
+        # Falha por INSISTIR na meta-narracao de simulacao (o modelo nao
+        # consegue gerar sem se auto-denunciar) e um achado por modelo --
+        # separada das demais reprovacoes de validacao.
+        if "disclaimer_simulacao" in str(exc).lower():
+            return "disclaimer"
         return "validacao"
     msg = str(exc).lower()
     if any(k in msg for k in (
@@ -954,6 +966,24 @@ def _bloco_erros(por_modelo: dict) -> str:
     return "\n".join(linhas)
 
 
+def _git_commit() -> Optional[str]:
+    """Hash curto do commit atual (reprodutibilidade no metadata), ou None
+    fora de um repo/sem git. Best-effort -- nunca derruba a gravacao."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return out.stdout.strip() or None if out.returncode == 0 else None
+    except Exception:
+        return None
+
+
 def salvar_relatorio(av: Avaliador, contextos, repeticoes, out_dir: Path) -> Path:
     por_modelo = _agregar(av.resultados, lambda r: r.label)
     por_tier = _agregar(av.resultados, lambda r: r.tier)
@@ -965,6 +995,11 @@ def salvar_relatorio(av: Avaliador, contextos, repeticoes, out_dir: Path) -> Pat
             "timestamp": datetime.now().isoformat(),
             "ragas_versao": "0.4.3",
             "rubrica_versao": RUBRICA_VERSAO,
+            # Reprodutibilidade: versao do gerador (prompts+validacoes) e o
+            # commit exato -- muda a geracao, tem de constar no relatorio
+            # (ex.: a regra/validacao anti-disclaimer do piloto 6).
+            "versao_gerador": VERSAO_GERADOR,
+            "git_commit": _git_commit(),
             "metricas": ["qualidade_rubrica_1a5 (2 juizes)", "context_relevance"],
             "metricas_nota": (
                 "Qualidade: rubrica holistica 1-5 (ciente do nivel), pontuada por DOIS "
