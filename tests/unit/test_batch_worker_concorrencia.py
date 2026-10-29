@@ -33,10 +33,16 @@ from tests.fakes import (
 )
 
 
-def _montar(response_generator, concurrency=8, max_tentativas_taxa=5, backoff_base_seconds=0.0):
+def _montar(
+    response_generator,
+    concurrency=8,
+    max_tentativas_taxa=5,
+    backoff_base_seconds=0.0,
+    service=None,
+):
     rg = response_generator
     jobs = FakeGenerationJobRepository()
-    service = FakePhishingService()
+    service = service or FakePhishingService()
     pipeline = GenerationPipeline(
         normalizer=FakePromptNormalizer(),
         response_generator=rg,
@@ -166,6 +172,21 @@ class _RateLimitNasPrimeiras(FakeResponseGenerator):
 class _RateLimitSempre(FakeResponseGenerator):
     async def generate_response(self, *args, **kwargs):
         raise _ErroDeTaxa(529)
+
+
+class _ServicoFalhaNaPrimeira(FakePhishingService):
+    """Levanta na 1a gravacao, grava normal depois -- para testar que a reserva
+    de dedup e DESFEITA quando o create_email falha."""
+
+    def __init__(self):
+        super().__init__()
+        self._primeira = True
+
+    async def create_email(self, email):
+        if self._primeira:
+            self._primeira = False
+            raise RuntimeError("falha de gravacao no banco")
+        return await super().create_email(email)
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +327,19 @@ async def test_mesma_semente_fichas_balanceadas_com_concorrencia():
         if c["step"] == "generate_response"
     )
     assert fichas_a and fichas_a == fichas_b
+
+
+async def test_reserva_de_dedup_e_desfeita_quando_gravacao_falha():
+    """Dois itens identicos; a 1a gravacao falha. Sem desfazer a reserva, o
+    embedding fantasma do item 1 faria o item 2 (identico) ser descartado como
+    duplicata de algo que nao existe. Com o undo, o item 2 e aceito."""
+    worker, jobs, _ = _montar(
+        _ConteudoFixo(), concurrency=2, service=_ServicoFalhaNaPrimeira()
+    )
+    job = await _rodar(worker, jobs, total=2)
+    assert job.total_generated == 1  # o 2o item entra (fantasma foi removido)
+    assert len(job.failures) == 1  # o 1o falhou na gravacao
+    assert job.total_discarded == 0  # ninguem foi descartado por duplicidade
 
 
 async def test_attempt_log_fica_ordenado_por_item():

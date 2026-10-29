@@ -226,6 +226,13 @@ class BatchGenerationWorker:
         # e pre-sorteada EM ORDEM (serial): o balanceamento de instituicao e a
         # atribuicao primaria ficam deterministicos mesmo com a geracao fora de
         # ordem. A geracao em si (cara) roda em paralelo, limitada por semaforo.
+        #
+        # LIMITE de determinismo (documentar no artigo): a DECISAO de dedup
+        # depende da ordem de TERMINO das geracoes, entao, entre dois itens
+        # parecidos, qual fica e qual e descartado pode variar de uma execucao
+        # para outra. A composicao, as fichas e a saida final (em ordem de slot)
+        # sao deterministicas; a escolha do par duplicado nao -- e isso ja valia
+        # para a geracao Anthropic, que nao tem seed.
         slots: List[Tuple[int, str, bool]] = []
         numero_item = 0
         for difficulty_value, count in distribution.items():
@@ -491,12 +498,13 @@ class BatchGenerationWorker:
                     )
                     == RESULTADO_ACEITO
                 )
+                assunto_norm = normalizar_assunto(assunto) if assunto is not None else None
                 if aceito:
                     # Reserva ANTES de qualquer await: o proximo item ja ve
                     # este na dedup.
                     accepted_embeddings.append(embedding)
-                    if assunto is not None:
-                        accepted_assuntos.add(normalizar_assunto(assunto))
+                    if assunto_norm is not None:
+                        accepted_assuntos.add(assunto_norm)
                 # --- fim da secao sincrona -----------------------------------
 
                 if aceito:
@@ -515,7 +523,21 @@ class BatchGenerationWorker:
                             nivel=difficulty_value,
                             is_malicious=is_malicious,
                         )
-                    item_id = await self._phishing_service.create_email(item)
+                    try:
+                        item_id = await self._phishing_service.create_email(item)
+                    except Exception:
+                        # DESFAZ a reserva se a gravacao falhar: um embedding/
+                        # assunto "fantasma" de um item que nao foi gravado faria
+                        # itens seguintes serem descartados como duplicata de algo
+                        # inexistente. (No modo serial antigo o append vinha depois
+                        # do create_email; aqui ele vem antes, pela dedup atomica.)
+                        try:
+                            accepted_embeddings.remove(embedding)
+                        except ValueError:
+                            pass
+                        if assunto_norm is not None:
+                            accepted_assuntos.discard(assunto_norm)
+                        raise
                     return {**resultado_base, "status": RESULTADO_ACEITO, "item_id": item_id}
 
             return {**resultado_base, "status": RESULTADO_DESCARTADO}
