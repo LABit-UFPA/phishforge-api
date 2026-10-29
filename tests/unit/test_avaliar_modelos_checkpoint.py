@@ -12,7 +12,15 @@ exige chaves de API) -- `_carregar_checkpoint` so mexe em self.resultados.
 
 import json
 
-from script.avaliar_modelos_llm import Avaliador, ResultadoItem
+import pytest
+
+# O script do eval importa ragas no topo (grupo `evaluation`). O job de
+# unit do CI roda sem esse grupo (LLM/ML mockados), entao fora dele este
+# modulo e pulado -- mesma convencao do teste de instructor em
+# test_llm_factory. Com o grupo (Docker local), roda normal.
+pytest.importorskip("ragas", reason="eval depende de ragas (grupo evaluation)")
+
+from script.avaliar_modelos_llm import Avaliador, ResultadoItem  # noqa: E402
 
 
 def _item(label, lote_id, rep, erro=None):
