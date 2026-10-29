@@ -166,6 +166,24 @@ _DOMINIO_CARICATO = re.compile(
     r"fake|fals[oa]|phish|golpe|do-?not-?click|dont-?click|nao-?cli(?:que|car)|malicio|hacker|123"
 )
 
+# Meta-narracao de "simulacao/conscientizacao" DENTRO do e-mail (achado da
+# comparacao de modelos: o GPT-6 Luna assava "esta e uma simulacao de
+# conscientizacao, nao e uma comunicacao real" no proprio corpo do phishing,
+# em 56% dos itens -- o e-mail se auto-denuncia e vira inutil como exemplo).
+# Alta precisao de proposito: so expressoes que um phishing real nunca traz.
+# "treinamento"/"exercicio" sozinhos NAO entram (podem ser pretexto legitimo:
+# "conclua seu treinamento obrigatorio"); so quando colados ao enquadramento
+# educativo/de simulacao. Casa sobre texto ja normalizado (sem acento,
+# minusculo) -- ver encontrar_disclaimer_de_simulacao.
+_DISCLAIMER_SIMULACAO = re.compile(
+    r"simulac|simulad[oa]|conscientizac|ficticio|ficticia"
+    r"|material educativo|exercicio (?:educativo|de conscientiz|de seguranc)"
+    r"|exemplo de conscientiz|para fins (?:deste exemplo|educativos|de treinamento)"
+    r"|faz parte (?:do exercicio|da simulac|de uma simulac|deste exercicio)"
+    r"|nao e (?:uma? )?(?:comunicac|aviso|e-?mail|mensagem|solicitac|oferta|cobranc)[a-z]* real"
+    r"|nao e real|\bphishing\b"
+)
+
 # Sintaxe Markdown no corpo (issue #51; piloto 3: 28 de 50 itens).
 _LINK_MARKDOWN = re.compile(r"\[([^\[\]\n]{1,200})\]\(\s*(https?://[^\s)]+)\s*\)")
 _NEGRITO_MARKDOWN = re.compile(r"\*\*([^*\n]{1,200})\*\*")
@@ -200,6 +218,7 @@ class RelatorioValidacao(BaseModel):
     regeneracoes_por_instituicao_real: int = 0
     regeneracoes_por_dominio_caricato: int = 0
     regeneracoes_por_assunto: int = 0
+    regeneracoes_por_disclaimer: int = 0
     # Sintaxe Markdown tirada do corpo: links "[texto](url)" convertidos
     # em texto (o destino vai para `links`) e negritos "**x**".
     links_markdown_convertidos: int = 0
@@ -357,6 +376,25 @@ def encontrar_dominios_caricatos(*textos: Optional[str]) -> List[str]:
             dominio = m.group(0).casefold()
             if _DOMINIO_CARICATO.search(dominio):
                 achados.append(dominio)
+    return list(dict.fromkeys(achados))
+
+
+def encontrar_disclaimer_de_simulacao(*textos: Optional[str]) -> List[str]:
+    """Trechos de meta-narracao "simulacao/conscientizacao/ficticio/nao e
+    real" em qualquer dos textos (assunto, corpo, remetente, texto de link).
+    Lista vazia = nada a corrigir.
+
+    Phishing real nunca se anuncia como simulacao ou exercicio educativo;
+    quando o gerador assa esse enquadramento no e-mail, o item vira inutil
+    como exemplo (ver comentario de _DISCLAIMER_SIMULACAO). A deteccao vale
+    para phishing e legitimo -- so o que importa e que o e-mail nao narre o
+    proprio enquadramento; a analise fica no campo `explicacao`, a parte.
+    """
+    achados: List[str] = []
+    for texto in textos:
+        if not texto:
+            continue
+        achados.extend(m.group(0) for m in _DISCLAIMER_SIMULACAO.finditer(_normalizar(texto)))
     return list(dict.fromkeys(achados))
 
 

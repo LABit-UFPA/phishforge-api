@@ -12,6 +12,7 @@ from app.domain.services.item_validation import (
     RelatorioValidacao,
     calcular_spans,
     converter_markdown,
+    encontrar_disclaimer_de_simulacao,
     encontrar_dominios_caricatos,
     encontrar_dominios_reais,
     encontrar_instituicoes_reais,
@@ -469,3 +470,62 @@ def test_encontrar_dominios_reais_e_nomes_somados_reproduzem_a_versao_antiga():
             )
         )
         assert combinado == encontrar_instituicoes_reais(texto)
+
+
+# --- disclaimer de "simulacao/conscientizacao" no corpo do e-mail ----------
+# (achado da comparacao de modelos: o GPT-6 Luna assava o enquadramento
+# educativo DENTRO do phishing, em 56% dos itens; trechos abaixo sao reais do
+# relatorio comparacao_modelos_20261029_071858.json.)
+
+@pytest.mark.parametrize(
+    "trecho",
+    [
+        "esta atividade de conscientizacao simula uma notificacao",
+        "SIMULAÇÃO DE CONSCIENTIZAÇÃO — NÃO É UMA COMUNICAÇÃO REAL DO BANCO",
+        "A mensagem fictícia alegaria que a regularização...",
+        "Material educativo: https://example.invalid/simulacao",
+        "esta é uma simulação educativa de phishing. Não envie documentos reais.",
+        "EXEMPLO DE TREINAMENTO — mensagem simulada para conscientização",
+        "Para fins deste exemplo de conscientização, a regularização...",
+        "Esse detalhe faz parte da simulação e deve ser verificado",
+        "Esta mensagem é um exercício de conscientização em segurança",
+    ],
+)
+def test_disclaimer_de_simulacao_e_detectado(trecho):
+    assert encontrar_disclaimer_de_simulacao(trecho), trecho
+
+
+def test_disclaimer_vazio_quando_email_e_limpo():
+    # Phishing realista, sem auto-denuncia (exemplo real do Haiku, nota 3/4).
+    corpo = (
+        "Olá, Railson Pinheiro, sou da Secretaria de Registro Acadêmico da "
+        "Universidade Grão Sul. Identificamos uma divergência no seu registro "
+        "que impede a emissão do diploma. O protocolo de referência é GRS-2026-48217."
+    )
+    assert encontrar_disclaimer_de_simulacao(corpo) == []
+
+
+@pytest.mark.parametrize(
+    "pretexto_legitimo",
+    [
+        "Conclua seu treinamento obrigatório de integração até sexta-feira.",
+        "O exercício fiscal de 2026 exige a atualização do seu cadastro.",
+        "Segue o cronograma de treinamento da nova equipe de vendas.",
+    ],
+)
+def test_pretexto_legitimo_nao_dispara_falso_positivo(pretexto_legitimo):
+    # "treinamento"/"exercicio" sozinhos sao pretextos validos de phishing;
+    # so o enquadramento educativo/de simulacao conta.
+    assert encontrar_disclaimer_de_simulacao(pretexto_legitimo) == []
+
+
+def test_disclaimer_ignora_acento_e_caixa():
+    assert encontrar_disclaimer_de_simulacao("SIMULAÇÃO") == encontrar_disclaimer_de_simulacao("simulacao")
+    assert encontrar_disclaimer_de_simulacao("Fictício") != []
+
+
+def test_disclaimer_varre_varios_campos():
+    achados = encontrar_disclaimer_de_simulacao(
+        "Equipe de Conscientização <x@y.com>", "Assunto normal", "corpo normal"
+    )
+    assert achados  # pega no remetente

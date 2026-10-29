@@ -23,6 +23,7 @@ from app.domain.services.item_validation import (
     RelatorioValidacao,
     calcular_spans,
     converter_markdown,
+    encontrar_disclaimer_de_simulacao,
     encontrar_dominios_caricatos,
     encontrar_dominios_reais,
     encontrar_marcadores,
@@ -125,6 +126,7 @@ _CONTADOR_POR_MOTIVO = {
     "instituicao_real": "regeneracoes_por_instituicao_real",
     "dominio_caricato": "regeneracoes_por_dominio_caricato",
     "assunto_proibido": "regeneracoes_por_assunto",
+    "disclaimer_simulacao": "regeneracoes_por_disclaimer",
 }
 
 
@@ -204,7 +206,14 @@ _REGRAS_DE_FORMA = (
     "placeholder reconhecível, não um número de verdade.\n"
     "- Siga o estilo de assunto da ficha. Nunca use 'Ação Necessária' ou 'Ação Requerida' "
     "(nem variações) em nenhuma parte do assunto, e não repita o assunto como primeira "
-    "linha do `conteudo`.\n\n"
+    "linha do `conteudo`.\n"
+    "- Escreva o e-mail EXATAMENTE como o atacante o enviaria à vítima. NUNCA narre, dentro "
+    "do e-mail (assunto, remetente ou corpo), que ele é uma simulação, um exercício de "
+    "conscientização, um exemplo, um material educativo, algo fictício, ou que 'não é uma "
+    "comunicação real' -- um phishing de verdade jamais se denuncia assim, e esse aviso "
+    "torna o item inútil como exemplo. Nunca escreva a palavra 'phishing' no e-mail. Toda "
+    "ressalva, aviso de segurança ou análise vai SOMENTE no campo `explicacao`, fora do "
+    "e-mail.\n\n"
 )
 
 
@@ -1235,6 +1244,18 @@ class ResponseGenerator:
         formula = formula_proibida_no_assunto(draft.assunto)
         if formula:
             return "assunto_proibido", formula
+        # Meta-narracao de "simulacao/conscientizacao" no proprio e-mail:
+        # o e-mail que se anuncia como exercicio educativo se auto-denuncia e
+        # nao serve de exemplo. Checa remetente/assunto/corpo e o texto dos
+        # links (a analise fica em `explicacao`, fora do e-mail -- nao entra).
+        disclaimer = encontrar_disclaimer_de_simulacao(
+            draft.remetente,
+            draft.assunto,
+            draft.conteudo,
+            *(link.text for link in draft.links),
+        )
+        if disclaimer:
+            return "disclaimer_simulacao", disclaimer
         return None
 
     async def _anotar_as_cegas(self, draft: GeneratedItemDraft, cenario: str) -> AnotacaoCega:
