@@ -737,3 +737,56 @@ def test_palavra_phishing_sozinha_nao_bloqueia_malicioso():
     )
     # "phishing" como isca nao e auto-denuncia -> nao bloqueia.
     assert gen._problema_estrutural(draft, is_malicious=True) is None
+
+
+# ---------------------------------------------------------------------------
+# Item 4 (plano de producao): completar a pista de dominio DEPOIS de validar.
+# Antes, a completacao rodava antes de _validar_cues: se o LLM anotava a pista
+# com evidencia errada (sem dominio), ela contava como "ja anotada", a
+# validacao a removia (pista_de_dominio_sem_dominio) e ninguem a repunha --
+# cues_completadas_por_construcao vinha 0 e o cue_count ficava subestimado.
+# ---------------------------------------------------------------------------
+
+
+async def test_pista_de_dominio_mal_anotada_e_removida_e_depois_completada():
+    """O LLM anotou sender_domain_mismatch com evidencia do CORPO (sem
+    dominio); o dominio da pista esta no REMETENTE. Depois do item 4: a
+    validacao remove a anotacao sem lastro e a completacao repoe a pista por
+    construcao, com evidencia = dominio e campo = remetente.
+    """
+    dominio = "vallonta-seguro.com"
+    ficha = _ficha_medio(pistas=(CueCode.SENDER_DOMAIN_MISMATCH,)).model_copy(
+        update={"dominio_da_pista": dominio, "dominio_da_pista_em": "remetente"}
+    )
+    gerado = _draft(
+        "Prezada Larissa Monteiro,\n\nSua conta será suspensa. Escritório de TI.",
+        cues=[
+            Cue(
+                code=CueCode.SENDER_DOMAIN_MISMATCH,
+                evidencia="Escritório de TI",  # trecho do corpo, sem dominio
+                campo="conteudo",
+            )
+        ],
+        remetente=f"Suporte Vallonta <suporte@{dominio}>",
+    )
+
+    resultado = await _generator(_ChainSequencia(gerado)).generate_response(
+        difficulty="dificil", context="ctx", relevant_docs="docs", variacao=ficha
+    )
+
+    # A pista voltou, completada por construcao e com lastro no remetente.
+    assert [c.code for c in resultado.cues] == [CueCode.SENDER_DOMAIN_MISMATCH]
+    cue = resultado.cues[0]
+    assert cue.evidencia == dominio
+    assert cue.campo == "remetente"
+    assert resultado.remetente[cue.span_start : cue.span_end] == dominio
+    v = resultado.validacao
+    assert v["cues_completadas_por_construcao"] == ["sender_domain_mismatch"]
+    # A anotacao sem lastro foi registrada como removida...
+    assert any(
+        r["motivo"] == "pista_de_dominio_sem_dominio" for r in v["pistas_removidas"]
+    )
+    # ...e o cue_count/difficulty_estimated contam a pista reposta.
+    assert resultado.phish_scale.cue_count == 1
+    assert resultado.phish_scale.difficulty_estimated is not None
+    assert v["pistas_alvo_ausentes"] == []

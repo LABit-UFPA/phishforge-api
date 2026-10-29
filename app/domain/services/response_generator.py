@@ -23,9 +23,11 @@ from app.domain.services.item_validation import (
     RelatorioValidacao,
     calcular_spans,
     converter_markdown,
+    desembrulhar_assinatura_de_sistema,
     encontrar_disclaimer_de_simulacao,
     encontrar_dominios_caricatos,
     encontrar_dominios_reais,
+    encontrar_links_invalidos,
     encontrar_marcadores,
     encontrar_nomes_de_instituicoes_reais,
     endereco_de_email,
@@ -107,7 +109,7 @@ def _texto_da_resposta(response) -> str:
 # generation_jobs.run_metadata de cada lote. Mudar prompt ou validacao =
 # mudar esta string, para os lotes de versoes diferentes nao se
 # misturarem na analise.
-VERSAO_GERADOR = "2026-10-29-piloto6-antidisclaimer"
+VERSAO_GERADOR = "2026-10-29-prod-sonnet"
 
 # Quantas vezes gerar o item de novo quando ele volta estruturalmente
 # invalido (marcador de template, remetente ou destinatario sem e-mail,
@@ -127,6 +129,7 @@ _CONTADOR_POR_MOTIVO = {
     "dominio_caricato": "regeneracoes_por_dominio_caricato",
     "assunto_proibido": "regeneracoes_por_assunto",
     "disclaimer_simulacao": "regeneracoes_por_disclaimer",
+    "link_invalido": "regeneracoes_por_link",
 }
 
 
@@ -192,6 +195,12 @@ _REGRAS_DE_FORMA = (
     "'fake', 'falso', 'phishing', 'golpe', 'donotclick', '123' ou parecidos.\n"
     "- `conteudo` é texto simples, sem Markdown: nada de [texto](url) nem **negrito**. Um "
     "link aparece no corpo só pelo texto exibido; o destino fica em `links`.\n"
+    "- O destino real de cada link (`href`) é uma URL completa e plausível "
+    "(https://...), no domínio oficial da organização da ficha ou num subdomínio dele "
+    "(ex.: https://acesso.vallonta.com.br/...). Quando a ficha indicar um domínio de "
+    "pista (typosquat ou domínio divergente do remetente), use ESSE domínio no link que "
+    "a realiza. Nunca use domínios ou TLDs reservados de exemplo ('.example', '.test', "
+    "'.invalid', 'example.com'), nem porta ':0', nem um destino sem domínio.\n"
     "- A identidade da organização já vem pronta na FICHA DO ITEM (nome-base, sigla e "
     "domínio oficial): combine o nome-base com o tipo de organização que o CENÁRIO pede "
     "(ex.: nome-base 'Vallonta' + cenário de universidade -> 'Universidade Vallonta'; mesmo "
@@ -201,9 +210,12 @@ _REGRAS_DE_FORMA = (
     "banco, órgão público, empresa) em nenhuma parte do e-mail, mesmo que o cenário cite "
     "uma.\n"
     "- Nunca escreva texto entre colchetes ou entre chaves: todo dado do e-mail (nome, "
-    "telefone, protocolo, contato) aparece preenchido, inventado quando preciso. Nunca use "
-    "a sequência '123456' como número de exemplo (protocolo, pedido, código): é um "
-    "placeholder reconhecível, não um número de verdade.\n"
+    "telefone, protocolo, contato) aparece preenchido, inventado quando preciso. Isso vale "
+    "também para a assinatura: uma notificação automática de sistema assina em texto corrido "
+    "(ex.: 'Notificação automática do sistema da Vallonta'), nunca como um rótulo entre "
+    "colchetes ('[SISTEMA VALLONTA]', '[AVISO AUTOMÁTICO]'). Nunca use a sequência '123456' "
+    "como número de exemplo (protocolo, pedido, código): é um placeholder reconhecível, não "
+    "um número de verdade.\n"
     "- Siga o estilo de assunto da ficha. Nunca use 'Ação Necessária' ou 'Ação Requerida' "
     "(nem variações) em nenhuma parte do assunto, e não repita o assunto como primeira "
     "linha do `conteudo`.\n\n"
@@ -1123,6 +1135,14 @@ class ResponseGenerator:
                 logging.error(f"Error generating response: {e}")
                 raise e
 
+            # Item 2 (cenario C): a assinatura de "notificacao de sistema" vinha
+            # como rotulo entre colchetes ("[SISTEMA ANR]") e o detector de
+            # marcador a reprovava. Desembrulha ANTES da checagem: se o unico
+            # "marcador" era a assinatura, o item passa sem gastar uma
+            # regeneracao, e o corpo final ja fica com ela em texto corrido.
+            draft.conteudo, _n_assinaturas = desembrulhar_assinatura_de_sistema(draft.conteudo)
+            relatorio.assinaturas_de_sistema_desembrulhadas += _n_assinaturas
+
             problema = self._problema_estrutural(draft, is_malicious=is_malicious)
             if problema is None:
                 break
@@ -1166,21 +1186,36 @@ class ResponseGenerator:
             ]
             premise_alignment = anotacao.premise_alignment
 
-        if is_malicious:
-            cues = self._completar_pistas_de_dominio_por_construcao(cues, ficha, draft, relatorio)
-
-        draft.cues = self._validar_cues(
+        campos = {
+            "conteudo": draft.conteudo,
+            "assunto": draft.assunto,
+            "remetente": draft.remetente,
+        }
+        validadas = self._validar_cues(
             draft.conteudo,
             cues,
             is_malicious,
             nome_destinatario=ficha.nome_destinatario if ficha else None,
             relatorio=relatorio,
-            campos={
-                "conteudo": draft.conteudo,
-                "assunto": draft.assunto,
-                "remetente": draft.remetente,
-            },
+            campos=campos,
         )
+        # Item 4: completar DEPOIS de validar. Se o LLM anotou a pista de
+        # dominio com evidencia errada (sem dominio), _validar_cues a remove
+        # (pista_de_dominio_sem_dominio); completar antes a veria "ja anotada"
+        # e nao a reporia -- cue_count ficava subestimado. Depois da remocao, a
+        # pista volta por construcao quando o dominio esta no remetente/link. As
+        # pistas recem-adicionadas ainda nao passaram por calcular_spans, entao
+        # so elas sao recalculadas (nao as ja validadas, para nao duplicar
+        # registro no relatorio).
+        if is_malicious:
+            completadas = self._completar_pistas_de_dominio_por_construcao(
+                validadas, ficha, draft, relatorio
+            )
+            novas = completadas[len(validadas):]
+            if novas:
+                novas = calcular_spans(campos, novas, relatorio)
+            validadas = validadas + novas
+        draft.cues = validadas
         draft.premise_alignment = premise_alignment
         if is_malicious and ficha is not None:
             registrar_aderencia(draft.cues, ficha.pistas_alvo, relatorio)
@@ -1255,6 +1290,13 @@ class ResponseGenerator:
         )
         if caricatos:
             return "dominio_caricato", caricatos
+        # Links artificiais que denunciam o e-mail como exemplo de laboratorio:
+        # TLD/dominio reservado (.example, example.com), porta :0, href sem
+        # dominio (ver encontrar_links_invalidos). Vale para phishing e legitimo
+        # -- nao e condicionado a is_malicious (um link quebrado estraga os dois).
+        links_invalidos = encontrar_links_invalidos(draft.links)
+        if links_invalidos:
+            return "link_invalido", [f"{href} ({motivo})" for href, motivo in links_invalidos]
         formula = formula_proibida_no_assunto(draft.assunto)
         if formula:
             return "assunto_proibido", formula

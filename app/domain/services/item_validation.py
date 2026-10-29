@@ -67,9 +67,11 @@ personificacao; "123456" como marcador):
     marcador nao cobria sequencia numerica de exemplo.
 """
 
+import ipaddress
 import re
 import unicodedata
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
@@ -193,6 +195,30 @@ _DISCLAIMER_SIMULACAO = re.compile(
 _LINK_MARKDOWN = re.compile(r"\[([^\[\]\n]{1,200})\]\(\s*(https?://[^\s)]+)\s*\)")
 _NEGRITO_MARKDOWN = re.compile(r"\*\*([^*\n]{1,200})\*\*")
 
+# Assinatura de "notificacao automatica de sistema" (cenario C) que o modelo
+# escreve como rotulo entre colchetes numa linha so: "[SISTEMA ANR]",
+# "[AVISO AUTOMATICO]", "[UCRV]", "[RMP]", "[ESM]" (4 das 5 falhas do Sonnet
+# na comparacao foram isso). E so o rotulo do remetente de sistema -- nao um
+# campo de template por preencher -- entao o colchete nao deve reprovar o item.
+# Discriminador (alta precisao): a linha inteira e UM rotulo entre colchetes
+# cujo miolo e CAIXA ALTA (letras, digitos, espaco, ponto, hifen, &; sem
+# minuscula). Placeholders de preenchimento ("[Nome do Estudante]", "[Seu
+# Nome]", "[Informacoes de Contato]") tem minuscula e NAO sao desembrulhados:
+# seguem barrados por encontrar_marcadores. So mexe em linha isolada (a
+# assinatura fica no fim do corpo), nunca num colchete no meio de uma frase.
+_ASSINATURA_ENTRE_COLCHETES = re.compile(
+    r"^(\s*)\[([A-Z0-9À-Þ][A-Z0-9À-Þ .&\-]{0,38})\]([ \t.;:!\-]*)$"
+)
+
+# TLDs e dominios de topo reservados para exemplo/teste (RFC 2606/6761): nunca
+# existem num e-mail real. "localhost"/"local" idem. Comparados por rotulo do
+# host (nao por regex de substring) para nao pegar "example-corp.com".
+_TLDS_RESERVADOS = frozenset({"example", "test", "invalid", "localhost", "local"})
+# "example" como 2o nivel ("example.com/.org/.net/.edu" -- o dominio de
+# exemplo classico; "cbr-documentos.example" ja cai pelo TLD reservado).
+_EXEMPLO_SEGUNDO_NIVEL = frozenset({"example"})
+_TLDS_DE_EXEMPLO = frozenset({"com", "org", "net", "edu"})
+
 # "Acao Necessaria", "Acao Requerida", "Acao Imediata Necessaria" (no
 # singular ou plural), em qualquer posicao do assunto normalizado.
 _FORMULA_DE_ASSUNTO = re.compile(
@@ -224,6 +250,12 @@ class RelatorioValidacao(BaseModel):
     regeneracoes_por_dominio_caricato: int = 0
     regeneracoes_por_assunto: int = 0
     regeneracoes_por_disclaimer: int = 0
+    regeneracoes_por_link: int = 0
+    # Assinaturas de "notificacao de sistema" (cenario C) desembrulhadas de
+    # colchetes antes da checagem de marcador ("[SISTEMA ANR]" -> "SISTEMA
+    # ANR") -- ver desembrulhar_assinatura_de_sistema. Mede quantos itens o
+    # ajuste salvou de uma regeneracao por marcador.
+    assinaturas_de_sistema_desembrulhadas: int = 0
     # Sintaxe Markdown tirada do corpo: links "[texto](url)" convertidos
     # em texto (o destino vai para `links`) e negritos "**x**".
     links_markdown_convertidos: int = 0
@@ -384,6 +416,61 @@ def encontrar_dominios_caricatos(*textos: Optional[str]) -> List[str]:
     return list(dict.fromkeys(achados))
 
 
+def _problema_do_link(href: Optional[str]) -> Optional[str]:
+    """Motivo pelo qual o destino de um link nao poderia existir num e-mail
+    real, ou None. TLD/dominio reservado de exemplo, porta :0, ou href sem
+    dominio plausivel (ver encontrar_links_invalidos)."""
+    bruto = (href or "").strip()
+    if not bruto:
+        return "vazio"
+    # Sem esquema, urlsplit poe tudo no path (hostname vazio). Prefixa
+    # "http://" so para extrair host/porta -- nao altera o link gerado.
+    alvo = bruto if "://" in bruto else "http://" + bruto
+    try:
+        partes = urlsplit(alvo)
+        host = (partes.hostname or "").lower()
+        porta = partes.port  # levanta ValueError se fora de 0..65535
+    except ValueError:
+        return "malformado"
+    if not host:
+        return "sem_dominio"
+    if porta == 0:
+        return "porta_invalida"
+    # IP cru (tecnica real de phishing) e valido -- so a porta foi checada.
+    try:
+        ipaddress.ip_address(host)
+        return None
+    except ValueError:
+        pass
+    rotulos = host.split(".")
+    tld = rotulos[-1]
+    if tld in _TLDS_RESERVADOS:
+        return "tld_reservado"
+    if len(rotulos) >= 2 and rotulos[-2] in _EXEMPLO_SEGUNDO_NIVEL and tld in _TLDS_DE_EXEMPLO:
+        return "dominio_de_exemplo"
+    if len(rotulos) < 2 or not tld.isalpha() or len(tld) < 2:
+        return "sem_tld"
+    return None
+
+
+def encontrar_links_invalidos(links: Iterable["LinkRef"]) -> List[Tuple[str, str]]:
+    """Links cujo destino (`href`) denuncia o e-mail como exemplo de
+    laboratorio: TLD/dominio reservado (.example, .test, .invalid, example.com
+    -- RFC 2606/6761), porta :0, ou href sem dominio plausivel (sem host, sem
+    TLD). Da comparacao de modelos: "cbr-documentos.example",
+    "confiarnacional.com.br:0". Devolve [(href, motivo)]; lista vazia = nada a
+    corrigir. Vale para phishing E legitimo -- um link artificial estraga o
+    item nos dois casos (o criterio nao depende do rotulo). IP cru e aceito.
+    """
+    achados: List[Tuple[str, str]] = []
+    for link in links or ():
+        href = getattr(link, "href", None)
+        motivo = _problema_do_link(href)
+        if motivo:
+            achados.append((href or "", motivo))
+    return achados
+
+
 def encontrar_disclaimer_de_simulacao(*textos: Optional[str]) -> List[str]:
     """Trechos de meta-narracao "simulacao/conscientizacao/ficticio/nao e
     real" em qualquer dos textos (assunto, corpo, remetente, texto de link).
@@ -484,6 +571,30 @@ def remover_assunto_repetido(assunto: str, conteudo: str) -> Tuple[str, bool]:
     while resto and not resto[0].strip():
         resto = resto[1:]
     return "\n".join(linhas[:indice] + resto), True
+
+
+def desembrulhar_assinatura_de_sistema(conteudo: str) -> Tuple[str, int]:
+    """Tira os colchetes de uma assinatura de "notificacao de sistema"
+    (cenario C) que ocupa uma linha sozinha e cujo miolo e CAIXA ALTA
+    ("[SISTEMA ANR]" -> "SISTEMA ANR", "[AVISO AUTOMATICO]" -> "AVISO
+    AUTOMATICO"). E so o rotulo do remetente de sistema, nao um campo de
+    template por preencher, entao nao deve reprovar o item no detector de
+    marcador (encontrar_marcadores). Placeholders de preenchimento, que tem
+    minuscula ("[Nome do Estudante]"), NAO sao tocados -- seguem barrados.
+    Devolve (corpo, quantas assinaturas foram desembrulhadas).
+
+    Roda ANTES da checagem de marcador (ver ResponseGenerator): se o unico
+    "marcador" era a assinatura de sistema, o item passa sem gastar uma
+    regeneracao, e o corpo final ja fica com a assinatura em texto corrido.
+    """
+    linhas = conteudo.split("\n")
+    desembrulhadas = 0
+    for i, linha in enumerate(linhas):
+        m = _ASSINATURA_ENTRE_COLCHETES.match(linha)
+        if m:
+            linhas[i] = f"{m.group(1)}{m.group(2)}{m.group(3)}"
+            desembrulhadas += 1
+    return "\n".join(linhas), desembrulhadas
 
 
 def localizar_evidencia(texto: str, evidencia: str) -> Optional[Tuple[int, int, str]]:

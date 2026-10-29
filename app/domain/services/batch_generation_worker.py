@@ -7,9 +7,11 @@ from uuid import UUID
 from app.domain.models.channel import Channel
 from app.domain.models.generation_job import JobStatus
 from app.domain.models.instituicao_ficticia import InstituicaoFicticia
+from app.core.reproducibilidade import commit_do_git
 from app.domain.models.phishing_email import PhishingEmail
 from app.domain.services.generation_pipeline import GenerationPipeline
 from app.domain.services.item_validation import normalizar_assunto
+from app.domain.services.llm_factory import descrever_saida_estruturada
 from app.domain.services.phishing_service import PhishingEmailService
 from app.domain.services.response_generator import VERSAO_GERADOR, ResponseGenerator
 from app.domain.services.variation_sampler import VariationSampler
@@ -152,9 +154,17 @@ class BatchGenerationWorker:
         for i in range(extra):
             distribution[difficulties[i]] += 1
 
+        _provider = getattr(self._response_generator, "provider", None)
+        _modelo = getattr(self._response_generator, "model_name", None)
         run_metadata = {
             "versao_gerador": VERSAO_GERADOR,
-            "modelo": getattr(self._response_generator, "model_name", None),
+            # Reprodutibilidade (plano item 5): commit do codigo, provider e o
+            # mecanismo de saida estruturada em uso -- o relatorio/lote tem de
+            # dizer com que codigo e por que caminho os itens foram gerados.
+            "git_commit": commit_do_git(),
+            "provider": _provider,
+            "modelo": _modelo,
+            "saida_estruturada": descrever_saida_estruturada(_provider or "", _modelo or ""),
             "temperatura": getattr(self._response_generator, "temperature", None),
             "anotacao_cega": getattr(self._response_generator, "anotacao_cega", None),
             "limiar_dedup": self._dedup_threshold,

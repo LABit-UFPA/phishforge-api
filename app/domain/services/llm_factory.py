@@ -44,6 +44,64 @@ def openai_exige_max_completion_tokens(model_name: str) -> bool:
     return bool(_OPENAI_NOVA_GERACAO.match(model_name.strip()))
 
 
+# Claude de reasoning (Sonnet/Opus/Haiku 4.6+ e 5.x, ex.: claude-sonnet-4-6,
+# claude-opus-4-8, claude-haiku-5-5): a API recusa `temperature != 1` com 400.
+# Espelha o `supports_temperature=False` do eval (ModelSpec em
+# avaliar_modelos_llm.py) para o caminho de PRODUCAO, onde o modelo vem do
+# config em vez de uma lista fixa. Os Claude mais antigos (<=4.5) seguem
+# aceitando temperature custom.
+_ANTHROPIC_SO_TEMPERATURA_1 = re.compile(
+    r"^claude-(?:opus|sonnet|haiku)-(?:4-[6-9]|[5-9]-\d)", re.IGNORECASE
+)
+
+
+def anthropic_exige_temperatura_1(model_name: str) -> bool:
+    """True para os Claude de reasoning que so aceitam `temperature=1`
+    (Sonnet/Opus/Haiku 4.6+ e 5.x). Nesses, o gerador omite a temperatura.
+    """
+    return bool(_ANTHROPIC_SO_TEMPERATURA_1.match(model_name.strip()))
+
+
+def modelo_so_aceita_temperatura_padrao(provider: str, model_name: str) -> bool:
+    """True quando o modelo so aceita a temperatura default do provider
+    (`temperature=1`): OpenAI de nova geracao (GPT-5+/o-series) e Claude de
+    reasoning (4.6+/5.x). Para esses, mandar `temperature != 1` da 400.
+    """
+    if provider == PROVIDER_OPENAI:
+        return openai_exige_max_completion_tokens(model_name)
+    if provider == PROVIDER_ANTHROPIC:
+        return anthropic_exige_temperatura_1(model_name)
+    return False
+
+
+def temperatura_efetiva(
+    provider: str, model_name: str, temperatura: Optional[float]
+) -> Optional[float]:
+    """A temperatura que o gerador deve de fato usar: `None` (deixa o
+    default do provider) para um modelo de reasoning que so aceita
+    `temperature=1`, senao a `temperatura` pedida. Com `None`, o
+    ResponseGenerator entra em modo reasoning e omite temperature em TODAS
+    as sub-chains -- o mesmo que o eval fez para o Sonnet 4.6
+    (supports_temperature=False). Usado pelo container (producao) para o
+    caminho de producao bater com o do eval.
+    """
+    return None if modelo_so_aceita_temperatura_padrao(provider, model_name) else temperatura
+
+
+def descrever_saida_estruturada(provider: str, model_name: str = "") -> str:
+    """Rotulo do mecanismo de saida estruturada em uso, para o metadata do
+    relatorio (eval) e o `run_metadata` do lote (producao). OpenAI: nativo
+    (tool calling). Anthropic: instructor Mode.ANTHROPIC_JSON (prefill, sem
+    tool_choice/thinking) -- ver build_structured_llm. Registra a assimetria
+    de metodo entre fornecedores, a documentar no artigo.
+    """
+    if provider == PROVIDER_OPENAI:
+        return "with_structured_output nativo (tool calling)"
+    if provider == PROVIDER_ANTHROPIC:
+        return "instructor Mode.ANTHROPIC_JSON (prefill, sem tool_choice/thinking)"
+    return provider
+
+
 def build_chat_model(
     provider: str,
     model_name: str,
