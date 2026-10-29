@@ -1149,7 +1149,10 @@ class ResponseGenerator:
                 draft.conteudo,
                 _n_assinaturas,
             ) = desembrulhar_assinatura_de_sistema(
-                draft.remetente, draft.assunto, draft.conteudo
+                draft.remetente,
+                draft.assunto,
+                draft.conteudo,
+                sigla=ficha.instituicao.sigla if ficha else None,
             )
             relatorio.assinaturas_de_sistema_desembrulhadas += _n_assinaturas
 

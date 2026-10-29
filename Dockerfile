@@ -37,6 +37,16 @@ COPY app/ ./app/
 COPY main.py ./
 COPY data/ ./data/
 
+# Commit do codigo da imagem (reprodutibilidade, plano item 5): dentro do
+# contentor `git` nao resolve o HEAD (a pasta montada cai em 'dubious
+# ownership'), entao o hash entra por build-arg e vira variavel de ambiente --
+# e o que commit_do_git() le para gravar em generation_jobs.run_metadata. Fica
+# no fim do Dockerfile para nao invalidar as camadas de dependencia a cada
+# commit. Passe no build: --build-arg GIT_COMMIT=$(git rev-parse --short HEAD)
+# (ver docker-compose.yml).
+ARG GIT_COMMIT=""
+ENV GIT_COMMIT=${GIT_COMMIT}
+
 EXPOSE 8000
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

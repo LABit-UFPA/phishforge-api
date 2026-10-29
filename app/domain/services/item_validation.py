@@ -202,17 +202,47 @@ _NEGRITO_MARKDOWN = re.compile(r"\*\*([^*\n]{1,200})\*\*")
 # reproduziu outras). E so o rotulo de sistema -- nao um campo de template por
 # preencher -- entao o colchete nao deve reprovar o item.
 #
-# Discriminador (alta precisao): o miolo e CAIXA ALTA -- letras (com acento),
-# digitos, espaco e separadores comuns (. & / - en/em-dash), SEM nenhuma
-# minuscula. Placeholders de preenchimento ("[Nome do Estudante]", "[Seu Nome]",
-# "[Informacoes de Contato]") tem minuscula, nao casam, e seguem barrados por
-# encontrar_marcadores. O rotulo e desembrulhado em tres lugares (ver
-# desembrulhar_assinatura_de_sistema): linha isolada do corpo (sign-off), inicio
-# do remetente (nome de exibicao do sistema) e inicio do assunto (tag). Nunca no
-# meio de uma frase -- "[PORTAL]" no meio de um texto segue como marcador.
+# Discriminador (DUAS condicoes, para nao desembrulhar placeholder por engano):
+# 1. o miolo e CAIXA ALTA -- letras (com acento), digitos, espaco e separadores
+#    comuns (. & / - en/em-dash), SEM minuscula; e
+# 2. o miolo e, de fato, rotulo de SISTEMA (ver _e_rotulo_de_sistema): contem
+#    uma palavra de sistema (SISTEMA, AVISO, AUTOMATICO, NOTIFICACAO...) OU a
+#    sigla da instituicao da ficha ("[UCRV]", "[RMP]", "[ESM]").
+# So a condicao 1 NAO bastava: "[LINK]", "[SEU NOME]", "[DATA]", "[CLIQUE AQUI]"
+# tambem sao caixa alta e SAO placeholders -- desembrulha-los deixaria um campo
+# de template passar pelo detector de marcador. Com a condicao 2 eles nao casam
+# e seguem barrados por encontrar_marcadores. O rotulo e desembrulhado em tres
+# lugares (ver desembrulhar_assinatura_de_sistema): linha isolada do corpo
+# (sign-off), inicio do remetente (nome de exibicao do sistema) e inicio do
+# assunto (tag). Nunca no meio de uma frase -- "[PORTAL]" no meio de um texto
+# segue como marcador.
 _ROTULO_DE_SISTEMA = r"\[([A-ZÀ-Þ0-9][A-ZÀ-Þ0-9 .&/–—-]{0,38})\]"
 _ASSINATURA_LINHA = re.compile(r"^([ \t]*(?:[-–—·*]\s*)?)" + _ROTULO_DE_SISTEMA + r"([ \t.;:!-]*)$")
 _ASSINATURA_PREFIXO = re.compile(r"^([ \t]*)" + _ROTULO_DE_SISTEMA)
+
+# Palavras que so aparecem num rotulo de SISTEMA, nunca num placeholder de
+# preenchimento (sobre texto sem acento, em maiusculas). Prefixos: "AUTOMATIC"
+# cobre AUTOMATICO/AUTOMATICA; "NOTIFICAC" cobre NOTIFICACAO.
+_SISTEMA_PALAVRAS = (
+    "SISTEMA", "AVISO", "AUTOMATIC", "NOTIFICAC", "ALERTA", "COMUNICADO",
+    "NO-REPLY", "NOREPLY", "NAO RESPONDER", "NAO-RESPONDER", "MAILER", "DAEMON",
+)
+
+
+def _e_rotulo_de_sistema(miolo: str, sigla: Optional[str]) -> bool:
+    """True quando um miolo em CAIXA ALTA entre colchetes e rotulo de SISTEMA
+    (a desembrulhar), nao um placeholder de preenchimento. Criterio: contem uma
+    palavra de sistema OU a sigla da instituicao da ficha (como token, para
+    "CBR" casar em "SISTEMA CBR"/"[CBR]" sem casar dentro de outra palavra).
+    Sem sigla (sem ficha), so as palavras de sistema contam -- um acronimo solto
+    e ambiguo demais e fica barrado."""
+    normal = _sem_acento(miolo).upper()
+    if any(p in normal for p in _SISTEMA_PALAVRAS):
+        return True
+    if sigla:
+        sig = re.escape(_sem_acento(sigla).upper())
+        return re.search(rf"(?<![A-Z0-9]){sig}(?![A-Z0-9])", normal) is not None
+    return False
 
 # TLDs e dominios de topo reservados para exemplo/teste (RFC 2606/6761): nunca
 # existem num e-mail real. "localhost"/"local" idem. Comparados por rotulo do
@@ -427,6 +457,12 @@ def _problema_do_link(href: Optional[str]) -> Optional[str]:
     bruto = (href or "").strip()
     if not bruto:
         return "vazio"
+    # Esquemas sem host (mailto:, tel:, sms:) sao links legitimos, nao "links
+    # de exemplo" com dominio reservado: nao passam pelas checagens de TLD/porta
+    # (senao "tel:+5591..." viraria porta invalida e forcaria regeneracao).
+    esquema = bruto.split(":", 1)[0].lower() if ":" in bruto else ""
+    if esquema in ("mailto", "tel", "sms"):
+        return None
     # Sem esquema, urlsplit poe tudo no path (hostname vazio). Prefixa
     # "http://" so para extrair host/porta -- nao altera o link gerado.
     alvo = bruto if "://" in bruto else "http://" + bruto
@@ -578,7 +614,10 @@ def remover_assunto_repetido(assunto: str, conteudo: str) -> Tuple[str, bool]:
 
 
 def desembrulhar_assinatura_de_sistema(
-    remetente: Optional[str], assunto: Optional[str], conteudo: str
+    remetente: Optional[str],
+    assunto: Optional[str],
+    conteudo: str,
+    sigla: Optional[str] = None,
 ) -> Tuple[Optional[str], Optional[str], str, int]:
     """Tira os colchetes de um rotulo de "notificacao de sistema" (cenario C)
     em CAIXA ALTA, nos tres lugares onde o modelo o coloca:
@@ -589,34 +628,39 @@ def desembrulhar_assinatura_de_sistema(
       ("[SISTEMA CBR] <sistema@cbr...>" -> "SISTEMA CBR <sistema@cbr...>");
     - assunto: o rotulo no inicio, como tag ("[AVISO] ..." -> "AVISO ...").
 
-    E so o rotulo de sistema, nao um campo de template por preencher, entao nao
-    deve reprovar o item no detector de marcador (encontrar_marcadores).
-    Placeholders de preenchimento, que tem minuscula ("[Nome do Estudante]"),
-    NAO casam e seguem barrados. Devolve (remetente, assunto, corpo, n).
+    So desembrulha o que _e_rotulo_de_sistema aprova (palavra de sistema ou a
+    `sigla` da instituicao): um placeholder em caixa alta ("[LINK]", "[SEU
+    NOME]", "[DATA]", "[CLIQUE AQUI]") NAO e tocado e segue barrado por
+    encontrar_marcadores. Devolve (remetente, assunto, corpo, n).
 
     Roda ANTES da checagem de marcador (ver ResponseGenerator): se o unico
     "marcador" era o rotulo de sistema, o item passa sem gastar uma regeneracao,
     e os campos finais ja ficam com o rotulo em texto corrido.
     """
-    total = 0
-    linhas = conteudo.split("\n")
-    for i, linha in enumerate(linhas):
-        novo, k = _ASSINATURA_LINHA.subn(r"\1\2\3", linha)
-        if k:
-            linhas[i] = novo
-            total += k
-    novo_conteudo = "\n".join(linhas)
+    contador = [0]
 
-    novo_remetente = remetente
-    if remetente:
-        novo_remetente, k = _ASSINATURA_PREFIXO.subn(r"\1\2", remetente, count=1)
-        total += k
-    novo_assunto = assunto
-    if assunto:
-        novo_assunto, k = _ASSINATURA_PREFIXO.subn(r"\1\2", assunto, count=1)
-        total += k
+    def _troca_linha(m: "re.Match[str]") -> str:
+        if _e_rotulo_de_sistema(m.group(2), sigla):
+            contador[0] += 1
+            return f"{m.group(1)}{m.group(2)}{m.group(3)}"
+        return m.group(0)
 
-    return novo_remetente, novo_assunto, novo_conteudo, total
+    def _troca_prefixo(m: "re.Match[str]") -> str:
+        if _e_rotulo_de_sistema(m.group(2), sigla):
+            contador[0] += 1
+            return f"{m.group(1)}{m.group(2)}"
+        return m.group(0)
+
+    novo_conteudo = "\n".join(
+        _ASSINATURA_LINHA.sub(_troca_linha, linha) for linha in conteudo.split("\n")
+    )
+    novo_remetente = (
+        _ASSINATURA_PREFIXO.sub(_troca_prefixo, remetente, count=1) if remetente else remetente
+    )
+    novo_assunto = (
+        _ASSINATURA_PREFIXO.sub(_troca_prefixo, assunto, count=1) if assunto else assunto
+    )
+    return novo_remetente, novo_assunto, novo_conteudo, contador[0]
 
 
 def localizar_evidencia(texto: str, evidencia: str) -> Optional[Tuple[int, int, str]]:

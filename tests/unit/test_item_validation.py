@@ -547,22 +547,43 @@ def test_disclaimer_varre_varios_campos():
 
 @pytest.mark.parametrize(
     "rotulo",
-    ["[UCRV]", "[SISTEMA ANR]", "[SISTEMA CBR]", "[RMP]", "[ESM]",
-     "[AVISO AUTOMÁTICO]", "[NOTIFICAÇÃO AUTOMÁTICA – CBR]"],
+    ["[SISTEMA ANR]", "[SISTEMA CBR]", "[AVISO AUTOMÁTICO]",
+     "[NOTIFICAÇÃO AUTOMÁTICA – CBR]"],
 )
-def test_assinatura_de_sistema_no_corpo_e_desembrulhada(rotulo):
+def test_rotulo_com_palavra_de_sistema_e_desembrulhado(rotulo):
+    """Rotulo com palavra de sistema (SISTEMA/AVISO/AUTOMATICO/NOTIFICACAO) e
+    desembrulhado mesmo sem saber a sigla."""
     corpo = f"Prezado cliente,\n\nSua fatura venceu.\n\n{rotulo}"
     _, _, limpo, n = desembrulhar_assinatura_de_sistema(None, None, corpo)
     assert n == 1
     miolo = rotulo.strip("[]")
     assert miolo in limpo and rotulo not in limpo
-    # E, desembrulhada, nao e mais marcador de template.
     assert encontrar_marcadores(limpo) == []
+
+
+@pytest.mark.parametrize("sigla", ["UCRV", "RMP", "ESM"])
+def test_sigla_da_instituicao_e_desembrulhada(sigla):
+    """Sigla pura da ficha ([UCRV], [RMP], [ESM]) e desembrulhada quando a
+    sigla da instituicao e passada."""
+    corpo = f"Prezado cliente,\n\nSua fatura.\n\n[{sigla}]"
+    _, _, limpo, n = desembrulhar_assinatura_de_sistema(None, None, corpo, sigla=sigla)
+    assert n == 1
+    assert f"[{sigla}]" not in limpo and sigla in limpo
+
+
+def test_acronimo_que_nao_e_a_sigla_nem_sistema_nao_desembrulha():
+    """Blindagem: um acronimo solto em caixa alta que NAO e a sigla da ficha
+    nem palavra de sistema fica barrado (ambiguo demais)."""
+    _, _, limpo, n = desembrulhar_assinatura_de_sistema(
+        None, None, "Texto.\n\n[XYZ]", sigla="CBR"
+    )
+    assert n == 0
+    assert "[XYZ]" in limpo and encontrar_marcadores(limpo)
 
 
 def test_assinatura_de_sistema_no_remetente_e_desembrulhada():
     rem = "[SISTEMA CBR] <sistema@cbr-documentos.com.br>"
-    novo_rem, _, _, n = desembrulhar_assinatura_de_sistema(rem, None, "corpo")
+    novo_rem, _, _, n = desembrulhar_assinatura_de_sistema(rem, None, "corpo", sigla="CBR")
     assert n == 1
     assert novo_rem == "SISTEMA CBR <sistema@cbr-documentos.com.br>"
     assert encontrar_marcadores(novo_rem) == []
@@ -598,8 +619,24 @@ def test_placeholder_de_preenchimento_nao_e_desembrulhado(placeholder):
     assert encontrar_marcadores(limpo)  # continua sendo marcador
 
 
+@pytest.mark.parametrize(
+    "placeholder",
+    ["[LINK]", "[SEU NOME]", "[DATA]", "[CLIQUE AQUI]", "[NOME DA EMPRESA]", "[URL]"],
+)
+def test_placeholder_em_caixa_alta_nao_e_desembrulhado(placeholder):
+    """Blindagem do revisor: placeholder em CAIXA ALTA (sem minuscula para
+    distinguir) NAO pode ser desembrulhado so por ser caixa alta -- senao um
+    campo de template passaria pelo detector de marcador. So rotulo de sistema
+    (palavra de sistema ou a sigla) desembrulha; estes nao, e seguem barrados."""
+    corpo = f"Clique aqui:\n\n{placeholder}"
+    _, _, limpo, n = desembrulhar_assinatura_de_sistema(None, None, corpo, sigla="CBR")
+    assert n == 0
+    assert placeholder in limpo
+    assert encontrar_marcadores(limpo)  # continua sendo marcador
+
+
 def test_colchete_no_meio_da_frase_nao_e_desembrulhado():
-    corpo = "Confirme em [PORTAL] agora para liberar o acesso."
+    corpo = "Confirme em [SISTEMA] agora para liberar o acesso."
     _, _, limpo, n = desembrulhar_assinatura_de_sistema(None, None, corpo)
     assert n == 0
     assert limpo == corpo  # so linha isolada / inicio de campo conta
@@ -666,3 +703,13 @@ def test_example_no_meio_do_nome_nao_e_falso_positivo():
 def test_lista_vazia_nada_a_corrigir():
     assert encontrar_links_invalidos([]) == []
     assert encontrar_links_invalidos(None) == []
+
+
+@pytest.mark.parametrize(
+    "href",
+    ["mailto:suporte@vallonta.com.br", "tel:+5591999999999", "sms:+5591999999999"],
+)
+def test_links_mailto_tel_sms_sao_validos(href):
+    """Esquemas sem host sao links legitimos -- nao viram 'porta invalida' nem
+    'malformado' (o prefixo http:// so vale para hrefs sem esquema)."""
+    assert encontrar_links_invalidos(_links(href)) == []
