@@ -89,7 +89,10 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from app.core.config import settings
 from app.domain.models.difficulty import Difficulty
-from app.domain.services.evaluation import run_ragas_evaluation
+from app.domain.services.evaluation import (
+    avaliar_qualidade_rubrica,
+    run_ragas_evaluation,
+)
 from app.domain.services.generation_pipeline import TOP_N_PARA_FUSAO, TOP_K_RETRIEVE
 from app.domain.services.llm_factory import (
     PROVIDER_ANTHROPIC,
@@ -280,9 +283,9 @@ class ResultadoItem:
     nivel: str
     cenario: str
     repeticao: int
-    context_relevance: Optional[float]
-    faithfulness: Optional[float]
-    response_relevancy: Optional[float]
+    context_relevance: Optional[float]  # recuperacao (sanidade do pipeline)
+    qualidade: Optional[float]  # rubrica 1-5 (diferenciador do gerador)
+    qualidade_justificativa: Optional[str]
     tempo_s: float
     erro: Optional[str] = None
 
@@ -399,6 +402,10 @@ class Avaliador:
             email = draft.model_dump() if hasattr(draft, "model_dump") else dict(draft)
             full_answer, so_corpo = _formatar_email(email)
 
+            # Metricas da comparacao: rel. contexto (recuperacao) +
+            # rubrica de qualidade (gerador). Faithfulness e answer
+            # relevancy ficam de fora -- sao de RAG-QA e nao medem bem
+            # geracao criativa (ver run_ragas_evaluation e a rubrica).
             scores = await run_ragas_evaluation(
                 search_question=search_query,
                 generation_question=generation_context,
@@ -407,32 +414,32 @@ class Avaliador:
                 contexts=contexts,
                 eval_llm=self.eval_llm,
                 eval_embeddings=self.eval_embeddings,
-                # Faithfulness nao se aplica a geracao criativa (o e-mail
-                # ficticio nao deve repetir os artigos recuperados) --
-                # ver docstring de run_ragas_evaluation. A comparacao usa
-                # rel. contexto + rel. resposta (como a Tabela 2 do artigo).
                 incluir_faithfulness=False,
+                incluir_response_relevancy=False,
+            )
+            qual = await avaliar_qualidade_rubrica(
+                self.eval_llm, cenario=ctx.texto, nivel=ctx.nivel, email=so_corpo
             )
             tempo = (datetime.now() - inicio).total_seconds()
             logger.info(
-                "OK %s | %s %s %s rep%d | cr=%s rr=%s t=%.1fs",
+                "OK %s | %s %s %s rep%d | cr=%s qual=%s t=%.1fs",
                 spec.label, ctx.eixo, ctx.nivel, ctx.cenario, repeticao,
-                _fmt(scores.get("context_relevance")), _fmt(scores.get("response_relevancy")),
+                _fmt(scores.get("context_relevance")), _fmt(qual.get("qualidade")),
                 tempo,
             )
             return ResultadoItem(
                 **base,
                 context_relevance=scores.get("context_relevance"),
-                faithfulness=scores.get("faithfulness"),
-                response_relevancy=scores.get("response_relevancy"),
+                qualidade=qual.get("qualidade"),
+                qualidade_justificativa=qual.get("qualidade_justificativa"),
                 tempo_s=tempo,
             )
         except Exception as e:
             tempo = (datetime.now() - inicio).total_seconds()
             logger.error("ERRO %s | %s %s %s: %s", spec.label, ctx.eixo, ctx.nivel, ctx.cenario, e)
             return ResultadoItem(
-                **base, context_relevance=None, faithfulness=None,
-                response_relevancy=None, tempo_s=tempo, erro=str(e),
+                **base, context_relevance=None, qualidade=None,
+                qualidade_justificativa=None, tempo_s=tempo, erro=str(e),
             )
 
     async def rodar(self, contextos: list[Contexto], repeticoes: int):
@@ -488,40 +495,43 @@ def _agregar(resultados: list[ResultadoItem], chave) -> dict:
     for g, rs in grupos.items():
         ok = [r for r in rs if r.erro is None]
         cr_m, cr_d = _media_desvio([r.context_relevance for r in ok])
-        rr_m, rr_d = _media_desvio([r.response_relevancy for r in ok])
-        f_m, f_d = _media_desvio([r.faithfulness for r in ok])
+        q_m, q_d = _media_desvio([r.qualidade for r in ok])
         t_m, _ = _media_desvio([r.tempo_s for r in ok])
         saida[g] = {
             "n": len(ok),
             "erros": len(rs) - len(ok),
             "context_relevance": cr_m, "context_relevance_std": cr_d,
-            "response_relevancy": rr_m, "response_relevancy_std": rr_d,
-            "faithfulness": f_m, "faithfulness_std": f_d,
+            "qualidade": q_m, "qualidade_std": q_d,
             "tempo_s": t_m,
         }
     return saida
 
 
 def _tabela_markdown(por_modelo: dict) -> str:
-    # Rel. contexto + rel. resposta + tempo (as mesmas colunas da Tabela
-    # 2 do artigo). Faithfulness fica de fora: nao se aplica a geracao
-    # criativa (ver run_ragas_evaluation).
+    # Qualidade (rubrica 1-5, o diferenciador do gerador) + rel. contexto
+    # (recuperacao / sanidade do pipeline) + tempo. Faithfulness e answer
+    # relevancy ficam de fora (metricas de RAG-QA, ver run_ragas_evaluation
+    # e a rubrica).
     linhas = [
-        "| Modelo | Tier | Rel. contexto (%) | Rel. resposta (%) | Tempo (s) | n |",
+        "| Modelo | Tier | Qualidade (1-5) | Rel. contexto (%) | Tempo (s) | n |",
         "|---|---|---|---|---|---|",
     ]
     def pct(m, d):
         if m is None:
             return "—"
         return f"{m*100:.1f} ± {d*100:.0f}" if d else f"{m*100:.1f}"
+    def nota(m, d):
+        if m is None:
+            return "—"
+        return f"{m:.2f} ± {d:.2f}" if d else f"{m:.2f}"
     for spec in MODELOS_A_TESTAR:
         a = por_modelo.get(spec.label)
         if not a:
             continue
         linhas.append(
             f"| {spec.label} | {spec.tier} | "
+            f"{nota(a['qualidade'], a['qualidade_std'])} | "
             f"{pct(a['context_relevance'], a['context_relevance_std'])} | "
-            f"{pct(a['response_relevancy'], a['response_relevancy_std'])} | "
             f"{a['tempo_s']:.1f} | {a['n']} |"
         )
     return "\n".join(linhas)
@@ -536,11 +546,14 @@ def salvar_relatorio(av: Avaliador, contextos, repeticoes, out_dir: Path) -> Pat
         "metadata": {
             "timestamp": datetime.now().isoformat(),
             "ragas_versao": "0.4.3",
-            "metricas": ["context_relevance", "response_relevancy"],
+            "metricas": ["qualidade_rubrica_1a5", "context_relevance"],
             "metricas_nota": (
-                "Faithfulness fora de proposito: nao se aplica a geracao criativa "
-                "(o e-mail ficticio nao deve repetir os artigos recuperados). Mesmas "
-                "metricas da Tabela 2 do artigo (rel. contexto + rel. resposta)."
+                "Qualidade: rubrica holistica 1-5 (ciente do nivel) dada pelo juiz "
+                "fixo -- diferenciador do gerador. Context relevance: qualidade da "
+                "recuperacao (sanidade do pipeline). Faithfulness e answer relevancy "
+                "ficaram de fora: metricas de RAG-QA, nao medem bem geracao criativa "
+                "(o e-mail ficticio nao deve repetir os artigos; o user_input e "
+                "instrucao, nao pergunta)."
             ),
             "modelos": [vars(m) for m in MODELOS_A_TESTAR],
             "juiz_ragas": JUIZ_RAGAS_MODEL,
@@ -626,13 +639,11 @@ async def _smoke():
     client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
     eval_llm = _build_juiz_ragas(client)
     eval_embeddings = embedding_factory("openai", model=JUIZ_RAGAS_EMBEDDING, client=client)
-    print(f"[1/2] Smoke do juiz RAGAS 0.4 ({JUIZ_RAGAS_MODEL}) ...")
+    print(f"[1/2] Smoke do juiz RAGAS 0.4 + rubrica ({JUIZ_RAGAS_MODEL}) ...")
     # Par realista (consulta de busca <-> contexto academico <-> e-mail
-    # coerente com o cenario), para as duas metricas usadas (rel.
-    # contexto e rel. resposta) saírem numa faixa representativa -- nao
-    # um toco desalinhado. So demonstra o wiring; nao substitui a
-    # comparacao real sobre os contextos do xlsx. Faithfulness fica de
-    # fora (nao se aplica a geracao criativa; ver run_ragas_evaluation).
+    # coerente com o cenario). So demonstra o wiring (rel. contexto +
+    # rubrica de qualidade); nao substitui a comparacao real sobre os
+    # contextos do xlsx.
     email_exemplo = (
         "De: Secretaria Academica <secretaria@uni-exemplo.edu.br>\n"
         "Para: joao.silva@uni-exemplo.edu.br\n"
@@ -660,13 +671,20 @@ async def _smoke():
         eval_llm=eval_llm,
         eval_embeddings=eval_embeddings,
         incluir_faithfulness=False,
+        incluir_response_relevancy=False,
     )
-    print("    Resultado (rel. contexto / rel. resposta):", scores)
-    if scores.get("error"):
-        raise SystemExit(f"Smoke do juiz FALHOU: {scores['error']}")
-    faltando = [k for k in ("context_relevance", "response_relevancy") if scores.get(k) is None]
-    if faltando:
-        raise SystemExit(f"Smoke do juiz incompleto -- metricas sem nota: {faltando}")
+    qual = await avaliar_qualidade_rubrica(
+        eval_llm,
+        cenario="E-mail de uma universidade avisando o estudante sobre uma pendencia de matricula.",
+        nivel="Médio",
+        email=email_exemplo,
+    )
+    print("    Rel. contexto:", scores.get("context_relevance"))
+    print(f"    Qualidade (rubrica 1-5): {qual.get('qualidade')} -- {qual.get('qualidade_justificativa')}")
+    if scores.get("error") or scores.get("context_relevance") is None:
+        raise SystemExit(f"Smoke do juiz (rel. contexto) FALHOU: {scores.get('error')}")
+    if qual.get("qualidade") is None:
+        raise SystemExit(f"Smoke da rubrica FALHOU: {qual.get('error')}")
 
     # 2. Geradores OpenAI (so os OpenAI; Anthropic e outra API/credencial)
     print("[2/2] Smoke dos geradores OpenAI (1 chamada trivial cada) ...")
