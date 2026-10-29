@@ -6,6 +6,7 @@ o provider certo e escolhido, que temperature e omitida quando None
 """
 
 import pytest
+from pydantic import BaseModel, Field
 
 from app.domain.services.llm_factory import (
     PROVIDER_ANTHROPIC,
@@ -76,6 +77,36 @@ def test_anthropic_ignora_seed_sem_quebrar():
         PROVIDER_ANTHROPIC, "claude-haiku-5-5", anthropic_api_key="x", seed=42
     )
     assert type(m).__name__ == "ChatAnthropic"
+
+
+class _SchemaDummy(BaseModel):
+    campo: str = Field(description="um campo qualquer")
+
+
+def test_structured_llm_openai_nativo():
+    """OpenAI: build_structured_llm usa o with_structured_output nativo e
+    devolve um Runnable.
+    """
+    from app.domain.services.llm_factory import build_structured_llm
+
+    r = build_structured_llm(PROVIDER_OPENAI, "gpt-4o-mini", _SchemaDummy, openai_api_key="sk-x")
+    assert hasattr(r, "ainvoke")
+
+
+def test_structured_llm_anthropic_instructor_json():
+    """Anthropic: build_structured_llm NAO usa with_structured_output (que
+    forcaria tool_choice, recusado pelos Claude de reasoning); usa instructor
+    em JSON-mode, devolvido como um RunnableLambda. Requer `instructor`
+    (vem com o grupo evaluation); fora dele, o teste e pulado.
+    """
+    pytest.importorskip("instructor")
+    from app.domain.services.llm_factory import build_structured_llm
+
+    r = build_structured_llm(
+        PROVIDER_ANTHROPIC, "claude-sonnet-5-5", _SchemaDummy, anthropic_api_key="x"
+    )
+    assert hasattr(r, "ainvoke")
+    assert type(r).__name__ == "RunnableLambda"
 
 
 def test_openai_nova_geracao_detecta_gpt5_gpt6_oseries():

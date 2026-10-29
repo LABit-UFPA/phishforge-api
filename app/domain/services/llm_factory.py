@@ -17,6 +17,7 @@ import re
 from typing import Optional
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.runnables import Runnable
 
 PROVIDER_OPENAI = "openai"
 PROVIDER_ANTHROPIC = "anthropic"
@@ -68,6 +69,11 @@ def build_chat_model(
     o item gerado de cada linha (ver avaliar_modelos_llm.py): e a
     reprodutibilidade que vale cross-vendor.
 
+    Saida estruturada nos modelos de reasoning da Anthropic
+    (claude-haiku-5-5, claude-sonnet-5-5): NAO use
+    `.with_structured_output(...)` direto -- ver with_structured_output_compat
+    abaixo (eles rejeitam o tool_choice forcado que o langchain usa).
+
     Import do cliente feito DENTRO de cada ramo de proposito: assim um
     ambiente que so usa OpenAI nao precisa ter `langchain-anthropic`
     instalado (e vice-versa), e o erro de dependencia faltando so
@@ -106,6 +112,84 @@ def build_chat_model(
             temperature=temperature if temperature is not None else 1.0,
             max_tokens=max_tokens or _MAX_TOKENS_ANTHROPIC_PADRAO,
         )
+
+    raise ValueError(
+        f"provider de LLM desconhecido: {provider!r}. "
+        f"Use um de {PROVIDERS_SUPORTADOS}."
+    )
+
+
+def build_structured_llm(
+    provider: str,
+    model_name: str,
+    schema: type,
+    *,
+    openai_api_key: str = "",
+    anthropic_api_key: str = "",
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    seed: Optional[int] = None,
+) -> Runnable:
+    """Runnable de SAIDA ESTRUTURADA: recebe um prompt (PromptValue/str) e
+    devolve uma instancia Pydantic de `schema`. Usar no lugar de
+    `build_chat_model(...).with_structured_output(...)`.
+
+    - OpenAI: ChatOpenAI.with_structured_output -- saida estruturada nativa.
+    - Anthropic: instructor em Mode.ANTHROPIC_JSON (prefill de JSON, SEM
+      tool_choice e SEM thinking). Porque, no langchain-anthropic 0.3.18,
+      nenhum caminho de saida estruturada e confiavel para os Claude 5.5 de
+      reasoning: tool_choice forcado -> 400 no sonnet; tool_choice="auto" ->
+      o modelo as vezes NAO chama a tool (varia por prompt/modelo -> item
+      perdido), o que contaria errado como falha do modelo; thinking.enabled
+      -> recusado (pedem 'adaptive'). O instructor JSON-mode e o MESMO
+      mecanismo do juiz Anthropic do eval (ja validado nestes modelos) e
+      nao depende de tool_choice.
+
+    ASSIMETRIA DE METODO entre os fornecedores (nativo x instructor) --
+    registrada no metadata do relatorio e a documentar no metodo do artigo.
+    No ramo Anthropic NAO se envia temperature (os Claude 5.5 recusam
+    temperature != 1) nem thinking (desligado; registrar no metadata).
+
+    `instructor` e importado de forma preguicosa so no ramo Anthropic: um
+    ambiente que so usa OpenAI (producao atual) nao precisa dele instalado.
+    """
+    if provider == PROVIDER_OPENAI:
+        chat = build_chat_model(
+            PROVIDER_OPENAI,
+            model_name,
+            openai_api_key=openai_api_key,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            seed=seed,
+        )
+        return chat.with_structured_output(schema)
+
+    if provider == PROVIDER_ANTHROPIC:
+        import instructor
+        from anthropic import AsyncAnthropic
+        from langchain_core.runnables import RunnableLambda
+
+        client = instructor.from_anthropic(
+            AsyncAnthropic(api_key=anthropic_api_key), mode=instructor.Mode.ANTHROPIC_JSON
+        )
+        mt = max_tokens or _MAX_TOKENS_ANTHROPIC_PADRAO
+
+        async def _acall(prompt_value):
+            if hasattr(prompt_value, "to_string"):
+                content = prompt_value.to_string()
+            elif isinstance(prompt_value, str):
+                content = prompt_value
+            else:
+                content = str(prompt_value)
+            # Sem temperature (recusada) e sem thinking (desligado).
+            return await client.messages.create(
+                model=model_name,
+                max_tokens=mt,
+                messages=[{"role": "user", "content": content}],
+                response_model=schema,
+            )
+
+        return RunnableLambda(_acall)
 
     raise ValueError(
         f"provider de LLM desconhecido: {provider!r}. "

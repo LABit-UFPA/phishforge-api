@@ -23,6 +23,7 @@ from app.domain.services.item_validation import (
     RelatorioValidacao,
     calcular_spans,
     converter_markdown,
+    encontrar_disclaimer_de_simulacao,
     encontrar_dominios_caricatos,
     encontrar_dominios_reais,
     encontrar_marcadores,
@@ -35,7 +36,11 @@ from app.domain.services.item_validation import (
     remover_pistas_de_dominio_sem_dominio,
     remover_saudacao_generica_falsa,
 )
-from app.domain.services.llm_factory import PROVIDER_OPENAI, build_chat_model
+from app.domain.services.llm_factory import (
+    PROVIDER_OPENAI,
+    build_chat_model,
+    build_structured_llm,
+)
 from app.domain.services.variation_sampler import renderizar_ficha
 from pydantic import BaseModel, Field
 
@@ -64,11 +69,45 @@ def _data_atual_por_extenso() -> str:
     agora = datetime.now()
     return f"{agora.day} de {_MESES_PT[agora.month]} de {agora.year}"
 
+
+def _texto_da_resposta(response) -> str:
+    """Texto plano de um AIMessage, seja qual for o provider.
+
+    Na OpenAI `message.content` e uma str. Na Anthropic (sobretudo os
+    modelos de reasoning) vem como LISTA de blocos -- p.ex.
+    [{'type': 'thinking', ...}, {'type': 'text', 'text': '...'}] -- e um
+    `.content.strip()` direto quebrava com "'list' object has no attribute
+    'strip'", derrubando HyDE e a fusao de contexto para o fallback APENAS
+    nos modelos Anthropic (RAG degradado so de um lado -> confundidor na
+    comparacao de modelos). Aqui concatenamos os blocos de texto e
+    ignoramos os de raciocinio.
+    """
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        partes = []
+        for bloco in content:
+            if isinstance(bloco, str):
+                partes.append(bloco)
+            elif isinstance(bloco, dict):
+                # blocos de texto da Anthropic/LangChain: {'type':'text','text':...}
+                if bloco.get("type") == "text" and bloco.get("text"):
+                    partes.append(bloco["text"])
+                elif bloco.get("type") in (None, "output_text") and bloco.get("text"):
+                    partes.append(bloco["text"])
+            else:
+                texto = getattr(bloco, "text", None)
+                if texto:
+                    partes.append(texto)
+        return "".join(partes)
+    return str(content or "")
+
 # Versao do gerador de e-mail (prompts + validacoes), registrada em
 # generation_jobs.run_metadata de cada lote. Mudar prompt ou validacao =
 # mudar esta string, para os lotes de versoes diferentes nao se
 # misturarem na analise.
-VERSAO_GERADOR = "2026-10-28-piloto5"
+VERSAO_GERADOR = "2026-10-29-piloto6-antidisclaimer"
 
 # Quantas vezes gerar o item de novo quando ele volta estruturalmente
 # invalido (marcador de template, remetente ou destinatario sem e-mail,
@@ -87,6 +126,7 @@ _CONTADOR_POR_MOTIVO = {
     "instituicao_real": "regeneracoes_por_instituicao_real",
     "dominio_caricato": "regeneracoes_por_dominio_caricato",
     "assunto_proibido": "regeneracoes_por_assunto",
+    "disclaimer_simulacao": "regeneracoes_por_disclaimer",
 }
 
 
@@ -167,6 +207,20 @@ _REGRAS_DE_FORMA = (
     "- Siga o estilo de assunto da ficha. Nunca use 'Ação Necessária' ou 'Ação Requerida' "
     "(nem variações) em nenhuma parte do assunto, e não repita o assunto como primeira "
     "linha do `conteudo`.\n\n"
+)
+
+# Regra anti-disclaimer: SO no prompt malicioso (nao em _REGRAS_DE_FORMA, que
+# o prompt legitimo tambem usa -- um e-mail legitimo pode falar de
+# conscientizacao/phishing). Um phishing que narra "isto e uma simulacao" se
+# auto-denuncia (achado da comparacao: GPT-6 Luna fazia isso em 56% dos itens).
+_REGRA_ANTI_DISCLAIMER = (
+    "### SEM META-NARRAÇÃO (OBRIGATÓRIO)\n"
+    "- Escreva o e-mail EXATAMENTE como o atacante o enviaria à vítima. NUNCA narre, dentro "
+    "do e-mail (assunto, remetente ou corpo), que ele é uma simulação, um exercício de "
+    "conscientização, um exemplo, um material educativo, algo fictício, ou que 'não é uma "
+    "comunicação real' -- um phishing de verdade jamais se denuncia assim, e esse aviso "
+    "torna o item inútil como exemplo. Toda ressalva, aviso de segurança ou análise vai "
+    "SOMENTE no campo `explicacao`, fora do e-mail.\n\n"
 )
 
 
@@ -410,6 +464,25 @@ class ResponseGenerator:
             )
 
         self._chat = _chat
+
+        # Saida estruturada. OpenAI: with_structured_output nativo. Anthropic:
+        # instructor em JSON-mode (sem tool_choice, sem thinking), porque
+        # nenhum caminho de saida estruturada do langchain-anthropic 0.3.18 e
+        # confiavel com os Claude 5.5 de reasoning (ver build_structured_llm).
+        # Para Anthropic, build_structured_llm ignora a temperatura (recusada).
+        # Todas as chains estruturadas abaixo (item, anotacao e os 5 canais)
+        # passam por aqui.
+        def _structured(schema, temperatura, max_tokens=None):
+            return build_structured_llm(
+                provider,
+                model_name,
+                schema,
+                openai_api_key=api_key,
+                anthropic_api_key=anthropic_api_key,
+                temperature=temperatura,
+                max_tokens=max_tokens,
+                seed=seed,
+            )
         # Piloto 2: com o gerador anotando as proprias pistas sabendo as
         # pistas-alvo, as anotadas coincidiram 100% com o alvo mesmo
         # quando o texto nao as sustentava. Ligado, `cues` e
@@ -417,12 +490,8 @@ class ResponseGenerator:
         # item pronto. Default False aqui (testes antigos); o container
         # liga pelo config (ANOTACAO_CEGA).
         self.anotacao_cega = anotacao_cega
-        self.annotation_llm = _chat(_temp(0.0), max_tokens_anotacao).with_structured_output(
-            AnotacaoCega
-        )
-        self.llm = _chat(temperature, max_tokens_geracao).with_structured_output(
-            GeneratedItemDraft
-        )
+        self.annotation_llm = _structured(AnotacaoCega, _temp(0.0), max_tokens_anotacao)
+        self.llm = _structured(GeneratedItemDraft, temperature, max_tokens_geracao)
 
         self.text_llm = _chat(_temp(0.2))
 
@@ -457,6 +526,7 @@ class ResponseGenerator:
                 "template no texto, como [Nome] ou [Nome do Estudante]: use exatamente o nome "
                 "da ficha, ou uma saudação genérica quando a ficha disser que não há nome.\n\n"
                 f"{_REGRAS_DE_FORMA}"
+                f"{_REGRA_ANTI_DISCLAIMER}"
 
                 "### VARIEDADE ESTRUTURAL (OBRIGATÓRIO -- validado empiricamente na issue #20)\n"
                 "Uma checagem contra geração real mostrou dois problemas que já foram "
@@ -759,23 +829,13 @@ class ResponseGenerator:
         # ja usa (#3), so que schemas diferentes (WebsiteItemDraft,
         # PhoneCallItemDraft, PixQrItemDraft) em vez de reusar
         # GeneratedItemDraft, que fica intocado por esta issue.
-        self.website_llm = _chat(temperature, max_tokens_geracao).with_structured_output(
-            WebsiteItemDraft
-        )
-        self.phone_call_llm = _chat(temperature, max_tokens_geracao).with_structured_output(
-            PhoneCallItemDraft
-        )
-        self.pix_qr_llm = _chat(temperature, max_tokens_geracao).with_structured_output(
-            PixQrItemDraft
-        )
+        self.website_llm = _structured(WebsiteItemDraft, temperature, max_tokens_geracao)
+        self.phone_call_llm = _structured(PhoneCallItemDraft, temperature, max_tokens_geracao)
+        self.pix_qr_llm = _structured(PixQrItemDraft, temperature, max_tokens_geracao)
         # sms/whatsapp (issue #6, desbloqueados pela phishing-quest-api
         # #68): mesma separacao de LLM/prompt por canal dos 3 acima.
-        self.sms_llm = _chat(temperature, max_tokens_geracao).with_structured_output(
-            SmsItemDraft
-        )
-        self.whatsapp_llm = _chat(temperature, max_tokens_geracao).with_structured_output(
-            WhatsAppItemDraft
-        )
+        self.sms_llm = _structured(SmsItemDraft, temperature, max_tokens_geracao)
+        self.whatsapp_llm = _structured(WhatsAppItemDraft, temperature, max_tokens_geracao)
 
         _campos_canal = "content, explicacao, categoria"
 
@@ -1063,7 +1123,7 @@ class ResponseGenerator:
                 logging.error(f"Error generating response: {e}")
                 raise e
 
-            problema = self._problema_estrutural(draft)
+            problema = self._problema_estrutural(draft, is_malicious=is_malicious)
             if problema is None:
                 break
             motivo, detalhe = problema
@@ -1134,13 +1194,19 @@ class ResponseGenerator:
             }
         )
 
-    def _problema_estrutural(self, draft: GeneratedItemDraft):
+    def _problema_estrutural(self, draft: GeneratedItemDraft, is_malicious: bool = True):
         """(motivo, detalhe) quando o item nao pode ser usado como veio,
         ou None. Marcador de template (piloto 1 e 2), remetente sem
         endereco de e-mail (piloto 2), destinatario sem e-mail e dominio
         caricato (piloto 3), instituicao real ou "Acao Necessaria" no
         assunto (teste da versao do piloto 3). Vale para phishing e
         legitimo: senao a regra vira atalho para o rotulo.
+
+        A checagem de disclaimer de simulacao (ver abaixo) e a UNICA
+        condicionada a `is_malicious`: um e-mail legitimo PODE narrar
+        simulacao/conscientizacao/phishing (um aviso de seguranca de
+        verdade), entao la isso nao e auto-denuncia -- so num phishing e que
+        anunciar-se como exercicio educativo estraga o item.
         """
         textos_de_link = [link.text for link in draft.links]
         # O endereco do destinatario so e checado quanto a colchetes:
@@ -1192,6 +1258,20 @@ class ResponseGenerator:
         formula = formula_proibida_no_assunto(draft.assunto)
         if formula:
             return "assunto_proibido", formula
+        # Meta-narracao de "simulacao/conscientizacao" no proprio e-mail:
+        # o phishing que se anuncia como exercicio educativo se auto-denuncia
+        # e nao serve de exemplo. So para item malicioso (ver docstring).
+        # Checa remetente/assunto/corpo e o texto dos links (a analise fica
+        # em `explicacao`, fora do e-mail -- nao entra).
+        if is_malicious:
+            disclaimer = encontrar_disclaimer_de_simulacao(
+                draft.remetente,
+                draft.assunto,
+                draft.conteudo,
+                *(link.text for link in draft.links),
+            )
+            if disclaimer:
+                return "disclaimer_simulacao", disclaimer
         return None
 
     async def _anotar_as_cegas(self, draft: GeneratedItemDraft, cenario: str) -> AnotacaoCega:
@@ -1463,7 +1543,7 @@ class ResponseGenerator:
         """
         try:
             response = await self.hyde_chain.ainvoke({"query": query})
-            return response.content.strip().strip('"')
+            return _texto_da_resposta(response).strip().strip('"')
         except Exception as e:
             logging.error(f"Error generating hypothetical answer: {e}")
             return query
@@ -1521,7 +1601,7 @@ class ResponseGenerator:
                 "generation_context": generation_context,
                 "full_context_text": full_context_text
             })
-            fundido = response.content.strip()
+            fundido = _texto_da_resposta(response).strip()
         except Exception as e:
             logging.error(f"Error fusing context: {e}")
             fundido = full_context_text
@@ -1570,7 +1650,7 @@ class ResponseGenerator:
                 "text_to_translate": text,
                 "difficulty": difficulty
             })
-            return response.content.strip()
+            return _texto_da_resposta(response).strip()
         except Exception as e:
             logging.error(f"Error translating to English: {e}")
             return text

@@ -696,3 +696,44 @@ async def test_fusao_nao_deixa_passar_email_pronto_de_instituicao_real():
     assert "- Urgencia: prazo curto." in fundido
     assert "NÃO escreve o e-mail" in recebido["prompt"]
     assert "TAREFA CRIATIVA" not in recebido["prompt"]
+
+
+# --- disclaimer de simulacao: so bloqueia item MALICIOSO -------------------
+# (achado da comparacao de modelos + ponto 5 da revisao: e-mail legitimo pode
+# falar de simulacao/conscientizacao/phishing -- um aviso de seguranca real.)
+
+def test_disclaimer_bloqueia_item_malicioso():
+    gen = ResponseGenerator(api_key="sk-nao-usada-neste-teste")
+    draft = _draft(
+        conteudo=(
+            "Prezado cliente, esta é uma simulação de conscientização em "
+            "segurança; não é uma comunicação real do banco."
+        )
+    )
+    problema = gen._problema_estrutural(draft, is_malicious=True)
+    assert problema is not None
+    assert problema[0] == "disclaimer_simulacao"
+
+
+def test_disclaimer_nao_bloqueia_item_legitimo():
+    gen = ResponseGenerator(api_key="sk-nao-usada-neste-teste")
+    draft = _draft(
+        conteudo=(
+            "Prezado cliente, esta é uma simulação de conscientização em "
+            "segurança; não é uma comunicação real do banco."
+        )
+    )
+    # Em item legitimo, falar de simulacao/conscientizacao e licito.
+    assert gen._problema_estrutural(draft, is_malicious=False) is None
+
+
+def test_palavra_phishing_sozinha_nao_bloqueia_malicioso():
+    gen = ResponseGenerator(api_key="sk-nao-usada-neste-teste")
+    draft = _draft(
+        conteudo=(
+            "Detectamos um acesso suspeito à sua conta. Para evitar phishing, "
+            "confirme seus dados no portal abaixo."
+        )
+    )
+    # "phishing" como isca nao e auto-denuncia -> nao bloqueia.
+    assert gen._problema_estrutural(draft, is_malicious=True) is None
