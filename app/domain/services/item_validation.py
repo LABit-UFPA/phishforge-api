@@ -195,20 +195,24 @@ _DISCLAIMER_SIMULACAO = re.compile(
 _LINK_MARKDOWN = re.compile(r"\[([^\[\]\n]{1,200})\]\(\s*(https?://[^\s)]+)\s*\)")
 _NEGRITO_MARKDOWN = re.compile(r"\*\*([^*\n]{1,200})\*\*")
 
-# Assinatura de "notificacao automatica de sistema" (cenario C) que o modelo
-# escreve como rotulo entre colchetes numa linha so: "[SISTEMA ANR]",
-# "[AVISO AUTOMATICO]", "[UCRV]", "[RMP]", "[ESM]" (4 das 5 falhas do Sonnet
-# na comparacao foram isso). E so o rotulo do remetente de sistema -- nao um
-# campo de template por preencher -- entao o colchete nao deve reprovar o item.
-# Discriminador (alta precisao): a linha inteira e UM rotulo entre colchetes
-# cujo miolo e CAIXA ALTA (letras, digitos, espaco, ponto, hifen, &; sem
-# minuscula). Placeholders de preenchimento ("[Nome do Estudante]", "[Seu
-# Nome]", "[Informacoes de Contato]") tem minuscula e NAO sao desembrulhados:
-# seguem barrados por encontrar_marcadores. So mexe em linha isolada (a
-# assinatura fica no fim do corpo), nunca num colchete no meio de uma frase.
-_ASSINATURA_ENTRE_COLCHETES = re.compile(
-    r"^(\s*)\[([A-Z0-9À-Þ][A-Z0-9À-Þ .&\-]{0,38})\]([ \t.;:!\-]*)$"
-)
+# Assinatura/remetente de "notificacao automatica de sistema" (cenario C) que o
+# modelo escreve como rotulo entre colchetes: "[SISTEMA ANR]", "[SISTEMA CBR]",
+# "[AVISO AUTOMATICO]", "[NOTIFICACAO AUTOMATICA - CBR]", "[UCRV]", "[RMP]",
+# "[ESM]" (4 das 5 falhas do Sonnet na comparacao, e o smoke de producao
+# reproduziu outras). E so o rotulo de sistema -- nao um campo de template por
+# preencher -- entao o colchete nao deve reprovar o item.
+#
+# Discriminador (alta precisao): o miolo e CAIXA ALTA -- letras (com acento),
+# digitos, espaco e separadores comuns (. & / - en/em-dash), SEM nenhuma
+# minuscula. Placeholders de preenchimento ("[Nome do Estudante]", "[Seu Nome]",
+# "[Informacoes de Contato]") tem minuscula, nao casam, e seguem barrados por
+# encontrar_marcadores. O rotulo e desembrulhado em tres lugares (ver
+# desembrulhar_assinatura_de_sistema): linha isolada do corpo (sign-off), inicio
+# do remetente (nome de exibicao do sistema) e inicio do assunto (tag). Nunca no
+# meio de uma frase -- "[PORTAL]" no meio de um texto segue como marcador.
+_ROTULO_DE_SISTEMA = r"\[([A-ZÀ-Þ0-9][A-ZÀ-Þ0-9 .&/–—-]{0,38})\]"
+_ASSINATURA_LINHA = re.compile(r"^([ \t]*(?:[-–—·*]\s*)?)" + _ROTULO_DE_SISTEMA + r"([ \t.;:!-]*)$")
+_ASSINATURA_PREFIXO = re.compile(r"^([ \t]*)" + _ROTULO_DE_SISTEMA)
 
 # TLDs e dominios de topo reservados para exemplo/teste (RFC 2606/6761): nunca
 # existem num e-mail real. "localhost"/"local" idem. Comparados por rotulo do
@@ -573,28 +577,46 @@ def remover_assunto_repetido(assunto: str, conteudo: str) -> Tuple[str, bool]:
     return "\n".join(linhas[:indice] + resto), True
 
 
-def desembrulhar_assinatura_de_sistema(conteudo: str) -> Tuple[str, int]:
-    """Tira os colchetes de uma assinatura de "notificacao de sistema"
-    (cenario C) que ocupa uma linha sozinha e cujo miolo e CAIXA ALTA
-    ("[SISTEMA ANR]" -> "SISTEMA ANR", "[AVISO AUTOMATICO]" -> "AVISO
-    AUTOMATICO"). E so o rotulo do remetente de sistema, nao um campo de
-    template por preencher, entao nao deve reprovar o item no detector de
-    marcador (encontrar_marcadores). Placeholders de preenchimento, que tem
-    minuscula ("[Nome do Estudante]"), NAO sao tocados -- seguem barrados.
-    Devolve (corpo, quantas assinaturas foram desembrulhadas).
+def desembrulhar_assinatura_de_sistema(
+    remetente: Optional[str], assunto: Optional[str], conteudo: str
+) -> Tuple[Optional[str], Optional[str], str, int]:
+    """Tira os colchetes de um rotulo de "notificacao de sistema" (cenario C)
+    em CAIXA ALTA, nos tres lugares onde o modelo o coloca:
+
+    - corpo: uma linha sozinha que e so o rotulo, sign-off ("[SISTEMA ANR]" ->
+      "SISTEMA ANR"), tolerando um tracco/bullet de decoracao antes;
+    - remetente: o rotulo no inicio, como nome de exibicao do sistema
+      ("[SISTEMA CBR] <sistema@cbr...>" -> "SISTEMA CBR <sistema@cbr...>");
+    - assunto: o rotulo no inicio, como tag ("[AVISO] ..." -> "AVISO ...").
+
+    E so o rotulo de sistema, nao um campo de template por preencher, entao nao
+    deve reprovar o item no detector de marcador (encontrar_marcadores).
+    Placeholders de preenchimento, que tem minuscula ("[Nome do Estudante]"),
+    NAO casam e seguem barrados. Devolve (remetente, assunto, corpo, n).
 
     Roda ANTES da checagem de marcador (ver ResponseGenerator): se o unico
-    "marcador" era a assinatura de sistema, o item passa sem gastar uma
-    regeneracao, e o corpo final ja fica com a assinatura em texto corrido.
+    "marcador" era o rotulo de sistema, o item passa sem gastar uma regeneracao,
+    e os campos finais ja ficam com o rotulo em texto corrido.
     """
+    total = 0
     linhas = conteudo.split("\n")
-    desembrulhadas = 0
     for i, linha in enumerate(linhas):
-        m = _ASSINATURA_ENTRE_COLCHETES.match(linha)
-        if m:
-            linhas[i] = f"{m.group(1)}{m.group(2)}{m.group(3)}"
-            desembrulhadas += 1
-    return "\n".join(linhas), desembrulhadas
+        novo, k = _ASSINATURA_LINHA.subn(r"\1\2\3", linha)
+        if k:
+            linhas[i] = novo
+            total += k
+    novo_conteudo = "\n".join(linhas)
+
+    novo_remetente = remetente
+    if remetente:
+        novo_remetente, k = _ASSINATURA_PREFIXO.subn(r"\1\2", remetente, count=1)
+        total += k
+    novo_assunto = assunto
+    if assunto:
+        novo_assunto, k = _ASSINATURA_PREFIXO.subn(r"\1\2", assunto, count=1)
+        total += k
+
+    return novo_remetente, novo_assunto, novo_conteudo, total
 
 
 def localizar_evidencia(texto: str, evidencia: str) -> Optional[Tuple[int, int, str]]:

@@ -547,11 +547,12 @@ def test_disclaimer_varre_varios_campos():
 
 @pytest.mark.parametrize(
     "rotulo",
-    ["[UCRV]", "[SISTEMA ANR]", "[RMP]", "[ESM]", "[AVISO AUTOMÁTICO]"],
+    ["[UCRV]", "[SISTEMA ANR]", "[SISTEMA CBR]", "[RMP]", "[ESM]",
+     "[AVISO AUTOMÁTICO]", "[NOTIFICAÇÃO AUTOMÁTICA – CBR]"],
 )
-def test_assinatura_de_sistema_em_caixa_alta_e_desembrulhada(rotulo):
+def test_assinatura_de_sistema_no_corpo_e_desembrulhada(rotulo):
     corpo = f"Prezado cliente,\n\nSua fatura venceu.\n\n{rotulo}"
-    limpo, n = desembrulhar_assinatura_de_sistema(corpo)
+    _, _, limpo, n = desembrulhar_assinatura_de_sistema(None, None, corpo)
     assert n == 1
     miolo = rotulo.strip("[]")
     assert miolo in limpo and rotulo not in limpo
@@ -559,9 +560,26 @@ def test_assinatura_de_sistema_em_caixa_alta_e_desembrulhada(rotulo):
     assert encontrar_marcadores(limpo) == []
 
 
-def test_assinatura_so_na_linha_isolada_do_rotulo():
-    corpo = "Mensagem automática.\n[SISTEMA ANR]\nNão responda."
-    limpo, n = desembrulhar_assinatura_de_sistema(corpo)
+def test_assinatura_de_sistema_no_remetente_e_desembrulhada():
+    rem = "[SISTEMA CBR] <sistema@cbr-documentos.com.br>"
+    novo_rem, _, _, n = desembrulhar_assinatura_de_sistema(rem, None, "corpo")
+    assert n == 1
+    assert novo_rem == "SISTEMA CBR <sistema@cbr-documentos.com.br>"
+    assert encontrar_marcadores(novo_rem) == []
+
+
+def test_tag_de_sistema_no_inicio_do_assunto_e_desembrulhada():
+    _, novo_ass, _, n = desembrulhar_assinatura_de_sistema(
+        None, "[AVISO AUTOMÁTICO] Pendência no cadastro", "corpo"
+    )
+    assert n == 1
+    assert novo_ass == "AVISO AUTOMÁTICO Pendência no cadastro"
+
+
+def test_assinatura_com_traco_decorativo_antes():
+    _, _, limpo, n = desembrulhar_assinatura_de_sistema(
+        None, None, "Mensagem automática.\n— [SISTEMA ANR]\nNão responda."
+    )
     assert n == 1
     assert "[SISTEMA ANR]" not in limpo and "SISTEMA ANR" in limpo
 
@@ -574,7 +592,7 @@ def test_placeholder_de_preenchimento_nao_e_desembrulhado(placeholder):
     """Miolo com minuscula = campo por preencher, nao rotulo de sistema:
     fica entre colchetes e segue barrado por encontrar_marcadores."""
     corpo = f"Prezado(a) {placeholder},\n\nTexto."
-    limpo, n = desembrulhar_assinatura_de_sistema(corpo)
+    _, _, limpo, n = desembrulhar_assinatura_de_sistema(None, None, corpo)
     assert n == 0
     assert placeholder in limpo
     assert encontrar_marcadores(limpo)  # continua sendo marcador
@@ -582,9 +600,9 @@ def test_placeholder_de_preenchimento_nao_e_desembrulhado(placeholder):
 
 def test_colchete_no_meio_da_frase_nao_e_desembrulhado():
     corpo = "Confirme em [PORTAL] agora para liberar o acesso."
-    limpo, n = desembrulhar_assinatura_de_sistema(corpo)
+    _, _, limpo, n = desembrulhar_assinatura_de_sistema(None, None, corpo)
     assert n == 0
-    assert limpo == corpo  # so linha isolada conta
+    assert limpo == corpo  # so linha isolada / inicio de campo conta
 
 
 # ---------------------------------------------------------------------------

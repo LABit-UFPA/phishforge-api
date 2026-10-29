@@ -209,13 +209,16 @@ _REGRAS_DE_FORMA = (
     "organização, e nunca use nome, sigla ou domínio de uma instituição real (universidade, "
     "banco, órgão público, empresa) em nenhuma parte do e-mail, mesmo que o cenário cite "
     "uma.\n"
-    "- Nunca escreva texto entre colchetes ou entre chaves: todo dado do e-mail (nome, "
-    "telefone, protocolo, contato) aparece preenchido, inventado quando preciso. Isso vale "
-    "também para a assinatura: uma notificação automática de sistema assina em texto corrido "
-    "(ex.: 'Notificação automática do sistema da Vallonta'), nunca como um rótulo entre "
-    "colchetes ('[SISTEMA VALLONTA]', '[AVISO AUTOMÁTICO]'). Nunca use a sequência '123456' "
-    "como número de exemplo (protocolo, pedido, código): é um placeholder reconhecível, não "
-    "um número de verdade.\n"
+    "- Nunca escreva texto entre colchetes ou entre chaves em NENHUM campo "
+    "(remetente, assunto, corpo): todo dado do e-mail (nome, telefone, protocolo, contato) "
+    "aparece preenchido, inventado quando preciso. Em especial, uma notificação automática de "
+    "sistema NÃO é escrita como um rótulo entre colchetes em lugar nenhum — nem no nome de "
+    "exibição do remetente, nem como etiqueta no começo do assunto, nem como assinatura no "
+    "fim do corpo. Escreva-a em texto corrido (ex.: remetente 'Notificações Vallonta "
+    "<nao-responder@vallonta.com.br>'; assinatura 'Notificação automática do sistema da "
+    "Vallonta'), nunca '[SISTEMA VALLONTA]', '[AVISO AUTOMÁTICO]' ou '[NOTIFICAÇÃO "
+    "AUTOMÁTICA]'. Nunca use a sequência '123456' como número de exemplo (protocolo, pedido, "
+    "código): é um placeholder reconhecível, não um número de verdade.\n"
     "- Siga o estilo de assunto da ficha. Nunca use 'Ação Necessária' ou 'Ação Requerida' "
     "(nem variações) em nenhuma parte do assunto, e não repita o assunto como primeira "
     "linha do `conteudo`.\n\n"
@@ -1135,12 +1138,19 @@ class ResponseGenerator:
                 logging.error(f"Error generating response: {e}")
                 raise e
 
-            # Item 2 (cenario C): a assinatura de "notificacao de sistema" vinha
-            # como rotulo entre colchetes ("[SISTEMA ANR]") e o detector de
-            # marcador a reprovava. Desembrulha ANTES da checagem: se o unico
-            # "marcador" era a assinatura, o item passa sem gastar uma
-            # regeneracao, e o corpo final ja fica com ela em texto corrido.
-            draft.conteudo, _n_assinaturas = desembrulhar_assinatura_de_sistema(draft.conteudo)
+            # Item 2 (cenario C): o rotulo de "notificacao de sistema" vinha
+            # entre colchetes no remetente, no assunto ou numa linha do corpo
+            # ("[SISTEMA CBR]") e o detector de marcador reprovava. Desembrulha
+            # ANTES da checagem: se o unico "marcador" era esse rotulo, o item
+            # passa sem gastar regeneracao, e os campos ja ficam em texto corrido.
+            (
+                draft.remetente,
+                draft.assunto,
+                draft.conteudo,
+                _n_assinaturas,
+            ) = desembrulhar_assinatura_de_sistema(
+                draft.remetente, draft.assunto, draft.conteudo
+            )
             relatorio.assinaturas_de_sistema_desembrulhadas += _n_assinaturas
 
             problema = self._problema_estrutural(draft, is_malicious=is_malicious)
