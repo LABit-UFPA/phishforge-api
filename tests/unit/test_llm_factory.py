@@ -47,6 +47,37 @@ def test_provider_desconhecido_falha_alto():
         build_chat_model("gemini", "qualquer", openai_api_key="x")
 
 
+def test_openai_recebe_seed():
+    """Reprodutibilidade: `seed` e campo nativo do ChatOpenAI e deve ser
+    repassado (tanto no caminho legado quanto no de nova geracao -- o seed
+    e setado antes do branch de max_tokens).
+    """
+    legado = build_chat_model(
+        PROVIDER_OPENAI, "gpt-4o-mini", openai_api_key="sk-x", temperature=0.7, seed=42
+    )
+    assert legado.seed == 42
+
+    novo = build_chat_model(
+        PROVIDER_OPENAI, "gpt-6-luna", openai_api_key="sk-x", max_tokens=2000, seed=42
+    )
+    assert novo.seed == 42
+
+
+def test_openai_sem_seed_fica_none():
+    m = build_chat_model(PROVIDER_OPENAI, "gpt-4o-mini", openai_api_key="sk-x")
+    assert m.seed is None
+
+
+def test_anthropic_ignora_seed_sem_quebrar():
+    """A Anthropic nao tem parametro de seed; build_chat_model deve
+    aceitar `seed=` no ramo anthropic sem passar adiante nem quebrar.
+    """
+    m = build_chat_model(
+        PROVIDER_ANTHROPIC, "claude-haiku-5-5", anthropic_api_key="x", seed=42
+    )
+    assert type(m).__name__ == "ChatAnthropic"
+
+
 def test_openai_nova_geracao_detecta_gpt5_gpt6_oseries():
     from app.domain.services.llm_factory import openai_exige_max_completion_tokens as exige
 

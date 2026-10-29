@@ -51,6 +51,7 @@ def build_chat_model(
     anthropic_api_key: str = "",
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
+    seed: Optional[int] = None,
 ) -> BaseChatModel:
     """Constroi o chat model do provider pedido.
 
@@ -58,6 +59,14 @@ def build_chat_model(
     modelos de reasoning da OpenAI, que rejeitam `temperature != 1`).
     `max_tokens` e opcional na OpenAI e obrigatorio na Anthropic -- para
     esta, cai no default quando nao informado.
+
+    `seed` (reprodutibilidade): so a OpenAI expoe `seed` nas chat
+    completions (determinismo best-effort, dependente do
+    `system_fingerprint`). A Anthropic NAO tem parametro de seed, entao
+    aqui o `seed` e ignorado no ramo anthropic -- as geracoes anthropic
+    nao sao bit-reproduziveis. Por isso a comparacao de modelos persiste
+    o item gerado de cada linha (ver avaliar_modelos_llm.py): e a
+    reprodutibilidade que vale cross-vendor.
 
     Import do cliente feito DENTRO de cada ramo de proposito: assim um
     ambiente que so usa OpenAI nao precisa ter `langchain-anthropic`
@@ -68,6 +77,10 @@ def build_chat_model(
         from langchain_openai import ChatOpenAI
 
         kwargs = {"model": model_name, "api_key": openai_api_key}
+        if seed is not None:
+            # `seed` e campo nativo do ChatOpenAI (nao vai em model_kwargs):
+            # convive com o max_completion_tokens da nova geracao.
+            kwargs["seed"] = seed
         if openai_exige_max_completion_tokens(model_name):
             # GPT-5+/o-series: `max_completion_tokens` (via model_kwargs,
             # cru para a API) no lugar de `max_tokens`, e temperature
