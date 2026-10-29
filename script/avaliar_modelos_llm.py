@@ -669,19 +669,30 @@ class Avaliador:
             )
 
     def _carregar_checkpoint(self, checkpoint_path: Optional[Path]) -> set:
-        """Resume: pre-carrega os itens ja concluidos de uma rodada anterior.
+        """Resume: pre-carrega os itens BEM-SUCEDIDOS de uma rodada anterior.
 
         Cada item e gravado em JSONL assim que termina (ver `rodar`), entao
         um timeout/crash no meio da rodada NAO perde o que ja foi pago --
         uma re-execucao com os mesmos parametros retoma de onde parou. A
         1a tentativa da cheia estourou o `timeout` com ~81/180 itens e
         nada salvo (o relatorio so e escrito no fim); este checkpoint
-        existe para isso nao se repetir. Retorna o conjunto de chaves
-        (label, lote_id, repeticao) ja feitas.
+        existe para isso nao se repetir.
+
+        So os itens com `erro is None` contam como feitos (sao pulados no
+        resume). Os que falharam -- 429 por creditos OpenAI zerados, HTTP,
+        timeout, recusa -- NAO entram em `feitos`: sao re-tentados na
+        proxima rodada. Assim um incidente transitorio (ex.: creditos
+        acabaram no meio) so custa os itens que de fato falharam, nao a
+        rodada inteira. Linhas repetidas da mesma chave: a ultima vence (um
+        item re-tentado e salvo de novo), entao um erro seguido de sucesso
+        conta como feito. Retorna o conjunto de chaves (label, lote_id,
+        repeticao) bem-sucedidas.
         """
         feitos: set = set()
         if not checkpoint_path or not checkpoint_path.exists():
             return feitos
+        # Ultimo estado por chave (um item re-tentado aparece 2x no arquivo).
+        por_chave: dict = {}
         for linha in checkpoint_path.read_text(encoding="utf-8").splitlines():
             linha = linha.strip()
             if not linha:
@@ -691,14 +702,18 @@ class Avaliador:
             except Exception:
                 # linha truncada (crash no meio de uma escrita): ignora.
                 continue
-            chave = (r.label, r.lote_id, r.repeticao)
-            if chave in feitos:
-                continue
-            feitos.add(chave)
-            self.resultados.append(r)
-        if feitos:
+            por_chave[(r.label, r.lote_id, r.repeticao)] = r
+        falhos = 0
+        for chave, r in por_chave.items():
+            if r.erro is None:
+                feitos.add(chave)
+                self.resultados.append(r)
+            else:
+                falhos += 1
+        if feitos or falhos:
             logger.info(
-                "Resume: %d itens carregados do checkpoint %s", len(feitos), checkpoint_path
+                "Resume: %d itens OK reaproveitados, %d com erro serao re-tentados (%s)",
+                len(feitos), falhos, checkpoint_path,
             )
         return feitos
 

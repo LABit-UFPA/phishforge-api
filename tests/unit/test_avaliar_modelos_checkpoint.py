@@ -43,20 +43,46 @@ def test_none_nao_quebra():
     assert av._carregar_checkpoint(None) == set()
 
 
-def test_roundtrip_reconstroi_itens_e_chaves(tmp_path):
+def test_so_itens_ok_contam_como_feitos(tmp_path):
     ckpt = tmp_path / "ck.jsonl"
-    itens = [_item("GPT", "L1", 1), _item("GPT", "L2", 1), _item("Claude", "L1", 1, erro="recusa")]
+    itens = [_item("GPT", "L1", 1), _item("GPT", "L2", 1), _item("Claude", "L1", 1, erro="http")]
     ckpt.write_text(
         "\n".join(json.dumps(vars(i), ensure_ascii=False) for i in itens) + "\n",
         encoding="utf-8",
     )
     av = _av_vazio()
     feitos = av._carregar_checkpoint(ckpt)
-    assert feitos == {("GPT", "L1", 1), ("GPT", "L2", 1), ("Claude", "L1", 1)}
-    assert len(av.resultados) == 3
-    # item com erro tambem conta como feito (nao re-tenta no resume).
-    claude = next(r for r in av.resultados if r.label == "Claude")
-    assert claude.erro == "recusa"
+    # O item com erro (ex.: 429 por creditos zerados) NAO e feito: re-tenta.
+    assert feitos == {("GPT", "L1", 1), ("GPT", "L2", 1)}
+    assert len(av.resultados) == 2
+    assert all(r.erro is None for r in av.resultados)
+
+
+def test_erro_depois_sucesso_na_mesma_chave_conta_como_feito(tmp_path):
+    """Item re-tentado: a 1a tentativa falhou (gravada), a 2a deu OK
+    (gravada de novo). A ultima vence -> conta como feito."""
+    ckpt = tmp_path / "ck.jsonl"
+    linhas = [
+        json.dumps(vars(_item("GPT", "L1", 1, erro="http")), ensure_ascii=False),
+        json.dumps(vars(_item("GPT", "L1", 1)), ensure_ascii=False),  # re-tentativa OK
+    ]
+    ckpt.write_text("\n".join(linhas) + "\n", encoding="utf-8")
+    av = _av_vazio()
+    feitos = av._carregar_checkpoint(ckpt)
+    assert feitos == {("GPT", "L1", 1)}
+    assert len(av.resultados) == 1
+    assert av.resultados[0].erro is None
+
+
+def test_so_erros_nao_viram_feitos(tmp_path):
+    ckpt = tmp_path / "ck.jsonl"
+    ckpt.write_text(
+        json.dumps(vars(_item("Claude", "L1", 1, erro="recusa")), ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    av = _av_vazio()
+    assert av._carregar_checkpoint(ckpt) == set()
+    assert av.resultados == []
 
 
 def test_linha_truncada_e_ignorada(tmp_path):
