@@ -126,11 +126,15 @@ services:
       DB_PASSWORD: phishforge
       DB_NAME: phishforge
       OPENAI_API_KEY: ${OPENAI_API_KEY}
-      # Modelo e temperatura da geracao (lote-piloto de 26/10/2026). O
-      # .env nao entra na imagem, entao sem estas linhas o container
-      # ignorava o MODEL_NAME_LLM do .env e rodava sempre o default do
-      # codigo -- fixar o snapshot no .env nao tinha efeito nenhum.
-      MODEL_NAME_LLM: ${MODEL_NAME_LLM:-gpt-4o-mini}
+      # Chave da Anthropic: o gerador de PRODUCAO e o Claude Sonnet 4.6, entao
+      # sem esta linha o container subiria sem a chave (o .env nao entra na
+      # imagem) e toda geracao falharia.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      # Provider e modelo da geracao. Default de producao = anthropic /
+      # claude-sonnet-4-6 (as mesmas linhas abaixo valem para o .env: o
+      # container so recebe o que esta aqui, nao le o .env).
+      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+      MODEL_NAME_LLM: ${MODEL_NAME_LLM:-claude-sonnet-4-6}
       LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.7}
       # Anotacao as cegas das pistas (2a chamada de LLM por item).
       ANOTACAO_CEGA: ${ANOTACAO_CEGA:-true}
