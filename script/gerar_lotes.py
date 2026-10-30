@@ -286,6 +286,7 @@ def main() -> int:
         if args.limite and rodados >= args.limite:
             print(f"Atingiu o --limite de {args.limite} lotes. Parando.")
             break
+        rodados += 1  # conta TENTATIVAS (inclui falhas), para o --limite valer sempre
 
         semente = semente_do_lote(args.seed_base, c["lote_id"])
         print(f"\n>>> {c['lote_id']} ({c['eixo']}-{c['nivel'][:1]}-{c['cenario']}) seed={semente}")
@@ -331,7 +332,6 @@ def main() -> int:
             "job_id": job_id, "status": job["status"], "observacoes": "",
         })
 
-        rodados += 1
         util = job.get("total_generated", 0) - branda
         print(f"    status={job['status']} gerados={job.get('total_generated')} "
               f"recusa_branda={branda} utilizaveis={util} "

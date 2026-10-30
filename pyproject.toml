@@ -40,6 +40,11 @@ langchain-community = "^0.3.16"
 pypdf = "^5.2.0"
 langchain-openai = "^0.3.28"
 langchain-anthropic = "^0.3.0"
+# Saida estruturada dos Claude de reasoning em PRODUCAO: build_structured_llm
+# usa instructor (Mode.ANTHROPIC_JSON) para o Sonnet 4.6. Antes vinha so
+# transitivamente pela ragas (grupo evaluation), entao a imagem `--only main`
+# do Dockerfile subia SEM ele e a geracao Anthropic quebrava (ModuleNotFound).
+instructor = "^1.11.3"
 pymupdf = "^1.26.3"
 asyncpg = "^0.30.0"
 dependency-injector = "^4.48.2"
