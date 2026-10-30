@@ -39,6 +39,12 @@ dataset/
 - **`registro_lotes_v31.csv`** — contagem por lote: itens gerados, utilizáveis,
   recusa branda, descartes por categoria, `git_commit`, semente, modelo. É o que
   amarra cada lote à sua célula (eixo/nível/cenário) e garante reprodutibilidade.
+- **`phishforge_960.jsonl`** ⭐ **arquivo consolidado recomendado** — 1 item por
+  linha, com TODOS os campos + as chaves de agrupamento já embutidas
+  (`eixo`, `nivel_pedido`, `cenario`, `lote_id`) + a dificuldade recalibrada
+  (ver seção 2). É a forma mais simples de carregar o conjunto inteiro.
+- **`recalibracao_dificuldade.md`** — a proposta de recalibração de dificuldade
+  e a decisão (Opção D).
 
 ### Nomenclatura dos arquivos/lotes
 
@@ -58,16 +64,18 @@ dataset/
 
 ## 2. Formato de um item
 
-Carregar todos os itens:
+Carregar todos os itens (do arquivo consolidado — recomendado):
 
 ```python
-import json, glob
-itens = []
-for arq in glob.glob("dataset/exports/*.json"):
-    job = json.load(open(arq, encoding="utf-8"))
-    itens.extend(job["examples"])
+import json
+itens = [json.loads(l) for l in open("dataset/phishforge_960.jsonl", encoding="utf-8")]
 print(len(itens))  # 960
+# cada item já tem: eixo, nivel_pedido, cenario, lote_id,
+# difficulty_estimated_original e difficulty_estimated_recalibrado
 ```
+
+(Alternativa — a partir dos lotes crus em `exports/`, sem as chaves de
+agrupamento: percorra `exports/*.json` e junte os `examples`.)
 
 Cada item é um objeto assim (campos principais):
 
@@ -108,8 +116,13 @@ Cada item é um objeto assim (campos principais):
 1. **Pistas** → `cues[]` (cada uma com `code`, `evidencia`, `campo`,
    `span_start/end`) e a contagem `phish_scale.cue_count`.
 2. **Alinhamento da premissa** → `phish_scale.premise_alignment`.
-3. **Dificuldade estimada** → `phish_scale.difficulty_estimated` (regra
-   aritmética sobre os dois acima; ≠ `nivel`, que é o que foi *pedido*).
+3. **Dificuldade estimada** → **use `difficulty_estimated_recalibrado`** (regra
+   aritmética sobre os dois acima; ≠ `nivel`, que é o que foi *pedido*). O rótulo
+   original (`phish_scale.difficulty_estimated` / `difficulty_estimated_original`)
+   colapsou em 2 classes (fácil 225 / médio 735 / difícil 0) porque o corte de
+   "difícil" era inatingível dada a densidade de pistas; os cortes foram
+   **recalibrados** (Opção D, aprovada) → **fácil 139 / médio 580 / difícil 241**.
+   Ambos ficam no item; o original é preservado. Ver `recalibracao_dificuldade.md`.
 
 > `explicacao` é a análise do próprio item — **não é entrada**; serve de
 > procedência e não deve ir para um anotador humano às cegas.
@@ -164,8 +177,9 @@ O protocolo completo está em `../Protocolo de geração PhishForge — v3.1.md`
 2. **Divida por GRUPO, nunca aleatório.** Itens do mesmo lote compartilham o
    contexto recuperado da base; itens do mesmo cenário compartilham vocabulário.
    Split aleatório coloca itens parecidos no treino e no teste → acurácia
-   inflada. **Deixe cenários ou eixos inteiros fora do treino** (use
-   `eixo`/`cenário` do nome do lote como chave de agrupamento).
+   inflada. **Deixe cenários ou eixos inteiros fora do treino** — use os campos
+   `eixo` / `cenario` / `lote_id` (já em cada item do `phishforge_960.jsonl`)
+   como chave de agrupamento (ex.: `GroupKFold` por `eixo` ou `cenario`).
 3. **Rótulo prata vs ouro.** Os rótulos daqui são da **aplicação (prata)** —
    servem para treino. O rótulo válido para **teste** é o do **especialista
    humano (ouro)**, que **ainda não existe** (a validação com especialistas é a
