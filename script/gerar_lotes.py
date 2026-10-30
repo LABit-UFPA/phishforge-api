@@ -24,6 +24,7 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -145,6 +146,18 @@ def ordenar_por_rodada(contextos: list[dict]) -> list[dict]:
     )
 
 
+def _api_key_do_env(path: Path) -> str:
+    """Le API_KEY do .env como fallback, para nao exigir exportar
+    PHISHFORGE_API_KEY a mao (a API_KEY do .env e a que o endpoint exige)."""
+    if not path.exists():
+        return ""
+    for linha in path.read_text(encoding="utf-8").splitlines():
+        linha = linha.strip()
+        if linha.startswith("API_KEY="):
+            return linha.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
 def semente_do_lote(base: int, lote_id: str) -> int:
     """Semente deterministica por lote (reproducao exata ao re-rodar um lote)."""
     h = hashlib.sha256(f"{base}:{lote_id}".encode()).hexdigest()
@@ -253,9 +266,11 @@ def main() -> int:
                   f"seed={semente_do_lote(args.seed_base, c['lote_id'])}")
         return 0
 
-    api_key = __import__("os").environ.get("PHISHFORGE_API_KEY", "")
+    api_key = os.environ.get("PHISHFORGE_API_KEY", "") or _api_key_do_env(RAIZ / ".env")
     if not api_key:
-        raise SystemExit("defina PHISHFORGE_API_KEY (= API_KEY do .env da app).")
+        raise SystemExit(
+            "API key nao encontrada: defina PHISHFORGE_API_KEY, ou tenha API_KEY=... no .env."
+        )
 
     args.out.mkdir(parents=True, exist_ok=True)
     args.registro.parent.mkdir(parents=True, exist_ok=True)
