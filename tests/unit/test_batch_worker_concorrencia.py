@@ -13,9 +13,6 @@ rede nem de LLM.
 
 import asyncio
 
-import pytest
-
-from app.domain.models.generated_item_draft import ValidatedItemDraft
 from app.domain.models.generation_job import JobStatus
 from app.domain.services.batch_generation_worker import (
     BatchGenerationWorker,
