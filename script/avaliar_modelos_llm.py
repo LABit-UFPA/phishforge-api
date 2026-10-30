@@ -89,6 +89,7 @@ from ragas.llms import llm_factory
 sys.path.append(str(Path(__file__).parent.parent))
 
 from app.core.config import settings
+from app.core.reproducibilidade import commit_do_git
 from app.domain.models.difficulty import Difficulty
 from app.domain.services.evaluation import (
     avaliar_qualidade_rubrica,
@@ -98,6 +99,7 @@ from app.domain.services.generation_pipeline import TOP_N_PARA_FUSAO, TOP_K_RETR
 from app.domain.services.llm_factory import (
     PROVIDER_ANTHROPIC,
     PROVIDER_OPENAI,
+    descrever_saida_estruturada,
     openai_exige_max_completion_tokens,
 )
 from app.domain.services.openai.embedding_client import OpenAIEmbeddingClient
@@ -346,6 +348,9 @@ class ResultadoItem:
     # aderencia/dificuldade/diversidade/vazamento OFFLINE sobre os MESMOS
     # e-mails que os juizes pontuaram -- sem pagar uma 2a geracao.
     item: Optional[dict] = None
+    # Mecanismo de saida estruturada deste modelo (nativo x instructor
+    # JSON-mode) -- por item, alem do resumo por fornecedor no metadata.
+    saida_estruturada: Optional[str] = None
     erro: Optional[str] = None
     # Categoria da falha (quando erro != None), para o relatorio separar
     # RECUSA de conteudo (achado do estudo -- ex.: Anthropic recusar gerar
@@ -574,6 +579,7 @@ class Avaliador:
             label=spec.label, tier=spec.tier, provider=spec.provider, model=spec.model,
             lote_id=ctx.lote_id, eixo=ctx.eixo, nivel=ctx.nivel, cenario=ctx.cenario,
             repeticao=repeticao,
+            saida_estruturada=descrever_saida_estruturada(spec.provider, spec.model),
         )
         try:
             rg, norm = self._gerador(spec)
@@ -967,21 +973,12 @@ def _bloco_erros(por_modelo: dict) -> str:
 
 
 def _git_commit() -> Optional[str]:
-    """Hash curto do commit atual (reprodutibilidade no metadata), ou None
-    fora de um repo/sem git. Best-effort -- nunca derruba a gravacao."""
-    import subprocess
-
-    try:
-        out = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=Path(__file__).resolve().parent,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return out.stdout.strip() or None if out.returncode == 0 else None
-    except Exception:
-        return None
+    """Hash curto do commit atual para o metadata (reprodutibilidade), com
+    sufixo '-dirty' se houver alteracoes. Delega ao helper compartilhado, que
+    aceita a variavel de ambiente GIT_COMMIT como fonte (caminho de dentro do
+    Docker, onde `git` pode faltar ou cair em 'dubious ownership' -- foi assim
+    que o relatorio saiu com git_commit=None)."""
+    return commit_do_git()
 
 
 def salvar_relatorio(av: Avaliador, contextos, repeticoes, out_dir: Path) -> Path:

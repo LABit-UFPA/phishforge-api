@@ -52,7 +52,8 @@ ASSINATURAS: Tuple[str, ...] = (
     "institucional e sem nome de pessoa",
     ASSINATURA_PESSOA,
     "uma notificação automática de sistema da organização do cenário, sem "
-    "pessoa e com tom de sistema",
+    "pessoa e com tom de sistema, assinada em texto corrido (ex.: 'Notificação "
+    "automática do sistema da <organização>'), nunca como um rótulo entre colchetes",
     "um serviço terceirizado ou parceiro que atende a organização do cenário",
 )
 

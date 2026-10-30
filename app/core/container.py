@@ -7,6 +7,7 @@ from app.domain.services.document_processor import DocumentProcessor
 from app.domain.services.expert_auth_service import ExpertAuthService
 from app.domain.services.expert_evaluation_service import ExpertEvaluationService
 from app.domain.services.generation_pipeline import GenerationPipeline
+from app.domain.services.llm_factory import temperatura_efetiva
 from app.domain.services.openai.embedding_client import OpenAIEmbeddingClient
 from app.domain.services.phishing_service import PhishingEmailService
 from app.domain.services.pipeline import IngestionPipeline
@@ -164,11 +165,23 @@ class Container(containers.DeclarativeContainer):
     # Singleton pelo mesmo motivo do reranker: o construtor monta um
     # cliente ChatOpenAI (e, no caso do response_generator, os prompts e
     # as chains) uma vez, em vez de recriar tudo isso a cada request.
+    # Temperatura efetiva do gerador: None para um modelo de reasoning que
+    # so aceita temperature=1 (Sonnet 4.6 de producao, GPT-5+/o-series). Com
+    # None o ResponseGenerator entra em modo reasoning e omite temperature em
+    # TODAS as sub-chains -- o MESMO que o eval fez para o Sonnet 4.6. Assim o
+    # caminho de producao casa com o que a comparacao mediu (plano item 1).
+    temperatura_geracao = providers.Callable(
+        temperatura_efetiva,
+        config.LLM_PROVIDER,
+        config.MODEL_NAME_LLM,
+        config.LLM_TEMPERATURE,
+    )
+
     response_generator = providers.Singleton(
         ResponseGenerator,
         api_key=config.OPENAI_API_KEY,
         model_name=config.MODEL_NAME_LLM,
-        temperature=config.LLM_TEMPERATURE,
+        temperature=temperatura_geracao,
         anotacao_cega=config.ANOTACAO_CEGA,
         max_tokens_geracao=config.MAX_TOKENS_GERACAO,
         max_tokens_anotacao=config.MAX_TOKENS_ANOTACAO,

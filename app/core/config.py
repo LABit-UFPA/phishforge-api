@@ -12,15 +12,26 @@ class Settings(BaseSettings):
     # OpenAI (`OPENAI_API_KEY`), porque trocar o modelo de embedding
     # mudaria o espaco vetorial e exigiria reindexar a base Qdrant.
     # `MODEL_NAME_LLM` e o id do modelo DENTRO do provider escolhido.
-    LLM_PROVIDER: str = "openai"
+    #
+    # Default de PRODUCAO = Claude Sonnet 4.6 (comparacao de modelos de
+    # 29/10/2026: 40/45 utilizaveis, 100% das pistas de corpo realizadas,
+    # dificuldade correta em 39/40, 0 artefatos visiveis -- melhor e mais
+    # consistente que Sol, Haiku e Luna). O caminho de producao usa o MESMO
+    # mecanismo de saida estruturada do eval (instructor Mode.ANTHROPIC_JSON,
+    # sem temperature/thinking/tool_choice -- ver build_structured_llm) e NAO
+    # tem fallback silencioso para outro modelo: falha de modelo e visivel.
+    LLM_PROVIDER: str = "anthropic"
 
-    MODEL_NAME_LLM: str = "gpt-4o-mini"
+    MODEL_NAME_LLM: str = "claude-sonnet-4-6"
 
     # Temperatura das chains que GERAM itens (email e canais novos). As
     # etapas auxiliares (HyDE, fusao, normalizacao) mantem as suas
     # proprias, mais baixas. Antes ficava fixa em 0.7 no codigo; no
     # config, um lote registra (run_metadata) e um piloto pode variar
-    # sem mexer no codigo.
+    # sem mexer no codigo. IGNORADA para modelos de reasoning que so
+    # aceitam temperature=1 (Sonnet 4.6, GPT-5+/o-series): o container
+    # passa None nesse caso (ver temperatura_efetiva / llm_factory), e o
+    # gerador omite temperature em todas as sub-chains -- igual ao eval.
     LLM_TEMPERATURE: float = 0.7
 
     # Anotacao as cegas das pistas (piloto 2, 27/10/2026): com o gerador

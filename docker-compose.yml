@@ -104,6 +104,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Commit do codigo, para o run_metadata dos lotes (reprodutibilidade,
+        # plano item 5). Exporte antes do build/up:
+        #   export GIT_COMMIT=$(git rev-parse --short HEAD)
+        # Vazio (sem a variavel) -> git_commit fica None, como antes.
+        GIT_COMMIT: ${GIT_COMMIT:-}
     container_name: phishforge-api
     restart: unless-stopped
     ports:

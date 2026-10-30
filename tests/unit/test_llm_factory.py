@@ -141,3 +141,58 @@ def test_openai_nova_geracao_omite_temperature():
         PROVIDER_OPENAI, "gpt-4o-mini", openai_api_key="sk-x", temperature=0.7, max_tokens=2000
     )
     assert legado.temperature == 0.7 and legado.max_tokens == 2000
+
+
+# ---------------------------------------------------------------------------
+# Item 1 (plano de producao): Sonnet 4.6 como gerador padrao, mesmo mecanismo
+# do eval (instructor JSON-mode, sem temperature), sem fallback silencioso.
+# ---------------------------------------------------------------------------
+
+
+def test_anthropic_reasoning_exige_temperatura_1():
+    from app.domain.services.llm_factory import anthropic_exige_temperatura_1 as exige
+
+    # Claude de reasoning (4.6+ e 5.x) so aceitam temperature=1.
+    assert exige("claude-sonnet-4-6") and exige("claude-opus-4-8") and exige("claude-haiku-5-5")
+    assert exige("claude-sonnet-5-5")
+    # Claude mais antigos (<=4.5) aceitam temperature custom.
+    assert not exige("claude-3-5-sonnet-20241022") and not exige("claude-sonnet-4-5")
+
+
+def test_temperatura_efetiva_omite_para_modelo_de_reasoning():
+    from app.domain.services.llm_factory import temperatura_efetiva as efetiva
+
+    # Sonnet 4.6 (producao) e GPT-5+: temperatura omitida (None) -- igual ao
+    # supports_temperature=False do eval.
+    assert efetiva(PROVIDER_ANTHROPIC, "claude-sonnet-4-6", 0.7) is None
+    assert efetiva(PROVIDER_OPENAI, "gpt-6-sol", 0.7) is None
+    # Modelos nao-reasoning mantem a temperatura pedida.
+    assert efetiva(PROVIDER_OPENAI, "gpt-4o-mini", 0.7) == 0.7
+    assert efetiva(PROVIDER_ANTHROPIC, "claude-3-5-sonnet-20241022", 0.5) == 0.5
+
+
+def test_descrever_saida_estruturada_por_fornecedor():
+    from app.domain.services.llm_factory import descrever_saida_estruturada as descr
+
+    assert "nativo" in descr(PROVIDER_OPENAI, "gpt-6-sol")
+    anth = descr(PROVIDER_ANTHROPIC, "claude-sonnet-4-6")
+    assert "instructor" in anth and "ANTHROPIC_JSON" in anth
+
+
+def test_provider_desconhecido_falha_alto_na_saida_estruturada():
+    """Sem fallback silencioso: um provider que nao existe levanta, nao cai
+    num modelo qualquer (plano item 1)."""
+    from app.domain.services.llm_factory import build_structured_llm
+
+    with pytest.raises(ValueError, match="provider de LLM desconhecido"):
+        build_structured_llm("provedor-inexistente", "x", _SchemaDummy)
+
+
+def test_config_de_producao_usa_sonnet_4_6_sem_fallback():
+    """O default de producao e Claude Sonnet 4.6 pela Anthropic; nenhum
+    fallback para sonnet-5-5 (que saiu vazio no eval) esta cravado no config."""
+    from app.core.config import Settings
+
+    campos = Settings.model_fields
+    assert campos["LLM_PROVIDER"].default == PROVIDER_ANTHROPIC
+    assert campos["MODEL_NAME_LLM"].default == "claude-sonnet-4-6"

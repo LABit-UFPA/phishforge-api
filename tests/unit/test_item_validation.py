@@ -12,10 +12,12 @@ from app.domain.services.item_validation import (
     RelatorioValidacao,
     calcular_spans,
     converter_markdown,
+    desembrulhar_assinatura_de_sistema,
     encontrar_disclaimer_de_simulacao,
     encontrar_dominios_caricatos,
     encontrar_dominios_reais,
     encontrar_instituicoes_reais,
+    encontrar_links_invalidos,
     encontrar_marcadores,
     encontrar_nomes_de_instituicoes_reais,
     endereco_de_email,
@@ -534,3 +536,180 @@ def test_disclaimer_varre_varios_campos():
         "Equipe de Conscientização <x@y.com>", "Assunto normal", "corpo normal"
     )
     assert achados  # pega no remetente
+
+
+# ---------------------------------------------------------------------------
+# Item 2 (cenario C): assinatura de "notificacao de sistema" entre colchetes.
+# Das 5 falhas do Sonnet na comparacao, 4 eram isso: [UCRV], [SISTEMA ANR],
+# [RMP], [ESM], [AVISO AUTOMATICO] -- rotulo de sistema, nao campo por preencher.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "rotulo",
+    ["[SISTEMA ANR]", "[SISTEMA CBR]", "[AVISO AUTOMÁTICO]",
+     "[NOTIFICAÇÃO AUTOMÁTICA – CBR]"],
+)
+def test_rotulo_com_palavra_de_sistema_e_desembrulhado(rotulo):
+    """Rotulo com palavra de sistema (SISTEMA/AVISO/AUTOMATICO/NOTIFICACAO) e
+    desembrulhado mesmo sem saber a sigla."""
+    corpo = f"Prezado cliente,\n\nSua fatura venceu.\n\n{rotulo}"
+    _, _, limpo, n = desembrulhar_assinatura_de_sistema(None, None, corpo)
+    assert n == 1
+    miolo = rotulo.strip("[]")
+    assert miolo in limpo and rotulo not in limpo
+    assert encontrar_marcadores(limpo) == []
+
+
+@pytest.mark.parametrize("sigla", ["UCRV", "RMP", "ESM"])
+def test_sigla_da_instituicao_e_desembrulhada(sigla):
+    """Sigla pura da ficha ([UCRV], [RMP], [ESM]) e desembrulhada quando a
+    sigla da instituicao e passada."""
+    corpo = f"Prezado cliente,\n\nSua fatura.\n\n[{sigla}]"
+    _, _, limpo, n = desembrulhar_assinatura_de_sistema(None, None, corpo, sigla=sigla)
+    assert n == 1
+    assert f"[{sigla}]" not in limpo and sigla in limpo
+
+
+def test_acronimo_que_nao_e_a_sigla_nem_sistema_nao_desembrulha():
+    """Blindagem: um acronimo solto em caixa alta que NAO e a sigla da ficha
+    nem palavra de sistema fica barrado (ambiguo demais)."""
+    _, _, limpo, n = desembrulhar_assinatura_de_sistema(
+        None, None, "Texto.\n\n[XYZ]", sigla="CBR"
+    )
+    assert n == 0
+    assert "[XYZ]" in limpo and encontrar_marcadores(limpo)
+
+
+def test_assinatura_de_sistema_no_remetente_e_desembrulhada():
+    rem = "[SISTEMA CBR] <sistema@cbr-documentos.com.br>"
+    novo_rem, _, _, n = desembrulhar_assinatura_de_sistema(rem, None, "corpo", sigla="CBR")
+    assert n == 1
+    assert novo_rem == "SISTEMA CBR <sistema@cbr-documentos.com.br>"
+    assert encontrar_marcadores(novo_rem) == []
+
+
+def test_tag_de_sistema_no_inicio_do_assunto_e_desembrulhada():
+    _, novo_ass, _, n = desembrulhar_assinatura_de_sistema(
+        None, "[AVISO AUTOMÁTICO] Pendência no cadastro", "corpo"
+    )
+    assert n == 1
+    assert novo_ass == "AVISO AUTOMÁTICO Pendência no cadastro"
+
+
+def test_assinatura_com_traco_decorativo_antes():
+    _, _, limpo, n = desembrulhar_assinatura_de_sistema(
+        None, None, "Mensagem automática.\n— [SISTEMA ANR]\nNão responda."
+    )
+    assert n == 1
+    assert "[SISTEMA ANR]" not in limpo and "SISTEMA ANR" in limpo
+
+
+@pytest.mark.parametrize(
+    "placeholder",
+    ["[Nome do Estudante]", "[Seu Nome]", "[Informações de Contato]"],
+)
+def test_placeholder_de_preenchimento_nao_e_desembrulhado(placeholder):
+    """Miolo com minuscula = campo por preencher, nao rotulo de sistema:
+    fica entre colchetes e segue barrado por encontrar_marcadores."""
+    corpo = f"Prezado(a) {placeholder},\n\nTexto."
+    _, _, limpo, n = desembrulhar_assinatura_de_sistema(None, None, corpo)
+    assert n == 0
+    assert placeholder in limpo
+    assert encontrar_marcadores(limpo)  # continua sendo marcador
+
+
+@pytest.mark.parametrize(
+    "placeholder",
+    ["[LINK]", "[SEU NOME]", "[DATA]", "[CLIQUE AQUI]", "[NOME DA EMPRESA]", "[URL]"],
+)
+def test_placeholder_em_caixa_alta_nao_e_desembrulhado(placeholder):
+    """Blindagem do revisor: placeholder em CAIXA ALTA (sem minuscula para
+    distinguir) NAO pode ser desembrulhado so por ser caixa alta -- senao um
+    campo de template passaria pelo detector de marcador. So rotulo de sistema
+    (palavra de sistema ou a sigla) desembrulha; estes nao, e seguem barrados."""
+    corpo = f"Clique aqui:\n\n{placeholder}"
+    _, _, limpo, n = desembrulhar_assinatura_de_sistema(None, None, corpo, sigla="CBR")
+    assert n == 0
+    assert placeholder in limpo
+    assert encontrar_marcadores(limpo)  # continua sendo marcador
+
+
+def test_colchete_no_meio_da_frase_nao_e_desembrulhado():
+    corpo = "Confirme em [SISTEMA] agora para liberar o acesso."
+    _, _, limpo, n = desembrulhar_assinatura_de_sistema(None, None, corpo)
+    assert n == 0
+    assert limpo == corpo  # so linha isolada / inicio de campo conta
+
+
+# ---------------------------------------------------------------------------
+# Item 3: validacao de links (TLD/dominio reservado, porta :0, sem dominio).
+# Exemplos reais da comparacao: "cbr-documentos.example", "confiarnacional.com.br:0".
+# ---------------------------------------------------------------------------
+
+
+def _links(*hrefs):
+    return [LinkRef(text="Acessar", href=h) for h in hrefs]
+
+
+def test_tld_reservado_example_e_invalido():
+    achados = encontrar_links_invalidos(_links("https://cbr-documentos.example/acesso"))
+    assert len(achados) == 1
+    assert achados[0][0] == "https://cbr-documentos.example/acesso"
+    assert achados[0][1] == "tld_reservado"
+
+
+@pytest.mark.parametrize("href", [
+    "https://x.test/a", "http://y.invalid", "https://portal.localhost/login",
+])
+def test_outros_tlds_reservados_sao_invalidos(href):
+    achados = encontrar_links_invalidos(_links(href))
+    assert achados and achados[0][1] in {"tld_reservado", "sem_tld"}
+
+
+def test_dominio_de_exemplo_classico_e_invalido():
+    achados = encontrar_links_invalidos(_links("https://example.com/login", "http://example.org"))
+    assert {m for _, m in achados} == {"dominio_de_exemplo"}
+
+
+def test_porta_zero_e_invalida():
+    achados = encontrar_links_invalidos(_links("https://confiarnacional.com.br:0/doc"))
+    assert len(achados) == 1
+    assert achados[0][1] == "porta_invalida"
+
+
+@pytest.mark.parametrize("href", ["http://semponto", "https://", "", "nao-e-url"])
+def test_href_sem_dominio_plausivel_e_invalido(href):
+    achados = encontrar_links_invalidos(_links(href))
+    assert achados  # algum motivo (vazio, sem_dominio, sem_tld)
+
+
+@pytest.mark.parametrize("href", [
+    "https://vallonta.com.br/login",
+    "https://acesso.vallonta.com.br/portal?id=3",
+    "http://portal.nortega.com.br:8443/x",
+    "https://192.168.0.10/reset",  # IP cru e tecnica real, aceita
+])
+def test_links_plausiveis_nao_sao_rejeitados(href):
+    assert encontrar_links_invalidos(_links(href)) == []
+
+
+def test_example_no_meio_do_nome_nao_e_falso_positivo():
+    # "example-corp.com" e "examples.com.br" sao dominios validos.
+    assert encontrar_links_invalidos(_links("https://example-corp.com/x")) == []
+    assert encontrar_links_invalidos(_links("https://examples.com.br/x")) == []
+
+
+def test_lista_vazia_nada_a_corrigir():
+    assert encontrar_links_invalidos([]) == []
+    assert encontrar_links_invalidos(None) == []
+
+
+@pytest.mark.parametrize(
+    "href",
+    ["mailto:suporte@vallonta.com.br", "tel:+5591999999999", "sms:+5591999999999"],
+)
+def test_links_mailto_tel_sms_sao_validos(href):
+    """Esquemas sem host sao links legitimos -- nao viram 'porta invalida' nem
+    'malformado' (o prefixo http:// so vale para hrefs sem esquema)."""
+    assert encontrar_links_invalidos(_links(href)) == []
