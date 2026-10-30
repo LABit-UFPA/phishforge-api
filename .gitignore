@@ -111,3 +111,11 @@ coverage/
 
 # Saida de `docker compose run --rm phishforge-export` (dados gerados).
 exports/
+
+# Dataset gerado (dual-use/restrito): os e-mails de phishing nao vao ao repo.
+# Os docs (README.md, recalibracao_dificuldade.md) e o tooling ficam versionados.
+dataset/exports/
+dataset/*.jsonl
+dataset/registro_lotes_v31.csv
+dataset/run_completo.log
+dataset/backups/
