@@ -242,6 +242,9 @@ class Container(containers.DeclarativeContainer):
         response_generator=response_generator,
         embedding_client=embedding_client_openai,
         dedup_threshold=config.DEDUP_SIMILARITY_THRESHOLD,
+        concurrency=config.BATCH_CONCURRENCY,
+        backoff_base_seconds=config.BATCH_BACKOFF_BASE_SECONDS,
+        max_tentativas_taxa=config.BATCH_MAX_TENTATIVAS_TAXA,
     )
 
     pipeline = providers.Factory(

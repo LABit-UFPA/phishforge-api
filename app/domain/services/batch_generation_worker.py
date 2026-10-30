@@ -1,7 +1,8 @@
+import asyncio
 import json
 import logging
 import random
-from typing import List, Optional, Sequence, Set, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from uuid import UUID
 
 from app.domain.models.channel import Channel
@@ -9,6 +10,7 @@ from app.domain.models.generation_job import JobStatus
 from app.domain.models.instituicao_ficticia import InstituicaoFicticia
 from app.core.reproducibilidade import commit_do_git
 from app.domain.models.phishing_email import PhishingEmail
+from app.domain.models.variation_spec import VariationSpec
 from app.domain.services.generation_pipeline import GenerationPipeline
 from app.domain.services.item_validation import normalizar_assunto
 from app.domain.services.llm_factory import descrever_saida_estruturada
@@ -36,6 +38,33 @@ RESULTADO_REPETIDO = "repetido"
 # Parecido demais na ultima tentativa; item descartado.
 RESULTADO_DESCARTADO = "descartado"
 RESULTADO_FALHA = "falha"
+
+
+def _e_erro_de_taxa(exc: BaseException) -> bool:
+    """True quando a excecao e um limite de taxa (429) ou sobrecarga (529) do
+    provider -- os unicos erros em que vale esperar e tentar de novo. Detecta
+    por duck-typing (status_code na excecao, na causa ou na resposta) e pelo
+    nome da classe, para nao depender de importar o SDK de um provider que o
+    ambiente pode nem ter instalado (anthropic quando so se usa OpenAI)."""
+    vistos = set()
+    pilha = [exc]
+    while pilha:
+        e = pilha.pop()
+        if e is None or id(e) in vistos:
+            continue
+        vistos.add(id(e))
+        for code in (
+            getattr(e, "status_code", None),
+            getattr(getattr(e, "response", None), "status_code", None),
+        ):
+            if code in (429, 529):
+                return True
+        nome = type(e).__name__.lower()
+        if "ratelimit" in nome or "overloaded" in nome:
+            return True
+        pilha.append(getattr(e, "__cause__", None))
+        pilha.append(getattr(e, "__context__", None))
+    return False
 
 
 def _cosine_similarity(a: List[float], b: List[float]) -> float:
@@ -87,6 +116,9 @@ class BatchGenerationWorker:
         response_generator: ResponseGenerator,
         embedding_client,
         dedup_threshold: float,
+        concurrency: int = 1,
+        backoff_base_seconds: float = 2.0,
+        max_tentativas_taxa: int = 5,
     ):
         self._job_repository = job_repository
         self._phishing_service = phishing_service
@@ -94,6 +126,12 @@ class BatchGenerationWorker:
         self._response_generator = response_generator
         self._embedding_client = embedding_client
         self._dedup_threshold = dedup_threshold
+        # Concorrencia da geracao (item 6). Default 1 = serial (comportamento
+        # antigo), para nao surpreender quem constroi o worker direto (testes).
+        # O container passa BATCH_CONCURRENCY (8 em producao).
+        self._concurrency = max(1, concurrency)
+        self._backoff_base_seconds = backoff_base_seconds
+        self._max_tentativas_taxa = max(1, max_tentativas_taxa)
 
     async def run(
         self,
@@ -182,113 +220,97 @@ class BatchGenerationWorker:
         }
         await self._job_repository.mark_em_progresso(job_id, distribution, run_metadata)
 
-        item_ids: List[UUID] = []
-        failures: List[dict] = []
-        total_discarded = 0
-        attempt_log: List[dict] = []
+        # --- Geracao CONCORRENTE dos itens (item 6 do plano de producao) ---
+        # Os "slots" sao a composicao deterministica (dificuldade x
+        # malicioso/legitimo, mesma da issue #3). A ficha inicial de cada slot
+        # e pre-sorteada EM ORDEM (serial): o balanceamento de instituicao e a
+        # atribuicao primaria ficam deterministicos mesmo com a geracao fora de
+        # ordem. A geracao em si (cara) roda em paralelo, limitada por semaforo.
+        #
+        # LIMITE de determinismo (documentar no artigo): a DECISAO de dedup
+        # depende da ordem de TERMINO das geracoes, entao, entre dois itens
+        # parecidos, qual fica e qual e descartado pode variar de uma execucao
+        # para outra. A composicao, as fichas e a saida final (em ordem de slot)
+        # sao deterministicas; a escolha do par duplicado nao -- e isso ja valia
+        # para a geracao Anthropic, que nao tem seed.
+        slots: List[Tuple[int, str, bool]] = []
         numero_item = 0
-
         for difficulty_value, count in distribution.items():
-            # Mesma composicao malicioso/legitimo da issue #3: dentro
-            # de cada dificuldade, count se divide segundo
-            # malicious_ratio.
             n_malicious = round(count * malicious_ratio)
             n_legitimate = count - n_malicious
-            itens_do_nivel = [True] * n_malicious + [False] * n_legitimate
-
-            for is_malicious in itens_do_nivel:
+            for is_malicious in [True] * n_malicious + [False] * n_legitimate:
                 numero_item += 1
-                tentativas_do_item: List[dict] = []
-                try:
-                    if channel == Channel.EMAIL.value:
-                        draft, embedding = await self._generate_com_dedup(
-                            difficulty_value=difficulty_value,
-                            is_malicious=is_malicious,
-                            generation_context=built.generation_context,
-                            fused_context=built.fused_context,
-                            accepted_embeddings=accepted_embeddings,
-                            accepted_assuntos=accepted_assuntos,
-                            sampler=sampler,
-                            tentativas=tentativas_do_item,
-                        )
-                        # A ficha usada e as pistas-alvo vem no proprio
-                        # draft (target_cues/variation_spec): se o item foi
-                        # gerado de novo, a ficha pode ser outra.
-                        phishing_example = (
-                            None
-                            if draft is None
-                            else PhishingEmail(
-                                **draft.model_dump(),
-                                nivel=difficulty_value,
-                                is_malicious=is_malicious,
-                            )
-                        )
-                    else:
-                        resultado, embedding = await self._generate_channel_com_dedup(
-                            channel=channel,
-                            difficulty_value=difficulty_value,
-                            is_malicious=is_malicious,
-                            generation_context=built.generation_context,
-                            fused_context=built.fused_context,
-                            accepted_embeddings=accepted_embeddings,
-                            tentativas=tentativas_do_item,
-                        )
-                        phishing_example = (
-                            None
-                            if resultado is None
-                            else PhishingEmail(
-                                channel=Channel(channel),
-                                content_json=resultado["content_json"],
-                                explicacao=resultado["explicacao"],
-                                categoria=resultado["categoria"],
-                                nivel=difficulty_value,
-                                is_malicious=is_malicious,
-                            )
-                        )
+                slots.append((numero_item, difficulty_value, is_malicious))
 
-                    if phishing_example is None:
-                        total_discarded += 1
-                    else:
-                        item_id = await self._phishing_service.create_email(phishing_example)
-                        item_ids.append(item_id)
-                        accepted_embeddings.append(embedding)
-                        if phishing_example.assunto:
-                            accepted_assuntos.add(normalizar_assunto(phishing_example.assunto))
-                except Exception as e:
-                    logger.error(
-                        f"Job {job_id}: falha ao gerar item {difficulty_value} "
-                        f"(is_malicious={is_malicious}): {e}"
-                    )
-                    failures.append(
-                        {
-                            "difficulty": difficulty_value,
-                            "is_malicious": is_malicious,
-                            "error": str(e),
-                        }
-                    )
-                    tentativas_do_item.append(
-                        {
-                            "tentativa": len(tentativas_do_item) + 1,
-                            "similaridade_max": None,
-                            "resultado": RESULTADO_FALHA,
-                        }
-                    )
+        fichas_iniciais: Dict[int, VariationSpec] = {}
+        if channel == Channel.EMAIL.value:
+            for numero, difficulty_value, is_malicious in slots:
+                fichas_iniciais[numero] = sampler.sortear(difficulty_value, is_malicious)
 
-                for tentativa in tentativas_do_item:
-                    attempt_log.append({"item": numero_item, "nivel": difficulty_value, **tentativa})
+        # Estado compartilhado. So e mutado em secoes SINCRONAS (sem await no
+        # meio) -- atomicas no asyncio (uma thread so), entao a dedup e a
+        # contagem ficam corretas sem lock. O lock abaixo serializa apenas as
+        # GRAVACOES de progresso (I/O) para elas nao se atropelarem.
+        resultados_por_slot: Dict[int, dict] = {}
+        progresso_lock = asyncio.Lock()
+        semaforo = asyncio.Semaphore(self._concurrency)
 
-                # Persistido a cada item, nao so no final -- e o que
-                # faz o polling mostrar progresso parcial de um lote
-                # ainda rodando.
-                await self._job_repository.update_progress(
-                    job_id,
-                    len(item_ids),
-                    len(failures),
-                    total_discarded,
-                    item_ids,
-                    failures,
-                    attempt_log,
+        def _log_do_slot(numero: int, r: dict) -> List[dict]:
+            return [{"item": numero, "nivel": r["nivel"], **t} for t in r["tentativas"]]
+
+        async def _rodar_slot(numero: int, difficulty_value: str, is_malicious: bool) -> None:
+            async with semaforo:
+                resultado = await self._processar_item(
+                    numero_item=numero,
+                    difficulty_value=difficulty_value,
+                    is_malicious=is_malicious,
+                    channel=channel,
+                    built=built,
+                    sampler=sampler,
+                    ficha_inicial=fichas_iniciais.get(numero),
+                    accepted_embeddings=accepted_embeddings,
+                    accepted_assuntos=accepted_assuntos,
                 )
+            # Secao sincrona (atomica no asyncio): guarda o resultado do slot.
+            resultados_por_slot[numero] = resultado
+            # Progresso parcial para o polling (o estado final, apos o gather,
+            # fica em ordem de slot). Snapshot montado DENTRO do lock, para a
+            # ultima gravacao ser sempre a mais completa.
+            async with progresso_lock:
+                feitos = list(resultados_por_slot.items())
+                ids = [r["item_id"] for _, r in feitos if r["status"] == RESULTADO_ACEITO]
+                falhas = [r["failure"] for _, r in feitos if r["status"] == RESULTADO_FALHA]
+                descartados = sum(1 for _, r in feitos if r["status"] == RESULTADO_DESCARTADO)
+                log = sorted(
+                    (reg for n, r in feitos for reg in _log_do_slot(n, r)),
+                    key=lambda t: (t["item"], t["tentativa"]),
+                )
+                await self._job_repository.update_progress(
+                    job_id, len(ids), len(falhas), descartados, ids, falhas, log
+                )
+
+        await asyncio.gather(*(_rodar_slot(*slot) for slot in slots))
+
+        # Estado final em ORDEM DE SLOT (deterministico, independente de qual
+        # item terminou antes).
+        item_ids: List[UUID] = []
+        failures: List[dict] = []
+        attempt_log: List[dict] = []
+        total_discarded = 0
+        for numero, difficulty_value, is_malicious in slots:
+            r = resultados_por_slot[numero]
+            attempt_log.extend(_log_do_slot(numero, r))
+            if r["status"] == RESULTADO_ACEITO:
+                item_ids.append(r["item_id"])
+            elif r["status"] == RESULTADO_FALHA:
+                failures.append(r["failure"])
+            else:
+                total_discarded += 1
+        attempt_log.sort(key=lambda t: (t["item"], t["tentativa"]))
+
+        await self._job_repository.update_progress(
+            job_id, len(item_ids), len(failures), total_discarded, item_ids, failures, attempt_log
+        )
 
         if len(item_ids) == 0:
             status = JobStatus.FALHOU
@@ -372,94 +394,174 @@ class BatchGenerationWorker:
         tentativas.append(registro)
         return resultado
 
-    async def _generate_com_dedup(
+    async def _gerar_com_backoff(
+        self, func: Callable[..., Awaitable], **kwargs
+    ):
+        """Chama `func(**kwargs)` (a geracao do item), com backoff exponencial
+        quando o provider responde 429 (limite de taxa) ou 529 (sobrecarga).
+        Espera BASE, 2*BASE, 4*BASE... ate `max_tentativas_taxa`; depois o erro
+        PROPAGA (visivel -- o item falha, nao e silenciado). Qualquer outro erro
+        (inclusive ItemInvalidoError apos as regeneracoes) propaga na hora: nao
+        e transitorio, esperar nao ajuda."""
+        for tentativa in range(1, self._max_tentativas_taxa + 1):
+            try:
+                return await func(**kwargs)
+            except Exception as e:  # noqa: BLE001 -- reclassifica abaixo
+                if _e_erro_de_taxa(e) and tentativa < self._max_tentativas_taxa:
+                    espera = self._backoff_base_seconds * (2 ** (tentativa - 1))
+                    logger.warning(
+                        "Provider 429/529 (tentativa %d/%d) -- aguardando %.1fs e tentando de novo",
+                        tentativa,
+                        self._max_tentativas_taxa,
+                        espera,
+                    )
+                    await asyncio.sleep(espera)
+                    continue
+                raise
+
+    async def _processar_item(
         self,
+        *,
+        numero_item: int,
         difficulty_value: str,
         is_malicious: bool,
-        generation_context: str,
-        fused_context: str,
+        channel: str,
+        built,
+        sampler: VariationSampler,
+        ficha_inicial: Optional[VariationSpec],
         accepted_embeddings: List[List[float]],
         accepted_assuntos: Set[str],
-        sampler: VariationSampler,
-        tentativas: List[dict],
-    ):
-        """Gera um item; se ficar parecido demais com outro ja aceito
-        (no lote ou nos lotes anteriores indicados), ou com o MESMO
-        assunto de um deles (piloto 3: assuntos identicos passavam pela
-        similaridade de assunto + corpo), tenta de novo ate
-        MAX_DEDUP_RETRIES vezes. Se continuar repetido, devolve
-        (None, None) -- descartado, nao e falha de geracao.
+    ) -> dict:
+        """Gera UM item do lote (com dedup e backoff) e devolve um dict de
+        resultado: status aceito/descartado/falha, tentativas, e item_id (se
+        aceito) ou failure (se falha). Nunca levanta -- a falha de um item NAO
+        derruba o lote (o chamador roda varios slots em paralelo).
 
-        Cada tentativa usa uma ficha NOVA (proxima do sorteio
-        balanceado): repetir a mesma ficha tenderia a reproduzir o
-        mesmo item. O gerador tambem recebe o sorteador, para trocar de
-        ficha quando regenera um item invalido; a ficha de fato usada
-        volta no draft.
-
-        Excecao de geracao (erro de LLM de verdade, ou item que
-        continuou invalido) NAO e capturada aqui: propaga para o
-        chamador tratar como falha, distinto de descarte por
-        duplicidade -- sao categorias diferentes de problema.
+        Concorrencia: a decisao de dedup (comparar com os ja aceitos e, se
+        aceitar, RESERVAR) roda numa secao SINCRONA sem await -- atomica no
+        asyncio -- entao dois itens que terminam ao mesmo tempo nao se aceitam
+        como duplicatas um do outro. So a geracao (cara) e a persistencia rodam
+        concorrentes entre itens.
         """
+        tentativas: List[dict] = []
+        resultado_base = {"nivel": difficulty_value, "tentativas": tentativas}
+        try:
+            for numero in range(1, MAX_DEDUP_RETRIES + 2):
+                if channel == Channel.EMAIL.value:
+                    # Ficha inicial pre-sorteada (ordem/balanceamento
+                    # deterministicos); nas retentativas de dedup, uma ficha
+                    # nova (repetir tenderia a reproduzir o mesmo item).
+                    ficha = (
+                        ficha_inicial
+                        if numero == 1 and ficha_inicial is not None
+                        else sampler.sortear(difficulty_value, is_malicious)
+                    )
 
-        def sortear():
-            return sampler.sortear(difficulty_value, is_malicious)
+                    def sortear():
+                        return sampler.sortear(difficulty_value, is_malicious)
 
-        for numero in range(1, MAX_DEDUP_RETRIES + 2):
-            draft = await self._response_generator.generate_response(
-                difficulty=difficulty_value,
-                context=generation_context,
-                relevant_docs=fused_context,
-                is_malicious=is_malicious,
-                variacao=sortear(),
-                sortear_variacao=sortear,
-            )
-            embedding = self._embedding_client.embed(
-                _texto_email_para_embedding(draft.assunto, draft.conteudo)
-            )
-            similaridade = self._maior_similaridade(embedding, accepted_embeddings)
-            pistas_alvo = draft.target_cues if draft.target_cues is not None else []
-            assunto_repetido = normalizar_assunto(draft.assunto) in accepted_assuntos
-            if (
-                self._registrar_tentativa(
-                    tentativas, numero, similaridade, pistas_alvo, assunto_repetido
+                    draft = await self._gerar_com_backoff(
+                        self._response_generator.generate_response,
+                        difficulty=difficulty_value,
+                        context=built.generation_context,
+                        relevant_docs=built.fused_context,
+                        is_malicious=is_malicious,
+                        variacao=ficha,
+                        sortear_variacao=sortear,
+                    )
+                    texto_embedding = _texto_email_para_embedding(draft.assunto, draft.conteudo)
+                    assunto = draft.assunto
+                    pistas_alvo = draft.target_cues if draft.target_cues is not None else []
+                else:
+                    draft = await self._gerar_com_backoff(
+                        self._response_generator.generate_channel_item,
+                        channel=channel,
+                        difficulty=difficulty_value,
+                        context=built.generation_context,
+                        relevant_docs=built.fused_context,
+                        is_malicious=is_malicious,
+                    )
+                    texto_embedding = _texto_para_embedding(channel, draft["content_json"])
+                    assunto = None
+                    pistas_alvo = []
+
+                embedding = self._embedding_client.embed(texto_embedding)
+
+                # --- SECAO SINCRONA (sem await) = atomica no asyncio ---------
+                similaridade = self._maior_similaridade(embedding, accepted_embeddings)
+                assunto_repetido = (
+                    assunto is not None and normalizar_assunto(assunto) in accepted_assuntos
                 )
-                == RESULTADO_ACEITO
-            ):
-                return draft, embedding
+                aceito = (
+                    self._registrar_tentativa(
+                        tentativas, numero, similaridade, pistas_alvo, assunto_repetido
+                    )
+                    == RESULTADO_ACEITO
+                )
+                assunto_norm = normalizar_assunto(assunto) if assunto is not None else None
+                if aceito:
+                    # Reserva ANTES de qualquer await: o proximo item ja ve
+                    # este na dedup.
+                    accepted_embeddings.append(embedding)
+                    if assunto_norm is not None:
+                        accepted_assuntos.add(assunto_norm)
+                # --- fim da secao sincrona -----------------------------------
 
-        return None, None
+                if aceito:
+                    if channel == Channel.EMAIL.value:
+                        item = PhishingEmail(
+                            **draft.model_dump(),
+                            nivel=difficulty_value,
+                            is_malicious=is_malicious,
+                        )
+                    else:
+                        item = PhishingEmail(
+                            channel=Channel(channel),
+                            content_json=draft["content_json"],
+                            explicacao=draft["explicacao"],
+                            categoria=draft["categoria"],
+                            nivel=difficulty_value,
+                            is_malicious=is_malicious,
+                        )
+                    try:
+                        item_id = await self._phishing_service.create_email(item)
+                    except Exception:
+                        # DESFAZ a reserva se a gravacao falhar: um embedding/
+                        # assunto "fantasma" de um item que nao foi gravado faria
+                        # itens seguintes serem descartados como duplicata de algo
+                        # inexistente. (No modo serial antigo o append vinha depois
+                        # do create_email; aqui ele vem antes, pela dedup atomica.)
+                        try:
+                            accepted_embeddings.remove(embedding)
+                        except ValueError:
+                            pass
+                        if assunto_norm is not None:
+                            accepted_assuntos.discard(assunto_norm)
+                        raise
+                    return {**resultado_base, "status": RESULTADO_ACEITO, "item_id": item_id}
 
-    async def _generate_channel_com_dedup(
-        self,
-        channel: str,
-        difficulty_value: str,
-        is_malicious: bool,
-        generation_context: str,
-        fused_context: str,
-        accepted_embeddings: List[List[float]],
-        tentativas: List[dict],
-    ) -> tuple[Optional[dict], Optional[List[float]]]:
-        """Equivalente de `_generate_com_dedup` para os canais novos
-        (issue #6) -- mesma logica de retry/descarte, mas chamando
-        `generate_channel_item` e derivando o texto do embedding de
-        `content_json` via `_texto_para_embedding` (o campo de texto
-        livre varia por canal; email usa `draft.conteudo` diretamente).
-        Sem ficha: os prompts dos canais novos ainda nao a recebem.
-        """
-        for numero in range(1, MAX_DEDUP_RETRIES + 2):
-            resultado = await self._response_generator.generate_channel_item(
-                channel=channel,
-                difficulty=difficulty_value,
-                context=generation_context,
-                relevant_docs=fused_context,
-                is_malicious=is_malicious,
+            return {**resultado_base, "status": RESULTADO_DESCARTADO}
+        except Exception as e:  # noqa: BLE001 -- falha de um item nao derruba o lote
+            logger.error(
+                "Falha ao gerar item %d (%s, is_malicious=%s): %s",
+                numero_item,
+                difficulty_value,
+                is_malicious,
+                e,
             )
-            embedding = self._embedding_client.embed(
-                _texto_para_embedding(channel, resultado["content_json"])
+            tentativas.append(
+                {
+                    "tentativa": len(tentativas) + 1,
+                    "similaridade_max": None,
+                    "resultado": RESULTADO_FALHA,
+                }
             )
-            similaridade = self._maior_similaridade(embedding, accepted_embeddings)
-            if self._registrar_tentativa(tentativas, numero, similaridade) == RESULTADO_ACEITO:
-                return resultado, embedding
-
-        return None, None
+            return {
+                **resultado_base,
+                "status": RESULTADO_FALHA,
+                "failure": {
+                    "difficulty": difficulty_value,
+                    "is_malicious": is_malicious,
+                    "error": str(e),
+                },
+            }
